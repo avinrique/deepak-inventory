@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
+inventory_data/
+*.xlsx
+.DS_Store
+.venv/
+venv/
