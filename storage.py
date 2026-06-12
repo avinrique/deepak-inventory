@@ -5,9 +5,10 @@ All Excel reading/writing and business rules live here so they can be tested
 without a GUI. The UI (``inventory_app.py``) only calls these functions.
 
 A single bill may contain many products. Each product becomes one row in the
-sales/purchases workbook, all sharing the same Bill No. Bill-level figures
-(ECS, VAT %, VAT Amount, Total) are written on the bill's FIRST row only, so
-summing a column never double-counts a bill.
+sales/purchases workbook, all sharing the same Bill No. Per-line figures
+(Quantity, Rate, Amount = Quantity x Rate) differ per row; bill-level figures
+(ECS, VAT %, VAT Amount, Total) are repeated on every row of the bill so each
+row is fully self-contained and nothing reads as blank.
 
 Files created next to the app (or next to the .exe when frozen):
     sales.xlsx       - every sale (one row per product line)
@@ -50,7 +51,7 @@ PARTY_FILE = os.path.join(DATA_DIR, "party.xlsx")
 
 TXN_HEADERS = [
     "Date", "Bill No", "PAN No", "Vendor Name", "Vendor Address",
-    "Product Name", "Quantity", "Amount",
+    "Product Name", "Quantity", "Rate", "Amount",
     "ECS", "VAT %", "VAT Amount", "Total",
 ]
 STOCK_HEADERS = ["Product Name", "Quantity"]
@@ -96,21 +97,37 @@ def append_bill(path: str, header: dict, lines: list,
     """Write a multi-product bill: one row per product line.
 
     ``header`` has date/bill/pan/vendor/address. ``lines`` is a list of dicts
-    with product/qty/amount. Bill-level figures go on the first row only.
+    with product/qty/rate/amount (amount = qty * rate). Bill-level figures
+    (ECS, VAT %, VAT Amount, Total) are repeated on every row so each row is
+    self-contained.
     """
     wb, ws = _load(path, TXN_HEADERS)
-    for i, ln in enumerate(lines):
-        first = (i == 0)
+    for ln in lines:
         ws.append([
             header["date"], header["bill"], header["pan"],
             header["vendor"], header["address"],
-            ln["product"], ln["qty"], ln["amount"],
-            ecs if first else "",
-            vat_pct if first else "",
-            vat_amount if first else "",
-            total if first else "",
+            ln["product"], ln["qty"], ln["rate"], ln["amount"],
+            ecs, vat_pct, vat_amount, total,
         ])
     wb.save(path)
+
+
+def product_names() -> list:
+    """Distinct product names currently known in stock (for the dropdown)."""
+    _ensure_file(STOCK_FILE, STOCK_HEADERS)
+    wb = load_workbook(STOCK_FILE)
+    ws = wb.active
+    names = []
+    seen = set()
+    for r in range(2, ws.max_row + 1):
+        name = ws.cell(row=r, column=1).value
+        if name is not None:
+            text = str(name).strip()
+            key = text.lower()
+            if text and key not in seen:
+                seen.add(key)
+                names.append(text)
+    return sorted(names, key=str.lower)
 
 
 def update_stock(product: str, qty: float, add: bool) -> float:
