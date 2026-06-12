@@ -7,8 +7,8 @@ without a GUI. The UI (``inventory_app.py``) only calls these functions.
 A single bill may contain many products. Each product becomes one row in the
 sales/purchases workbook, all sharing the same Bill No. Per-line figures
 (Quantity, Rate, Amount = Quantity x Rate) differ per row; bill-level figures
-(ECS, VAT %, VAT Amount, Total) are repeated on every row of the bill so each
-row is fully self-contained and nothing reads as blank.
+(Subtotal, ECS, VAT %, VAT Amount, Total) are repeated on every row of the
+bill so each row is fully self-contained and nothing reads as blank.
 
 Files created next to the app (or next to the .exe when frozen):
     sales.xlsx       - every sale (one row per product line)
@@ -19,10 +19,22 @@ Files created next to the app (or next to the .exe when frozen):
 
 import os
 import sys
+import math
 import platform
 import subprocess
 
 from openpyxl import Workbook, load_workbook
+
+
+# --------------------------------------------------------------------------- #
+# Errors
+# --------------------------------------------------------------------------- #
+class FileLockedError(Exception):
+    """A workbook could not be written (usually open in Excel/LibreOffice)."""
+
+    def __init__(self, path):
+        self.path = path
+        super().__init__(path)
 
 
 # --------------------------------------------------------------------------- #
@@ -52,7 +64,7 @@ PARTY_FILE = os.path.join(DATA_DIR, "party.xlsx")
 TXN_HEADERS = [
     "Date", "Bill No", "PAN No", "Vendor Name", "Vendor Address",
     "Product Name", "Quantity", "Rate", "Amount",
-    "ECS", "VAT %", "VAT Amount", "Total",
+    "Subtotal", "ECS", "VAT %", "VAT Amount", "Total",
 ]
 STOCK_HEADERS = ["Product Name", "Quantity"]
 PARTY_HEADERS = [
@@ -62,8 +74,16 @@ PARTY_HEADERS = [
 
 
 # --------------------------------------------------------------------------- #
-# Excel helpers
+# Low-level helpers
 # --------------------------------------------------------------------------- #
+def _save(wb, path: str) -> None:
+    """Save a workbook, turning a lock/IO error into FileLockedError."""
+    try:
+        wb.save(path)
+    except (PermissionError, OSError) as exc:
+        raise FileLockedError(path) from exc
+
+
 def _ensure_file(path: str, headers: list) -> None:
     """Create the workbook with a header row if it does not exist yet."""
     if os.path.exists(path):
@@ -71,7 +91,7 @@ def _ensure_file(path: str, headers: list) -> None:
     wb = Workbook()
     ws = wb.active
     ws.append(headers)
-    wb.save(path)
+    _save(wb, path)
 
 
 def _load(path: str, headers: list):
@@ -81,53 +101,68 @@ def _load(path: str, headers: list):
     return wb, wb.active
 
 
+def assert_writable(*paths) -> None:
+    """Raise FileLockedError if any existing file is locked for writing.
+
+    Lets a commit fail BEFORE it writes anything, so a workbook left open in
+    Excel/LibreOffice can never cause a half-applied bill.
+    """
+    for p in paths:
+        if os.path.exists(p):
+            try:
+                with open(p, "r+b"):
+                    pass
+            except (PermissionError, OSError) as exc:
+                raise FileLockedError(p) from exc
+
+
+def _safe_text(value) -> str:
+    """Neutralize spreadsheet formula injection in a free-text cell.
+
+    A value beginning with = + - @ is prefixed with ' so Excel/LibreOffice
+    stores it as literal text rather than evaluating it as a formula.
+    """
+    s = "" if value is None else str(value)
+    return "'" + s if s[:1] in ("=", "+", "-", "@") else s
+
+
 def num(value) -> float:
-    """Parse a value into a float, treating blanks / junk as 0."""
+    """Parse a value into a float; blanks/junk/non-finite become 0.
+
+    A trailing percent sign and thousands commas are tolerated, so "13%" and
+    "1,030" parse as 13 and 1030.
+    """
     if value is None:
         return 0.0
     try:
-        return float(str(value).replace(",", "").strip() or 0)
+        result = float(str(value).replace(",", "").replace("%", "").strip() or 0)
     except ValueError:
         return 0.0
+    return result if math.isfinite(result) else 0.0
 
 
-def append_bill(path: str, header: dict, lines: list,
+# --------------------------------------------------------------------------- #
+# Writes
+# --------------------------------------------------------------------------- #
+def append_bill(path: str, header: dict, lines: list, subtotal: float,
                 ecs: float, vat_pct: float, vat_amount: float,
                 total: float) -> None:
     """Write a multi-product bill: one row per product line.
 
     ``header`` has date/bill/pan/vendor/address. ``lines`` is a list of dicts
-    with product/qty/rate/amount (amount = qty * rate). Bill-level figures
-    (ECS, VAT %, VAT Amount, Total) are repeated on every row so each row is
-    self-contained.
+    with product/qty/rate/amount. Bill-level figures (Subtotal, ECS, VAT %,
+    VAT Amount, Total) are repeated on every row so each row is self-contained.
     """
     wb, ws = _load(path, TXN_HEADERS)
     for ln in lines:
         ws.append([
-            header["date"], header["bill"], header["pan"],
-            header["vendor"], header["address"],
-            ln["product"], ln["qty"], ln["rate"], ln["amount"],
-            ecs, vat_pct, vat_amount, total,
+            _safe_text(header["date"]), _safe_text(header["bill"]),
+            _safe_text(header["pan"]), _safe_text(header["vendor"]),
+            _safe_text(header["address"]),
+            _safe_text(ln["product"]), ln["qty"], ln["rate"], ln["amount"],
+            subtotal, ecs, vat_pct, vat_amount, total,
         ])
-    wb.save(path)
-
-
-def product_names() -> list:
-    """Distinct product names currently known in stock (for the dropdown)."""
-    _ensure_file(STOCK_FILE, STOCK_HEADERS)
-    wb = load_workbook(STOCK_FILE)
-    ws = wb.active
-    names = []
-    seen = set()
-    for r in range(2, ws.max_row + 1):
-        name = ws.cell(row=r, column=1).value
-        if name is not None:
-            text = str(name).strip()
-            key = text.lower()
-            if text and key not in seen:
-                seen.add(key)
-                names.append(text)
-    return sorted(names, key=str.lower)
+    _save(wb, path)
 
 
 def update_stock(product: str, qty: float, add: bool) -> float:
@@ -144,11 +179,11 @@ def update_stock(product: str, qty: float, add: bool) -> float:
             current = num(ws.cell(row=r, column=2).value)
             new_qty = current + qty if add else current - qty
             ws.cell(row=r, column=2, value=new_qty)
-            wb.save(STOCK_FILE)
+            _save(wb, STOCK_FILE)
             return new_qty
     new_qty = qty if add else -qty
-    ws.append([product.strip(), new_qty])
-    wb.save(STOCK_FILE)
+    ws.append([_safe_text(product.strip()), new_qty])
+    _save(wb, STOCK_FILE)
     return new_qty
 
 
@@ -167,21 +202,32 @@ def stock_on_hand(product: str) -> float:
 
 def update_party(pan: str, name: str, address: str, total: float,
                  is_sale: bool) -> None:
-    """Update a party's running totals. Keyed by PAN (falls back to name)."""
-    wb, ws = _load(PARTY_FILE, PARTY_HEADERS)
+    """Update a party's running totals.
+
+    Keyed by PAN when present; otherwise by Vendor Name + Address together
+    (so two different blank-PAN vendors are not merged). A bill with neither
+    PAN nor name is bucketed under a single "Unknown" party.
+    """
     key_pan = pan.strip().lower()
     key_name = name.strip().lower()
+    key_addr = address.strip().lower()
+    if not key_pan and not key_name:
+        name, key_name = "Unknown", "unknown"
 
-    def matches(row_pan, row_name) -> bool:
+    wb, ws = _load(PARTY_FILE, PARTY_HEADERS)
+
+    def matches(row_pan, row_name, row_addr) -> bool:
         rp = str(row_pan).strip().lower() if row_pan is not None else ""
         rn = str(row_name).strip().lower() if row_name is not None else ""
+        ra = str(row_addr).strip().lower() if row_addr is not None else ""
         if key_pan:
             return rp == key_pan
-        return rn == key_name and rn != ""
+        return rn == key_name and ra == key_addr
 
     for r in range(2, ws.max_row + 1):
         if matches(ws.cell(row=r, column=1).value,
-                   ws.cell(row=r, column=2).value):
+                   ws.cell(row=r, column=2).value,
+                   ws.cell(row=r, column=3).value):
             sales = num(ws.cell(row=r, column=4).value)
             purch = num(ws.cell(row=r, column=5).value)
             if is_sale:
@@ -192,19 +238,22 @@ def update_party(pan: str, name: str, address: str, total: float,
             ws.cell(row=r, column=5, value=purch)
             ws.cell(row=r, column=6, value=sales + purch)
             if name.strip():
-                ws.cell(row=r, column=2, value=name.strip())
+                ws.cell(row=r, column=2, value=_safe_text(name.strip()))
             if address.strip():
-                ws.cell(row=r, column=3, value=address.strip())
-            wb.save(PARTY_FILE)
+                ws.cell(row=r, column=3, value=_safe_text(address.strip()))
+            _save(wb, PARTY_FILE)
             return
 
     sales = total if is_sale else 0.0
     purch = 0.0 if is_sale else total
-    ws.append([pan.strip(), name.strip(), address.strip(),
-               sales, purch, sales + purch])
-    wb.save(PARTY_FILE)
+    ws.append([_safe_text(pan.strip()), _safe_text(name.strip()),
+               _safe_text(address.strip()), sales, purch, sales + purch])
+    _save(wb, PARTY_FILE)
 
 
+# --------------------------------------------------------------------------- #
+# Reads
+# --------------------------------------------------------------------------- #
 def read_rows(path: str, headers: list) -> list:
     """Return all data rows (excluding the header) as lists."""
     _ensure_file(path, headers)
@@ -218,13 +267,52 @@ def read_rows(path: str, headers: list) -> list:
     return rows
 
 
-def open_file(path: str, headers: list) -> None:
-    """Open a workbook in the OS default app (Excel / Numbers)."""
-    _ensure_file(path, headers)
-    system = platform.system()
-    if system == "Windows":
-        os.startfile(path)  # type: ignore[attr-defined]
-    elif system == "Darwin":
-        subprocess.run(["open", path], check=False)
-    else:
-        subprocess.run(["xdg-open", path], check=False)
+def product_names() -> list:
+    """Distinct product names currently known in stock (for the dropdown)."""
+    _ensure_file(STOCK_FILE, STOCK_HEADERS)
+    wb = load_workbook(STOCK_FILE)
+    ws = wb.active
+    names, seen = [], set()
+    for r in range(2, ws.max_row + 1):
+        name = ws.cell(row=r, column=1).value
+        if name is not None:
+            text = str(name).strip()
+            key = text.lower()
+            if text and key not in seen:
+                seen.add(key)
+                names.append(text)
+    return sorted(names, key=str.lower)
+
+
+def bill_exists(path: str, bill_no: str) -> bool:
+    """True if a non-blank Bill No already appears in this ledger."""
+    bill_no = (bill_no or "").strip()
+    if not bill_no:
+        return False
+    _ensure_file(path, TXN_HEADERS)
+    ws = load_workbook(path).active
+    for r in range(2, ws.max_row + 1):
+        v = ws.cell(row=r, column=2).value  # "Bill No" column
+        if v is not None and str(v).strip().lower() == bill_no.lower():
+            return True
+    return False
+
+
+def open_file(path: str, headers: list):
+    """Open a workbook in the OS default app. Returns (ok, error_message)."""
+    try:
+        _ensure_file(path, headers)
+        system = platform.system()
+        if system == "Windows":
+            os.startfile(path)  # type: ignore[attr-defined]
+        elif system == "Darwin":
+            res = subprocess.run(["open", path])
+            if res.returncode != 0:
+                return False, f"'open' exited with code {res.returncode}."
+        else:
+            res = subprocess.run(["xdg-open", path])
+            if res.returncode != 0:
+                return False, f"'xdg-open' exited with code {res.returncode}."
+        return True, ""
+    except Exception as exc:  # noqa: BLE001 - surface any launch/IO failure
+        return False, str(exc)
