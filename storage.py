@@ -4,15 +4,22 @@ Storage layer for the Inventory Management app.
 All Excel reading/writing and business rules live here so they can be tested
 without a GUI. The UI (``inventory_app.py``) only calls these functions.
 
+A single bill may contain many products. Each product becomes one row in the
+sales/purchases workbook, all sharing the same Bill No. Bill-level figures
+(ECS, VAT %, VAT Amount, Total) are written on the bill's FIRST row only, so
+summing a column never double-counts a bill.
+
 Files created next to the app (or next to the .exe when frozen):
-    sales.xlsx       - every sale entry
-    purchases.xlsx   - every purchase entry
+    sales.xlsx       - every sale (one row per product line)
+    purchases.xlsx   - every purchase (one row per product line)
     stock.xlsx       - current quantity on hand, per product
     party.xlsx       - per-party totals (sales / purchases / combined)
 """
 
 import os
 import sys
+import platform
+import subprocess
 
 from openpyxl import Workbook, load_workbook
 
@@ -43,7 +50,8 @@ PARTY_FILE = os.path.join(DATA_DIR, "party.xlsx")
 
 TXN_HEADERS = [
     "Date", "Bill No", "PAN No", "Vendor Name", "Vendor Address",
-    "Product Name", "Quantity", "Amount", "ECS", "VAT", "Total",
+    "Product Name", "Quantity", "Amount",
+    "ECS", "VAT %", "VAT Amount", "Total",
 ]
 STOCK_HEADERS = ["Product Name", "Quantity"]
 PARTY_HEADERS = [
@@ -82,9 +90,26 @@ def num(value) -> float:
         return 0.0
 
 
-def append_transaction(path: str, row: list) -> None:
+def append_bill(path: str, header: dict, lines: list,
+                ecs: float, vat_pct: float, vat_amount: float,
+                total: float) -> None:
+    """Write a multi-product bill: one row per product line.
+
+    ``header`` has date/bill/pan/vendor/address. ``lines`` is a list of dicts
+    with product/qty/amount. Bill-level figures go on the first row only.
+    """
     wb, ws = _load(path, TXN_HEADERS)
-    ws.append(row)
+    for i, ln in enumerate(lines):
+        first = (i == 0)
+        ws.append([
+            header["date"], header["bill"], header["pan"],
+            header["vendor"], header["address"],
+            ln["product"], ln["qty"], ln["amount"],
+            ecs if first else "",
+            vat_pct if first else "",
+            vat_amount if first else "",
+            total if first else "",
+        ])
     wb.save(path)
 
 
@@ -104,7 +129,6 @@ def update_stock(product: str, qty: float, add: bool) -> float:
             ws.cell(row=r, column=2, value=new_qty)
             wb.save(STOCK_FILE)
             return new_qty
-    # product not found -> create it
     new_qty = qty if add else -qty
     ws.append([product.strip(), new_qty])
     wb.save(STOCK_FILE)
@@ -157,7 +181,6 @@ def update_party(pan: str, name: str, address: str, total: float,
             wb.save(PARTY_FILE)
             return
 
-    # new party
     sales = total if is_sale else 0.0
     purch = 0.0 if is_sale else total
     ws.append([pan.strip(), name.strip(), address.strip(),
@@ -176,3 +199,15 @@ def read_rows(path: str, headers: list) -> list:
         if any(v is not None and str(v).strip() != "" for v in row):
             rows.append(row)
     return rows
+
+
+def open_file(path: str, headers: list) -> None:
+    """Open a workbook in the OS default app (Excel / Numbers)."""
+    _ensure_file(path, headers)
+    system = platform.system()
+    if system == "Windows":
+        os.startfile(path)  # type: ignore[attr-defined]
+    elif system == "Darwin":
+        subprocess.run(["open", path], check=False)
+    else:
+        subprocess.run(["xdg-open", path], check=False)
