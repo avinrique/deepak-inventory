@@ -10,7 +10,9 @@ sales/purchases workbook, all sharing the same Bill No. Per-line figures
 (Subtotal, ECS, VAT %, VAT Amount, Total) are repeated on every row of the
 bill so each row is fully self-contained and nothing reads as blank.
 
-Files created next to the app (or next to the .exe when frozen):
+Files live in a stable per-user folder (see ``data_dir``), deliberately OUTSIDE
+the project/exe directory so they survive rebuilds, re-downloads and git
+clean/checkpoint restores. Override with ``INVENTORY_DATA_DIR``.
     sales.xlsx       - every sale (one row per product line)
     purchases.xlsx   - every purchase (one row per product line)
     stock.xlsx       - current quantity on hand, per product
@@ -20,6 +22,7 @@ Files created next to the app (or next to the .exe when frozen):
 import os
 import sys
 import math
+import shutil
 import platform
 import subprocess
 
@@ -40,18 +43,55 @@ class FileLockedError(Exception):
 # --------------------------------------------------------------------------- #
 # Storage location
 # --------------------------------------------------------------------------- #
-def data_dir() -> str:
-    """Folder where the Excel files live.
+def _user_data_base() -> str:
+    """Per-user, OS-appropriate folder for application data.
 
-    When packaged with PyInstaller (``sys.frozen``) we write next to the .exe
-    so the files are easy to find; otherwise next to this module.
+    Deliberately OUTSIDE the project/exe folder so the data can never be wiped
+    by a git operation (the project ``.gitignore`` excludes ``inventory_data``),
+    a rebuild that recreates ``dist``, a re-download, or a checkpoint/clean
+    that restores the working tree to a snapshot. Override with the
+    ``INVENTORY_DATA_DIR`` environment variable.
     """
+    override = os.environ.get("INVENTORY_DATA_DIR")
+    if override:
+        return override
+
+    system = platform.system()
+    home = os.path.expanduser("~")
+    if system == "Windows":
+        root = os.environ.get("APPDATA") or os.path.join(home, "AppData", "Roaming")
+    elif system == "Darwin":
+        root = os.path.join(home, "Library", "Application Support")
+    else:
+        root = os.environ.get("XDG_DATA_HOME") or os.path.join(home, ".local", "share")
+    return os.path.join(root, "InventoryManagement")
+
+
+def _legacy_data_dir() -> str:
+    """The old location: ``inventory_data`` next to the exe (frozen) or module."""
     if getattr(sys, "frozen", False):
         base = os.path.dirname(sys.executable)
     else:
         base = os.path.dirname(os.path.abspath(__file__))
-    folder = os.path.join(base, "inventory_data")
+    return os.path.join(base, "inventory_data")
+
+
+def data_dir() -> str:
+    """Folder where the Excel files live (stable, per-user, outside the repo).
+
+    One-time migration: if the new folder has no workbooks yet but the old
+    ``inventory_data`` folder next to the app does, copy them across so an
+    existing user keeps their data.
+    """
+    folder = os.path.join(_user_data_base(), "inventory_data")
     os.makedirs(folder, exist_ok=True)
+
+    legacy = _legacy_data_dir()
+    if os.path.abspath(legacy) != os.path.abspath(folder) and os.path.isdir(legacy):
+        for name in ("sales.xlsx", "purchases.xlsx", "stock.xlsx", "party.xlsx"):
+            src, dst = os.path.join(legacy, name), os.path.join(folder, name)
+            if os.path.exists(src) and not os.path.exists(dst):
+                shutil.copy2(src, dst)
     return folder
 
 

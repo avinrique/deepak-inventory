@@ -24,7 +24,8 @@ python -m PyInstaller --onefile --windowed --name InventoryManagement inventory_
 echo.
 echo ==========================================================================
 echo  Done. Your app is here:  dist\InventoryManagement.exe
-echo  Double-click it to run. Excel files appear in an "inventory_data"
-echo  folder next to the .exe.
+echo  Double-click it to run. Excel files are stored in
+echo  %%APPDATA%%\InventoryManagement\inventory_data\ so rebuilding or
+echo  moving the .exe never loses your data.
 echo ==========================================================================
 pause

@@ -22,7 +22,17 @@ edit it). If Total is left blank when you save, it's calculated automatically.
 
 ## Data files
 
-Created automatically in an `inventory_data` folder next to the app:
+Created automatically in a stable per-user folder, kept **outside** the
+project/exe folder so it is never wiped by a rebuild, a re-download, or a
+`git` clean/checkpoint restore:
+
+- **macOS:** `~/Library/Application Support/InventoryManagement/inventory_data/`
+- **Windows:** `%APPDATA%\InventoryManagement\inventory_data\`
+- **Linux:** `~/.local/share/InventoryManagement/inventory_data/`
+
+Override the location with the `INVENTORY_DATA_DIR` environment variable. Data
+from an older `inventory_data` folder next to the app is migrated automatically
+on first run.
 
 - `sales.xlsx` — every sale
 - `purchases.xlsx` — every purchase
@@ -49,7 +59,8 @@ dist\InventoryManagement.exe
 ```
 
 Double-click that `.exe` to run — no Python needed on that machine. The Excel
-files appear in an `inventory_data` folder beside the `.exe`.
+files are stored in `%APPDATA%\InventoryManagement\inventory_data\` (not beside
+the `.exe`), so rebuilding or moving the `.exe` never loses your data.
 
 > The `.exe` must be built on Windows. PyInstaller does not cross-compile from
 > macOS/Linux to Windows.
