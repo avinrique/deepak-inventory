@@ -13,7 +13,7 @@ Usage:
 from collections.abc import Callable
 from typing import Any
 
-from PySide6.QtCore import QObject, QRunnable, Signal, Slot
+from PySide6.QtCore import QObject, QRunnable, QTimer, Signal, Slot
 
 # Keeps a strong Python reference to every in-flight Worker so it (and its
 # .signals QObject) can't be garbage-collected while still running on a
@@ -43,7 +43,19 @@ class Worker(QRunnable):
         _in_flight.add(self)
 
     def _release(self, *_ignored: Any) -> None:
-        _in_flight.discard(self)
+        # Deferred, not immediate. This runs as one of possibly *several*
+        # slots connected to the same finished/error signal — the caller's
+        # own callback (e.g. AsyncContentArea._on_loaded) is another, and
+        # Worker.__init__ connects this one first, so it's invoked first.
+        # Discarding self from _in_flight here immediately would drop the
+        # last Python reference to this Worker (and its .signals QObject)
+        # *while Qt is still delivering that same emit() to the caller's
+        # slot* — which was found to silently stop that slot from ever
+        # running (a real bug this caused, not a hypothetical one).
+        # QTimer.singleShot(0, ...) defers the actual discard to the next
+        # event-loop iteration, after every slot connected to this emit()
+        # has had its turn.
+        QTimer.singleShot(0, lambda: _in_flight.discard(self))
 
     @Slot()
     def run(self) -> None:
