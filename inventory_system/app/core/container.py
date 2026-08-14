@@ -14,14 +14,17 @@ from app.config.settings import settings
 from app.repositories.interfaces import BillRepository, PartyRepository, StockRepository
 from app.repositories.sql.brand_repository import SqlBrandRepository
 from app.repositories.sql.category_repository import SqlCategoryRepository
+from app.repositories.sql.inventory_repository import SqlInventoryRepository
 from app.repositories.sql.product_repository import SqlProductRepository
 from app.repositories.sql.unit_repository import SqlUnitRepository
 from app.repositories.sql.user_repository import SqlUserRepository
+from app.repositories.sql.warehouse_repository import SqlWarehouseRepository
 from app.security.session import SessionManager
 from app.services.auth_service import AuthService
 from app.services.billing_service import BillingService
 from app.services.catalog_service import CatalogService
 from app.services.dashboard_service import DashboardService
+from app.services.inventory_service import InventoryService
 from app.services.party_service import PartyService
 from app.services.product_service import ProductService
 from app.services.stock_service import StockService
@@ -76,6 +79,8 @@ class Container:
         self.brand_repo = SqlBrandRepository()
         self.unit_repo = SqlUnitRepository()
         self.product_repo = SqlProductRepository()
+        self.warehouse_repo = SqlWarehouseRepository()
+        self.inventory_repo = SqlInventoryRepository()
         self.sessions = SessionManager(
             idle_timeout=timedelta(minutes=settings.session_idle_timeout_minutes))
 
@@ -105,3 +110,7 @@ class Container:
     def catalog_service(self) -> CatalogService:
         return CatalogService(self.category_repo, self.brand_repo, self.unit_repo,
                               self.sessions)
+
+    def inventory_service(self) -> InventoryService:
+        return InventoryService(self.warehouse_repo, self.inventory_repo, self.product_repo,
+                                self.sessions)

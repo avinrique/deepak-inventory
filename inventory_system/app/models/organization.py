@@ -26,6 +26,12 @@ class Organization(UUIDPKMixin, TimestampMixin, Base):
     tax_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     address: Mapped[str | None] = mapped_column(String(500), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # Business rule, not a hard invariant: some organizations run a
+    # sell-then-reconcile flow and need to let on-hand quantity go negative
+    # temporarily. False by default — inventory operations reject anything
+    # that would take a product's on-hand quantity below zero unless this
+    # is explicitly turned on. See InventoryRepository.apply_transaction.
+    allow_negative_stock: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     memberships: Mapped[list["UserOrganization"]] = relationship(
         back_populates="organization", cascade="all, delete-orphan")

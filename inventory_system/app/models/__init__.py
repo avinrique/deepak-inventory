@@ -9,11 +9,13 @@ from app.models.audit_log import AuditLog
 from app.models.base import Base
 from app.models.brand import Brand
 from app.models.category import Category
+from app.models.inventory import Inventory, InventoryTransaction, StockAdjustment, StockTransfer
 from app.models.organization import Organization, UserOrganization
 from app.models.product import Product
 from app.models.role import Permission, Role, RolePermission
 from app.models.unit import Unit
 from app.models.user import User
+from app.models.warehouse import Warehouse
 
 __all__ = [
     "Base",
@@ -28,4 +30,9 @@ __all__ = [
     "Brand",
     "Unit",
     "Product",
+    "Warehouse",
+    "Inventory",
+    "InventoryTransaction",
+    "StockAdjustment",
+    "StockTransfer",
 ]

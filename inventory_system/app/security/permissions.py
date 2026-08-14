@@ -32,6 +32,7 @@ PERMISSIONS: list[PermissionDef] = [
     PermissionDef("product.read", "View products"),
     PermissionDef("product.update", "Update products"),
     PermissionDef("product.delete", "Delete products"),
+    PermissionDef("warehouse.manage", "Create/update warehouses"),
     PermissionDef("inventory.read", "View stock levels"),
     PermissionDef("inventory.adjust", "Adjust stock quantities"),
     PermissionDef("inventory.transfer", "Transfer stock between locations"),
@@ -54,7 +55,7 @@ _ALL = sorted(PERMISSION_CODES)
 _PRODUCT_READ_ONLY = ["product.read", "inventory.read"]
 _OPERATIONAL = [
     "product.create", "product.read", "product.update", "product.delete",
-    "inventory.read", "inventory.adjust", "inventory.transfer",
+    "warehouse.manage", "inventory.read", "inventory.adjust", "inventory.transfer",
     "sales.create", "sales.read", "sales.cancel", "sales.refund",
     "purchase.create", "purchase.read", "purchase.approve",
     "reports.view",
@@ -70,7 +71,7 @@ ROLE_PERMISSIONS: dict[str, list[str]] = {
     "MANAGER": _OPERATIONAL,
     "INVENTORY_MANAGER": [
         "product.create", "product.read", "product.update", "product.delete",
-        "inventory.read", "inventory.adjust", "inventory.transfer",
+        "warehouse.manage", "inventory.read", "inventory.adjust", "inventory.transfer",
         "reports.view",
     ],
     "SALES_STAFF": [*_PRODUCT_READ_ONLY, "sales.create", "sales.read"],

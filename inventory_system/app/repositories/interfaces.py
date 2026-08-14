@@ -9,6 +9,15 @@ from typing import Protocol
 
 from app.domain.product import ProductStatus
 from app.schemas.bill import BillCreate, BillOut
+from app.schemas.inventory import (
+    InventoryLevel,
+    InventoryTransactionOut,
+    InventoryTransactionPage,
+    TransactionFilter,
+    WarehouseCreate,
+    WarehouseOut,
+    WarehouseUpdate,
+)
 from app.schemas.party import PartyOut
 from app.schemas.product import (
     BrandCreate,
@@ -145,3 +154,70 @@ class ProductRepository(Protocol):
                    status: ProductStatus) -> None: ...
 
     def search(self, organization_id: uuid.UUID, filter: ProductFilter) -> ProductPage: ...
+
+
+class WarehouseRepository(Protocol):
+    def create(self, organization_id: uuid.UUID, data: WarehouseCreate) -> WarehouseOut: ...
+
+    def update(self, organization_id: uuid.UUID, warehouse_id: uuid.UUID,
+              data: WarehouseUpdate) -> WarehouseOut | None: ...
+
+    def get_by_id(self, organization_id: uuid.UUID,
+                 warehouse_id: uuid.UUID) -> WarehouseOut | None: ...
+
+    def code_exists(self, organization_id: uuid.UUID, code: str,
+                    exclude_id: uuid.UUID | None = None) -> bool: ...
+
+    def list_all(self, organization_id: uuid.UUID) -> list[WarehouseOut]: ...
+
+
+class InventoryRepository(Protocol):
+    """Every method here runs its work inside one database transaction
+    (see app.repositories.sql.inventory_repository) — lock the relevant
+    Inventory row(s), validate, update the snapshot, append an immutable
+    InventoryTransaction row, commit or roll back together. quantity
+    arguments are always unsigned (> 0); direction is implied by the
+    method, not by the sign the caller passes in.
+    """
+
+    def stock_in(self, organization_id: uuid.UUID, product_id: uuid.UUID,
+                warehouse_id: uuid.UUID, quantity: Decimal, performed_by: uuid.UUID,
+                notes: str | None = None) -> InventoryTransactionOut: ...
+
+    def stock_out(self, organization_id: uuid.UUID, product_id: uuid.UUID,
+                 warehouse_id: uuid.UUID, quantity: Decimal, performed_by: uuid.UUID,
+                 notes: str | None = None) -> InventoryTransactionOut: ...
+
+    def mark_damaged(self, organization_id: uuid.UUID, product_id: uuid.UUID,
+                     warehouse_id: uuid.UUID, quantity: Decimal, performed_by: uuid.UUID,
+                     notes: str | None = None) -> InventoryTransactionOut: ...
+
+    def record_return(self, organization_id: uuid.UUID, product_id: uuid.UUID,
+                      warehouse_id: uuid.UUID, quantity: Decimal, performed_by: uuid.UUID,
+                      to_stock: bool, notes: str | None = None) -> InventoryTransactionOut: ...
+
+    def adjust(self, organization_id: uuid.UUID, product_id: uuid.UUID,
+              warehouse_id: uuid.UUID, quantity_change: Decimal, reason: str,
+              performed_by: uuid.UUID) -> InventoryTransactionOut: ...
+
+    def transfer(self, organization_id: uuid.UUID, product_id: uuid.UUID,
+                from_warehouse_id: uuid.UUID, to_warehouse_id: uuid.UUID, quantity: Decimal,
+                performed_by: uuid.UUID, notes: str | None = None
+                ) -> tuple[InventoryTransactionOut, InventoryTransactionOut]: ...
+
+    def reserve(self, organization_id: uuid.UUID, product_id: uuid.UUID,
+               warehouse_id: uuid.UUID, quantity: Decimal, performed_by: uuid.UUID,
+               notes: str | None = None) -> InventoryTransactionOut: ...
+
+    def release_reservation(self, organization_id: uuid.UUID, product_id: uuid.UUID,
+                            warehouse_id: uuid.UUID, quantity: Decimal, performed_by: uuid.UUID,
+                            notes: str | None = None) -> InventoryTransactionOut: ...
+
+    def get_level(self, organization_id: uuid.UUID, product_id: uuid.UUID,
+                 warehouse_id: uuid.UUID) -> InventoryLevel: ...
+
+    def list_levels_for_product(self, organization_id: uuid.UUID,
+                                product_id: uuid.UUID) -> list[InventoryLevel]: ...
+
+    def list_transactions(self, organization_id: uuid.UUID,
+                          filter: TransactionFilter) -> InventoryTransactionPage: ...

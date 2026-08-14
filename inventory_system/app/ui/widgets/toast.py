@@ -57,7 +57,16 @@ class NotificationCenter(QWidget):
         self._layout.setContentsMargins(0, 0, 20, 20)
         self._layout.setSpacing(8)
         self._layout.setAlignment(Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignRight)
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+        # This overlay is raised above and sized to cover the *entire* host
+        # (sidebar, header, content area — see _reposition), so it can anchor
+        # toasts to the bottom-right corner regardless of what's showing
+        # underneath. Without WA_TransparentForMouseEvents, that full-window,
+        # topmost, invisible widget silently swallows every mouse click in
+        # the whole app (sidebar nav, buttons, everything) even when no toast
+        # is visible — toasts auto-dismiss and were never meant to be
+        # clickable, so there's no interactivity lost by passing clicks
+        # through the empty area.
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         host.installEventFilter(self)
         self._reposition()
         self.raise_()

@@ -1,5 +1,6 @@
 """App-wide exception types, as opposed to bugs — Services raise these for
 conditions the UI is expected to catch and show to the user."""
+from decimal import Decimal
 
 
 class AppError(Exception):
@@ -51,3 +52,42 @@ class ProductNotFoundError(AppError):
     def __init__(self, product_id):
         self.product_id = product_id
         super().__init__(f"Product {product_id!r} not found")
+
+
+class WarehouseNotFoundError(AppError):
+    def __init__(self, warehouse_id):
+        self.warehouse_id = warehouse_id
+        super().__init__(f"Warehouse {warehouse_id!r} not found")
+
+
+class DuplicateWarehouseCodeError(AppError):
+    def __init__(self, code: str):
+        self.code = code
+        super().__init__(f"Warehouse code {code!r} already exists")
+
+
+class InventoryValidationError(AppError):
+    def __init__(self, errors: list[str]):
+        self.errors = errors
+        super().__init__("; ".join(errors))
+
+
+class InsufficientStockError(AppError):
+    """Raised when an operation would take quantity_on_hand (or
+    quantity_reserved) below zero and the organization does not allow
+    negative stock (Organization.allow_negative_stock).
+    """
+
+    def __init__(self, product_id, warehouse_id, available: Decimal, requested: Decimal):
+        self.product_id = product_id
+        self.warehouse_id = warehouse_id
+        self.available = available
+        self.requested = requested
+        super().__init__(
+            f"Insufficient stock for product {product_id!r} at warehouse "
+            f"{warehouse_id!r}: available {available}, requested {requested}")
+
+
+class InvalidTransferError(AppError):
+    def __init__(self, message: str):
+        super().__init__(message)
