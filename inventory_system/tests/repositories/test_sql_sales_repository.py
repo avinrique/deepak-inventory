@@ -67,19 +67,21 @@ def _stock_in(world, quantity=Decimal("100")):
 
 
 def _create_so(world, quantity=Decimal("10"), unit_price=Decimal("15"),
-              tax_percent=Decimal("13")):
+              tax_percent=Decimal("13"), discount_percent=Decimal("0")):
     repo = _repo()
     data = SalesOrderCreate(
         customer_id=world["customer_id"], warehouse_id=world["warehouse_id"],
         items=[SalesOrderItemInput(product_id=world["product_id"], quantity_ordered=quantity,
-                                   unit_price=unit_price, tax_percent=tax_percent)])
+                                   unit_price=unit_price, tax_percent=tax_percent,
+                                   discount_percent=discount_percent)])
     return repo.create(world["org_id"], data, world["user_id"])
 
 
 def _confirmed_so(world, quantity=Decimal("10"), unit_price=Decimal("15"),
-                  tax_percent=Decimal("13")):
+                  tax_percent=Decimal("13"), discount_percent=Decimal("0")):
     repo = _repo()
-    so = _create_so(world, quantity=quantity, unit_price=unit_price, tax_percent=tax_percent)
+    so = _create_so(world, quantity=quantity, unit_price=unit_price, tax_percent=tax_percent,
+                    discount_percent=discount_percent)
     return repo.confirm(world["org_id"], so.id, world["user_id"])
 
 
@@ -205,11 +207,12 @@ def test_fulfill_records_audit_log_entry(world):
 # -- invoicing ---------------------------------------------------------- #
 
 def _fulfilled_so(world, quantity=Decimal("10"), unit_price=Decimal("15"),
-                  tax_percent=Decimal("13"), stock=Decimal("100")):
+                  tax_percent=Decimal("13"), stock=Decimal("100"),
+                  discount_percent=Decimal("0")):
     _stock_in(world, stock)
     repo = _repo()
     so = _confirmed_so(world, quantity=quantity, unit_price=unit_price,
-                       tax_percent=tax_percent)
+                       tax_percent=tax_percent, discount_percent=discount_percent)
     return repo.fulfill_sale(world["org_id"], so.id, world["user_id"])
 
 
@@ -224,6 +227,106 @@ def test_generate_invoice_computes_totals_from_items(world):
     assert invoice.tax_amount == Decimal("100.00")
     assert invoice.total_amount == Decimal("1100.00")
     assert invoice.invoice_number.startswith("INV-")
+
+
+def test_generate_invoice_applies_discount_before_tax(world):
+    repo = _repo()
+    # 10 x 100 = 1000 list price, 10% discount -> 900 taxable base,
+    # 10% tax on 900 -> 90, total 990. Tax must NOT be computed on the
+    # undiscounted 1000 (which would give 100 tax / 1100 total).
+    so = _fulfilled_so(world, quantity=Decimal("10"), unit_price=Decimal("100"),
+                       tax_percent=Decimal("10"), discount_percent=Decimal("10"))
+
+    invoice = repo.generate_invoice(world["org_id"], so.id, world["user_id"])
+
+    assert invoice.subtotal == Decimal("1000")
+    assert invoice.discount_amount == Decimal("100.00")
+    assert invoice.tax_amount == Decimal("90.00")
+    assert invoice.total_amount == Decimal("990.00")
+
+
+def test_get_invoice_document_assembles_company_customer_and_line_data(world):
+    repo = _repo()
+    with get_session() as session:
+        org = session.get(Organization, world["org_id"])
+        org.legal_name = "Acme Retail Pvt. Ltd."
+        org.address = "1 Market St"
+        org.phone = "+1-555-0100"
+
+    so = _fulfilled_so(world, quantity=Decimal("4"), unit_price=Decimal("50"),
+                       tax_percent=Decimal("13"), discount_percent=Decimal("10"))
+    invoice = repo.generate_invoice(world["org_id"], so.id, world["user_id"])
+
+    doc = repo.get_invoice_document(world["org_id"], invoice.id)
+
+    assert doc.company_name == "Acme Retail"
+    assert doc.company_legal_name == "Acme Retail Pvt. Ltd."
+    assert doc.company_address == "1 Market St"
+    assert doc.company_phone == "+1-555-0100"
+    assert doc.customer_name == "Jane Buyer"
+    assert doc.invoice_number == invoice.invoice_number
+    assert len(doc.items) == 1
+    line = doc.items[0]
+    assert line.sku == "SKU-1"
+    assert line.quantity == Decimal("4")
+    assert line.line_subtotal == Decimal("200")
+    assert line.line_discount == Decimal("20.00")
+    assert line.line_total == invoice.total_amount
+
+
+def test_get_invoice_document_payment_status_unpaid_when_nothing_paid(world):
+    repo = _repo()
+    so = _fulfilled_so(world, quantity=Decimal("1"), unit_price=Decimal("100"))
+    invoice = repo.generate_invoice(world["org_id"], so.id, world["user_id"])
+
+    doc = repo.get_invoice_document(world["org_id"], invoice.id)
+
+    assert doc.amount_paid == Decimal("0")
+    assert doc.amount_due == invoice.total_amount
+    assert doc.payment_status.value == "UNPAID"
+
+
+def test_get_invoice_document_payment_status_partially_paid(world):
+    from app.schemas.sales import PaymentRequest
+    from app.domain.sales import PaymentMethod
+
+    repo = _repo()
+    so = _fulfilled_so(world, quantity=Decimal("1"), unit_price=Decimal("100"),
+                       tax_percent=Decimal("0"))
+    invoice = repo.generate_invoice(world["org_id"], so.id, world["user_id"])
+    repo.record_payment(world["org_id"], PaymentRequest(
+        invoice_id=invoice.id, amount=Decimal("40"), method=PaymentMethod.CASH),
+        world["user_id"])
+
+    doc = repo.get_invoice_document(world["org_id"], invoice.id)
+
+    assert doc.amount_paid == Decimal("40")
+    assert doc.amount_due == Decimal("60")
+    assert doc.payment_status.value == "PARTIALLY_PAID"
+
+
+def test_get_invoice_document_payment_status_paid(world):
+    from app.schemas.sales import PaymentRequest
+    from app.domain.sales import PaymentMethod
+
+    repo = _repo()
+    so = _fulfilled_so(world, quantity=Decimal("1"), unit_price=Decimal("100"),
+                       tax_percent=Decimal("0"))
+    invoice = repo.generate_invoice(world["org_id"], so.id, world["user_id"])
+    repo.record_payment(world["org_id"], PaymentRequest(
+        invoice_id=invoice.id, amount=Decimal("100"), method=PaymentMethod.CASH),
+        world["user_id"])
+
+    doc = repo.get_invoice_document(world["org_id"], invoice.id)
+
+    assert doc.amount_due == Decimal("0")
+    assert doc.payment_status.value == "PAID"
+
+
+def test_get_invoice_document_missing_returns_none(world):
+    import uuid
+    repo = _repo()
+    assert repo.get_invoice_document(world["org_id"], uuid.uuid4()) is None
 
 
 def test_generate_invoice_requires_fulfilled_status(world):

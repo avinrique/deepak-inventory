@@ -16,6 +16,7 @@ from app.repositories.sql.brand_repository import SqlBrandRepository
 from app.repositories.sql.category_repository import SqlCategoryRepository
 from app.repositories.sql.customer_repository import SqlCustomerRepository
 from app.repositories.sql.inventory_repository import SqlInventoryRepository
+from app.repositories.sql.organization_repository import SqlOrganizationRepository
 from app.repositories.sql.product_repository import SqlProductRepository
 from app.repositories.sql.purchase_repository import SqlPurchaseOrderRepository
 from app.repositories.sql.reporting_repository import SqlReportingRepository
@@ -30,6 +31,7 @@ from app.services.billing_service import BillingService
 from app.services.catalog_service import CatalogService
 from app.services.dashboard_service import DashboardService
 from app.services.inventory_service import InventoryService
+from app.services.organization_service import OrganizationService
 from app.services.party_service import PartyService
 from app.services.product_service import ProductService
 from app.services.purchase_service import PurchaseService
@@ -94,6 +96,7 @@ class Container:
         self.customer_repo = SqlCustomerRepository()
         self.sales_order_repo = SqlSalesOrderRepository()
         self.reporting_repo = SqlReportingRepository()
+        self.organization_repo = SqlOrganizationRepository()
         self.sessions = SessionManager(
             idle_timeout=timedelta(minutes=settings.session_idle_timeout_minutes))
 
@@ -138,3 +141,6 @@ class Container:
 
     def reporting_service(self) -> ReportingService:
         return ReportingService(self.reporting_repo, self.sessions)
+
+    def organization_service(self) -> OrganizationService:
+        return OrganizationService(self.organization_repo, self.sessions)

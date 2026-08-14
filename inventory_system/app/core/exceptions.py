@@ -165,3 +165,15 @@ class DuplicateInvoiceError(AppError):
     def __init__(self, sales_order_id):
         self.sales_order_id = sales_order_id
         super().__init__(f"Sales order {sales_order_id!r} already has an invoice")
+
+
+class OrganizationNotFoundError(AppError):
+    def __init__(self, organization_id):
+        self.organization_id = organization_id
+        super().__init__(f"Organization {organization_id!r} not found")
+
+
+class OrganizationValidationError(AppError):
+    def __init__(self, errors: list[str]):
+        self.errors = errors
+        super().__init__("; ".join(errors))

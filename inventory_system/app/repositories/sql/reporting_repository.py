@@ -70,14 +70,19 @@ def _dec(value) -> Decimal:
 class SqlReportingRepository:
     # -- shared aggregate subqueries -------------------------------------#
     def _sales_order_totals_subquery(self, db):
+        # Discount is applied before tax (tax is charged on the discounted
+        # price) — see app.domain.sales.line_tax_after_discount, the same
+        # rule this SQL mirrors.
+        list_subtotal = SalesOrderItem.quantity_ordered * SalesOrderItem.unit_price
+        discount = list_subtotal * SalesOrderItem.discount_percent / 100
+        after_discount = list_subtotal - discount
+        tax = after_discount * SalesOrderItem.tax_percent / 100
         return (db.query(
                     SalesOrderItem.sales_order_id.label("sales_order_id"),
-                    func.sum(SalesOrderItem.quantity_ordered * SalesOrderItem.unit_price)
-                        .label("subtotal"),
-                    func.sum(SalesOrderItem.quantity_ordered * SalesOrderItem.unit_price
-                            * SalesOrderItem.tax_percent / 100).label("tax_amount"),
-                    func.sum(SalesOrderItem.quantity_ordered * SalesOrderItem.unit_price
-                            * (1 + SalesOrderItem.tax_percent / 100)).label("total_amount"))
+                    func.sum(list_subtotal).label("subtotal"),
+                    func.sum(discount).label("discount_amount"),
+                    func.sum(tax).label("tax_amount"),
+                    func.sum(after_discount + tax).label("total_amount"))
                .group_by(SalesOrderItem.sales_order_id)
                .subquery())
 
@@ -232,10 +237,11 @@ class SqlReportingRepository:
 
     def _top_selling_products(self, db, organization_id, filter: ReportFilter,
                               limit: int) -> list[TopProductRow]:
+        discounted_revenue = (SalesOrderItem.quantity_fulfilled * SalesOrderItem.unit_price
+                             * (1 - SalesOrderItem.discount_percent / 100))
         query = (db.query(SalesOrderItem.product_id.label("product_id"),
                           func.sum(SalesOrderItem.quantity_fulfilled).label("qty"),
-                          func.sum(SalesOrderItem.quantity_fulfilled * SalesOrderItem.unit_price)
-                              .label("revenue"))
+                          func.sum(discounted_revenue).label("revenue"))
                 .join(SalesOrder, SalesOrderItem.sales_order_id == SalesOrder.id)
                 .filter(SalesOrder.organization_id == organization_id,
                        SalesOrderItem.quantity_fulfilled > 0))
@@ -342,7 +348,8 @@ class SqlReportingRepository:
         with get_session() as db:
             totals = self._sales_order_totals_subquery(db)
             query = (db.query(SalesOrder, Customer, Warehouse, totals.c.subtotal,
-                              totals.c.tax_amount, totals.c.total_amount)
+                              totals.c.discount_amount, totals.c.tax_amount,
+                              totals.c.total_amount)
                     .join(Customer, SalesOrder.customer_id == Customer.id)
                     .join(Warehouse, SalesOrder.warehouse_id == Warehouse.id)
                     .outerjoin(totals, totals.c.sales_order_id == SalesOrder.id)
@@ -362,12 +369,12 @@ class SqlReportingRepository:
             query = query.order_by(SalesOrder.created_at.desc())
 
             rows = [{"Order Date": so.created_at, "Customer": c.name, "Warehouse": w.code,
-                    "Status": so.status.value, "Subtotal": _dec(subtotal), "Tax": _dec(tax),
-                    "Total": _dec(total)}
-                   for so, c, w, subtotal, tax, total in query.all()]
+                    "Status": so.status.value, "Subtotal": _dec(subtotal),
+                    "Discount": _dec(discount), "Tax": _dec(tax), "Total": _dec(total)}
+                   for so, c, w, subtotal, discount, tax, total in query.all()]
             return ReportResult(title="Sales Report", generated_at=_now(),
                                columns=["Order Date", "Customer", "Warehouse", "Status",
-                                       "Subtotal", "Tax", "Total"],
+                                       "Subtotal", "Discount", "Tax", "Total"],
                                rows=rows)
 
     def purchase_report(self, organization_id: uuid.UUID, filter: ReportFilter) -> ReportResult:
@@ -404,10 +411,11 @@ class SqlReportingRepository:
 
     def profit_report(self, organization_id: uuid.UUID, filter: ReportFilter) -> ReportResult:
         with get_session() as db:
+            discounted_revenue = (SalesOrderItem.quantity_fulfilled * SalesOrderItem.unit_price
+                                 * (1 - SalesOrderItem.discount_percent / 100))
             query = (db.query(SalesOrderItem.product_id.label("product_id"),
                               func.sum(SalesOrderItem.quantity_fulfilled).label("qty"),
-                              func.sum(SalesOrderItem.quantity_fulfilled * SalesOrderItem.unit_price)
-                                  .label("revenue"),
+                              func.sum(discounted_revenue).label("revenue"),
                               func.sum(SalesOrderItem.quantity_fulfilled * Product.purchase_price)
                                   .label("cost"))
                     .join(SalesOrder, SalesOrderItem.sales_order_id == SalesOrder.id)
@@ -425,8 +433,7 @@ class SqlReportingRepository:
             if filter.category_id:
                 query = query.filter(Product.category_id == filter.category_id)
             query = (query.group_by(SalesOrderItem.product_id)
-                    .order_by(func.sum(SalesOrderItem.quantity_fulfilled * SalesOrderItem.unit_price)
-                             .desc()))
+                    .order_by(func.sum(discounted_revenue).desc()))
             agg = query.all()
             products = ({p.id: p for p in db.query(Product)
                        .filter(Product.id.in_([r.product_id for r in agg])).all()} if agg else {})

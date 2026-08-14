@@ -208,5 +208,5 @@ def _build_page(key: str, container: Container) -> QWidget:
         return UsersPage()
     if key == "settings":
         from app.ui.pages.settings_page import SettingsPage
-        return SettingsPage()
+        return SettingsPage(container.organization_service(), container.sessions)
     raise ValueError(f"Unknown module key: {key!r}")

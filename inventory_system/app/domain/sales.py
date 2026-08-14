@@ -25,6 +25,20 @@ class PaymentMethod(str, Enum):
     OTHER = "OTHER"
 
 
+class InvoicePaymentStatus(str, Enum):
+    UNPAID = "UNPAID"
+    PARTIALLY_PAID = "PARTIALLY_PAID"
+    PAID = "PAID"
+
+
+def compute_payment_status(total_amount: Decimal, amount_paid: Decimal) -> InvoicePaymentStatus:
+    if amount_paid <= 0:
+        return InvoicePaymentStatus.UNPAID
+    if amount_paid >= total_amount:
+        return InvoicePaymentStatus.PAID
+    return InvoicePaymentStatus.PARTIALLY_PAID
+
+
 # Allowed forward transitions for the explicit actions (confirm / fulfill /
 # cancel). FULFILLED -> COMPLETED is deliberately not reachable through a
 # generic "transition to X" call — it only happens as a side effect of

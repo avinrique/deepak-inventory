@@ -18,12 +18,14 @@ from app.schemas.inventory import (
     WarehouseOut,
     WarehouseUpdate,
 )
+from app.schemas.organization import OrganizationOut, OrganizationUpdate
 from app.schemas.party import PartyOut
 from app.schemas.reporting import DashboardMetrics, ReportFilter, ReportResult
 from app.schemas.sales import (
     CustomerCreate,
     CustomerOut,
     CustomerUpdate,
+    InvoiceDocumentData,
     InvoiceOut,
     PaymentOut,
     PaymentRequest,
@@ -353,6 +355,9 @@ class SalesOrderRepository(Protocol):
     def get_invoice(self, organization_id: uuid.UUID,
                    invoice_id: uuid.UUID) -> InvoiceOut | None: ...
 
+    def get_invoice_document(self, organization_id: uuid.UUID,
+                            invoice_id: uuid.UUID) -> InvoiceDocumentData | None: ...
+
     def record_payment(self, organization_id: uuid.UUID, data: PaymentRequest,
                       recorded_by: uuid.UUID) -> PaymentOut: ...
 
@@ -394,6 +399,13 @@ class ReportingRepository(Protocol):
 
     def inventory_valuation_report(self, organization_id: uuid.UUID,
                                    filter: ReportFilter) -> ReportResult: ...
+
+
+class OrganizationRepository(Protocol):
+    def get_by_id(self, organization_id: uuid.UUID) -> OrganizationOut | None: ...
+
+    def update(self, organization_id: uuid.UUID,
+              data: OrganizationUpdate) -> OrganizationOut | None: ...
 
 
 class AuditLogRepository(Protocol):

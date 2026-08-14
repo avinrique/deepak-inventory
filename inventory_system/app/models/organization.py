@@ -25,6 +25,12 @@ class Organization(UUIDPKMixin, TimestampMixin, Base):
     # jurisdiction, validated in the service layer, not the database.
     tax_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     address: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # Company contact details — shown on generated documents (invoices,
+    # etc.) alongside name/legal_name/tax_id/address above. Kept optional:
+    # a fresh organization has none of this filled in yet.
+    phone: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    email: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    website: Mapped[str | None] = mapped_column(String(255), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     # Business rule, not a hard invariant: some organizations run a
     # sell-then-reconcile flow and need to let on-hand quantity go negative

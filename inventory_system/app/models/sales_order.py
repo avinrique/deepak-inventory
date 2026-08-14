@@ -136,6 +136,7 @@ class Invoice(UUIDPKMixin, Base):
     __tablename__ = "invoices"
     __table_args__ = (
         CheckConstraint("subtotal >= 0", name="ck_invoices_subtotal_non_negative"),
+        CheckConstraint("discount_amount >= 0", name="ck_invoices_discount_amount_non_negative"),
         CheckConstraint("tax_amount >= 0", name="ck_invoices_tax_amount_non_negative"),
         CheckConstraint("total_amount >= 0", name="ck_invoices_total_amount_non_negative"),
         Index("ix_invoices_org_invoice_number", "organization_id", "invoice_number",
@@ -149,7 +150,13 @@ class Invoice(UUIDPKMixin, Base):
         UUID(as_uuid=True), ForeignKey("sales_orders.id", ondelete="RESTRICT"),
         nullable=False, unique=True)
     invoice_number: Mapped[str] = mapped_column(String(64), nullable=False)
+    # subtotal is the pre-discount list price; discount_amount is what was
+    # taken off before tax; tax_amount is computed on the discounted price;
+    # total_amount = subtotal - discount_amount + tax_amount. All frozen at
+    # generation time, same rationale as the class docstring.
     subtotal: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    discount_amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False,
+                                                      default=Decimal("0"))
     tax_amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     total_amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     generated_by: Mapped[uuid.UUID] = mapped_column(

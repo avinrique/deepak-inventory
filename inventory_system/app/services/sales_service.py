@@ -19,6 +19,7 @@ from decimal import Decimal
 from app.core.exceptions import (
     CustomerNotFoundError,
     InvalidSalesOrderTransitionError,
+    InvoiceNotFoundError,
     ProductNotFoundError,
     SalesOrderNotFoundError,
     SalesOrderValidationError,
@@ -40,6 +41,7 @@ from app.schemas.sales import (
     CustomerCreate,
     CustomerOut,
     CustomerUpdate,
+    InvoiceDocumentData,
     InvoiceOut,
     PaymentOut,
     PaymentRequest,
@@ -117,7 +119,7 @@ class SalesService:
                 raise ProductNotFoundError(item.product_id)
             errors.extend(validate_sales_order_item(
                 quantity_ordered=item.quantity_ordered, unit_price=item.unit_price,
-                tax_percent=item.tax_percent))
+                tax_percent=item.tax_percent, discount_percent=item.discount_percent))
         if errors:
             raise SalesOrderValidationError(errors)
 
@@ -202,6 +204,18 @@ class SalesService:
         self._require_sales_order(sales_order_id)
         return self._sales_orders.generate_invoice(self._organization_id(), sales_order_id,
                                                    self._current_user_id())
+
+    @require_permission("sales.read")
+    def get_invoice_document(self, invoice_id: uuid.UUID) -> InvoiceDocumentData:
+        # Viewing/(re)printing an already-generated invoice is a read
+        # action, not a new financial one — sales.invoice gates *creating*
+        # the invoice record (generate_invoice above); producing the PDF
+        # again later (e.g. "Re-generate invoice" in the UI) doesn't touch
+        # the financial record at all, it just re-renders the same data.
+        result = self._sales_orders.get_invoice_document(self._organization_id(), invoice_id)
+        if result is None:
+            raise InvoiceNotFoundError(invoice_id)
+        return result
 
     @require_permission("sales.payment")
     def record_payment(self, data: PaymentRequest) -> PaymentOut:

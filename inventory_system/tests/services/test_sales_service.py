@@ -127,7 +127,8 @@ class FakeSalesOrderRepository:
         items = [SalesOrderItemOut(id=uuid.uuid4(), product_id=i.product_id,
                                    quantity_ordered=i.quantity_ordered,
                                    quantity_fulfilled=Decimal("0"), unit_price=i.unit_price,
-                                   tax_percent=i.tax_percent)
+                                   tax_percent=i.tax_percent,
+                                   discount_percent=i.discount_percent)
                 for i in data.items]
         so = SalesOrderOut(id=uuid.uuid4(), customer_id=data.customer_id,
                            warehouse_id=data.warehouse_id, status=SalesOrderStatus.DRAFT,
@@ -146,7 +147,8 @@ class FakeSalesOrderRepository:
             items = [SalesOrderItemOut(id=uuid.uuid4(), product_id=i.product_id,
                                        quantity_ordered=i.quantity_ordered,
                                        quantity_fulfilled=Decimal("0"),
-                                       unit_price=i.unit_price, tax_percent=i.tax_percent)
+                                       unit_price=i.unit_price, tax_percent=i.tax_percent,
+                                       discount_percent=i.discount_percent)
                     for i in data.items]
         updated = existing.model_copy(update={**updates, "items": items})
         self.orders[sales_order_id] = updated
@@ -188,7 +190,8 @@ class FakeSalesOrderRepository:
         subtotal = sum((i.quantity_ordered * i.unit_price for i in so.items), Decimal("0"))
         invoice = InvoiceOut(id=uuid.uuid4(), sales_order_id=so.id,
                              invoice_number=f"INV-{self._next_invoice_seq:06d}",
-                             subtotal=subtotal, tax_amount=Decimal("0"),
+                             subtotal=subtotal, discount_amount=Decimal("0"),
+                             tax_amount=Decimal("0"),
                              total_amount=subtotal, generated_by=generated_by,
                              generated_at=datetime.now(timezone.utc))
         self._next_invoice_seq += 1

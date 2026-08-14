@@ -6,6 +6,7 @@ from pydantic import BaseModel
 
 from app.domain.pricing import line_subtotal
 from app.domain.sales import (
+    InvoicePaymentStatus,
     PaymentMethod,
     SalesOrderStatus,
     line_discount,
@@ -167,10 +168,70 @@ class InvoiceOut(BaseModel):
     sales_order_id: uuid.UUID
     invoice_number: str
     subtotal: Decimal
+    discount_amount: Decimal
     tax_amount: Decimal
     total_amount: Decimal
     generated_by: uuid.UUID
     generated_at: datetime
+
+
+class InvoiceDocumentLine(BaseModel):
+    """One line of a printable/exportable invoice document — a flattened,
+    display-ready view of a SalesOrderItem (product name/sku resolved,
+    every money figure precomputed) so the PDF template
+    (app.reports.sales_invoice_pdf) only has to lay values out, never
+    compute them.
+    """
+    sku: str
+    product_name: str
+    quantity: Decimal
+    unit_price: Decimal
+    discount_percent: Decimal
+    tax_percent: Decimal
+    line_subtotal: Decimal    # quantity * unit_price, before discount
+    line_discount: Decimal
+    line_tax: Decimal         # computed on the post-discount price
+    line_total: Decimal
+
+
+class InvoiceDocumentData(BaseModel):
+    """Everything app.reports.sales_invoice_pdf.render_invoice_pdf needs to
+    lay out one invoice — assembled once by
+    SalesOrderRepository.get_invoice_document (a single read joining
+    Invoice + SalesOrder + Customer + Organization + items + payments) so
+    the template stays a pure function of this data, with no repository or
+    service access of its own. Company fields come from the organization's
+    Settings (app.services.organization_service) — never hardcoded.
+    """
+    # company (from Settings — see app.services.organization_service)
+    company_name: str
+    company_legal_name: str | None
+    company_address: str | None
+    company_phone: str | None
+    company_email: str | None
+    company_website: str | None
+    company_tax_id: str | None
+    # invoice
+    invoice_id: uuid.UUID
+    invoice_number: str
+    invoice_date: datetime
+    sales_order_id: uuid.UUID
+    # customer
+    customer_name: str
+    customer_address: str | None
+    customer_phone: str | None
+    customer_email: str | None
+    customer_tax_id: str | None
+    # lines + totals
+    items: list[InvoiceDocumentLine]
+    subtotal: Decimal
+    discount_total: Decimal
+    tax_total: Decimal
+    total: Decimal
+    amount_paid: Decimal
+    amount_due: Decimal
+    payment_status: InvoicePaymentStatus
+    notes: str | None
 
 
 class PaymentRequest(BaseModel):

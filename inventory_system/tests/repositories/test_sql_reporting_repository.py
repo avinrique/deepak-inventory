@@ -290,3 +290,61 @@ def test_inventory_valuation_report_category_filter(world):
     result = _repo().inventory_valuation_report(
         world["org_id"], ReportFilter(category_id=world["category_id"]))
     assert {r["SKU"] for r in result.rows} == {"WID-1", "GIZ-1"}
+
+
+# -- discount awareness (isolated setup — the shared `world` fixture's
+# sales are all discount-free and its totals are hand-verified elsewhere,
+# so this uses its own minimal graph rather than perturbing that one) ----#
+
+@pytest.fixture()
+def discount_world(live_db):
+    with get_session() as session:
+        org = Organization(name="Discount Co")
+        session.add(org)
+        session.flush()
+        unit = Unit(organization_id=org.id, name="Piece", abbreviation="pc")
+        session.add(unit)
+        session.flush()
+        product = Product(organization_id=org.id, sku="DISC-1", name="Discounted Widget",
+                          unit_id=unit.id, purchase_price=Decimal("10"),
+                          selling_price=Decimal("100"), tax_percent=Decimal("0"),
+                          minimum_stock_level=Decimal("0"))
+        warehouse = Warehouse(organization_id=org.id, code="MAIN", name="Main")
+        customer = Customer(organization_id=org.id, name="Discount Customer")
+        user = User(email="seller@example.com", hashed_password="x", full_name="Seller")
+        session.add_all([product, warehouse, customer, user])
+        session.flush()
+        return {"org_id": org.id, "product_id": product.id, "warehouse_id": warehouse.id,
+               "customer_id": customer.id, "user_id": user.id}
+
+
+def test_sales_report_and_dashboard_reflect_discounted_totals(discount_world):
+    from app.repositories.sql.inventory_repository import SqlInventoryRepository
+    from app.repositories.sql.sales_repository import SqlSalesOrderRepository
+    from app.schemas.sales import SalesOrderCreate, SalesOrderItemInput
+
+    w = discount_world
+    SqlInventoryRepository().stock_in(w["org_id"], w["product_id"], w["warehouse_id"],
+                                      Decimal("50"), w["user_id"])
+
+    so_repo = SqlSalesOrderRepository()
+    # 10 x 100 = 1000 list, 20% discount -> 800 taxable, 0% tax -> total 800.
+    so = so_repo.create(w["org_id"], SalesOrderCreate(
+        customer_id=w["customer_id"], warehouse_id=w["warehouse_id"],
+        items=[SalesOrderItemInput(product_id=w["product_id"], quantity_ordered=Decimal("10"),
+                                   unit_price=Decimal("100"), tax_percent=Decimal("0"),
+                                   discount_percent=Decimal("20"))]), w["user_id"])
+    so_repo.confirm(w["org_id"], so.id, w["user_id"])
+    so_repo.fulfill_sale(w["org_id"], so.id, w["user_id"])
+
+    result = _repo().sales_report(w["org_id"], ReportFilter())
+    assert result.row_count == 1
+    row = result.rows[0]
+    assert row["Subtotal"] == Decimal("1000")
+    assert row["Discount"] == Decimal("200.00")
+    assert row["Total"] == Decimal("800.00")
+
+    metrics = _repo().get_dashboard_metrics(w["org_id"], ReportFilter())
+    assert metrics.total_sales == Decimal("800.00")
+    # Top-selling revenue must also reflect the discount, not the list price.
+    assert metrics.top_selling_products[0].revenue == Decimal("800.00")

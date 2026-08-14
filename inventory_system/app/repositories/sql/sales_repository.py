@@ -28,6 +28,7 @@ import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 
+from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 
 from app.core.exceptions import (
@@ -40,13 +41,23 @@ from app.core.exceptions import (
 )
 from app.database.session import get_session
 from app.domain.inventory import InventoryTransactionType
-from app.domain.pricing import line_subtotal, line_tax, line_total
-from app.domain.sales import SalesOrderStatus, can_transition, format_invoice_number
+from app.domain.pricing import line_subtotal
+from app.domain.sales import (
+    SalesOrderStatus,
+    can_transition,
+    compute_payment_status,
+    format_invoice_number,
+    line_discount,
+    line_tax_after_discount,
+    line_total_after_discount,
+)
 from app.models import (
+    Customer,
     Invoice,
     InvoiceSequence,
     Organization,
     Payment,
+    Product,
     SalesOrder,
     SalesOrderItem,
     SalesReturn,
@@ -55,6 +66,8 @@ from app.models import (
 from app.repositories.sql.audit_log_repository import record_audit_log
 from app.repositories.sql.inventory_repository import _apply
 from app.schemas.sales import (
+    InvoiceDocumentData,
+    InvoiceDocumentLine,
     InvoiceOut,
     PaymentOut,
     PaymentRequest,
@@ -72,7 +85,8 @@ def _item_to_out(item: SalesOrderItem) -> SalesOrderItemOut:
     return SalesOrderItemOut(id=item.id, product_id=item.product_id,
                              quantity_ordered=item.quantity_ordered,
                              quantity_fulfilled=item.quantity_fulfilled,
-                             unit_price=item.unit_price, tax_percent=item.tax_percent)
+                             unit_price=item.unit_price, tax_percent=item.tax_percent,
+                             discount_percent=item.discount_percent)
 
 
 def _to_out(so: SalesOrder) -> SalesOrderOut:
@@ -86,8 +100,9 @@ def _to_out(so: SalesOrder) -> SalesOrderOut:
 def _invoice_to_out(invoice: Invoice) -> InvoiceOut:
     return InvoiceOut(id=invoice.id, sales_order_id=invoice.sales_order_id,
                       invoice_number=invoice.invoice_number, subtotal=invoice.subtotal,
-                      tax_amount=invoice.tax_amount, total_amount=invoice.total_amount,
-                      generated_by=invoice.generated_by, generated_at=invoice.generated_at)
+                      discount_amount=invoice.discount_amount, tax_amount=invoice.tax_amount,
+                      total_amount=invoice.total_amount, generated_by=invoice.generated_by,
+                      generated_at=invoice.generated_at)
 
 
 def _payment_to_out(payment: Payment) -> PaymentOut:
@@ -144,7 +159,8 @@ class SqlSalesOrderRepository:
                 db.add(SalesOrderItem(sales_order_id=so.id, product_id=item.product_id,
                                      quantity_ordered=item.quantity_ordered,
                                      unit_price=item.unit_price,
-                                     tax_percent=item.tax_percent))
+                                     tax_percent=item.tax_percent,
+                                     discount_percent=item.discount_percent))
             db.flush()
             return _to_out(so)
 
@@ -276,9 +292,14 @@ class SqlSalesOrderRepository:
 
             subtotal = sum((line_subtotal(i.quantity_ordered, i.unit_price) for i in so.items),
                           Decimal("0"))
-            tax_amount = sum((line_tax(i.quantity_ordered, i.unit_price, i.tax_percent)
+            discount_amount = sum((line_discount(i.quantity_ordered, i.unit_price,
+                                                 i.discount_percent) for i in so.items),
+                                  Decimal("0"))
+            tax_amount = sum((line_tax_after_discount(i.quantity_ordered, i.unit_price,
+                                                       i.discount_percent, i.tax_percent)
                              for i in so.items), Decimal("0"))
-            total_amount = sum((line_total(i.quantity_ordered, i.unit_price, i.tax_percent)
+            total_amount = sum((line_total_after_discount(i.quantity_ordered, i.unit_price,
+                                                           i.discount_percent, i.tax_percent)
                                for i in so.items), Decimal("0"))
 
             org = db.get(Organization, organization_id)
@@ -287,7 +308,8 @@ class SqlSalesOrderRepository:
             seq.next_value += 1
 
             invoice = Invoice(organization_id=organization_id, sales_order_id=so.id,
-                             invoice_number=number, subtotal=subtotal, tax_amount=tax_amount,
+                             invoice_number=number, subtotal=subtotal,
+                             discount_amount=discount_amount, tax_amount=tax_amount,
                              total_amount=total_amount, generated_by=generated_by)
             db.add(invoice)
             db.flush()
@@ -312,6 +334,56 @@ class SqlSalesOrderRepository:
             if invoice is None or invoice.organization_id != organization_id:
                 return None
             return _invoice_to_out(invoice)
+
+    def get_invoice_document(self, organization_id: uuid.UUID,
+                            invoice_id: uuid.UUID) -> InvoiceDocumentData | None:
+        with get_session() as db:
+            invoice = db.get(Invoice, invoice_id)
+            if invoice is None or invoice.organization_id != organization_id:
+                return None
+            so = db.get(SalesOrder, invoice.sales_order_id)
+            customer = db.get(Customer, so.customer_id)
+            org = db.get(Organization, organization_id)
+
+            item_rows = (db.query(SalesOrderItem, Product)
+                        .join(Product, SalesOrderItem.product_id == Product.id)
+                        .filter(SalesOrderItem.sales_order_id == so.id)
+                        .order_by(SalesOrderItem.created_at)
+                        .all())
+            lines = []
+            for item, product in item_rows:
+                subtotal = line_subtotal(item.quantity_ordered, item.unit_price)
+                discount = line_discount(item.quantity_ordered, item.unit_price,
+                                         item.discount_percent)
+                tax = line_tax_after_discount(item.quantity_ordered, item.unit_price,
+                                              item.discount_percent, item.tax_percent)
+                total = line_total_after_discount(item.quantity_ordered, item.unit_price,
+                                                  item.discount_percent, item.tax_percent)
+                lines.append(InvoiceDocumentLine(
+                    sku=product.sku, product_name=product.name, quantity=item.quantity_ordered,
+                    unit_price=item.unit_price, discount_percent=item.discount_percent,
+                    tax_percent=item.tax_percent, line_subtotal=subtotal, line_discount=discount,
+                    line_tax=tax, line_total=total))
+
+            paid = (db.query(func.coalesce(func.sum(Payment.amount), 0))
+                   .filter(Payment.invoice_id == invoice.id).scalar())
+            paid = Decimal(paid) if paid is not None else Decimal("0")
+            amount_due = invoice.total_amount - paid
+            status = compute_payment_status(invoice.total_amount, paid)
+
+            return InvoiceDocumentData(
+                company_name=org.name, company_legal_name=org.legal_name,
+                company_address=org.address, company_phone=org.phone,
+                company_email=org.email, company_website=org.website,
+                company_tax_id=org.tax_id,
+                invoice_id=invoice.id, invoice_number=invoice.invoice_number,
+                invoice_date=invoice.generated_at, sales_order_id=so.id,
+                customer_name=customer.name, customer_address=customer.address,
+                customer_phone=customer.phone, customer_email=customer.email,
+                customer_tax_id=customer.tax_id,
+                items=lines, subtotal=invoice.subtotal, discount_total=invoice.discount_amount,
+                tax_total=invoice.tax_amount, total=invoice.total_amount, amount_paid=paid,
+                amount_due=amount_due, payment_status=status, notes=so.notes)
 
     def record_payment(self, organization_id: uuid.UUID, data: PaymentRequest,
                       recorded_by: uuid.UUID) -> PaymentOut:
