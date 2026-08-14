@@ -1,48 +1,115 @@
 """UserService tested against a fake UserRepository. The point of these
-tests: proves users.manage is enforced *here*, in the service layer, not
-merely assumed because a hypothetical UI wouldn't show the button — every
-test calls the service directly, exactly as a UI bypass or a bug elsewhere
-would.
+tests: proves each users.* permission is enforced *here*, in the service
+layer, not merely assumed because a hypothetical UI wouldn't show the
+button — every test calls the service directly, exactly as a UI bypass or
+a bug elsewhere would. Also covers the organization-membership guard
+(activate/deactivate/reset_password/change_user_role all refuse to touch a
+user who isn't a member of the caller's own organization) and the
+Owner-protection guard (an org's Owner can't be deactivated or demoted).
 """
 import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from app.schemas.user import MembershipOut, UserOut
+from app.core.exceptions import (
+    DuplicateEmailError,
+    DuplicateUsernameError,
+    MembershipNotFoundError,
+    OwnerProtectedError,
+    UserNotFoundError,
+)
+from app.schemas.user import MembershipOut, RoleOut, UserOut, UserSummaryOut
 from app.security.authorization import PermissionDeniedError
 from app.security.session import NotAuthenticatedError, SessionManager
 from app.services.user_service import UserService
 
 ORG_ID = uuid.uuid4()
+OTHER_ORG_ID = uuid.uuid4()
 ROLE_ID = uuid.uuid4()
 OTHER_ROLE_ID = uuid.uuid4()
+OWNER_ROLE_ID = uuid.uuid4()
 TARGET_USER_ID = uuid.uuid4()
+OWNER_USER_ID = uuid.uuid4()
+OUTSIDER_USER_ID = uuid.uuid4()  # a member of OTHER_ORG_ID, not ORG_ID
+
+ALL_USERS_PERMISSIONS = frozenset({
+    "users.view", "users.create", "users.update", "users.deactivate",
+    "users.reset_password", "users.manage_roles",
+})
 
 
 class FakeUserRepository:
     def __init__(self):
         self.created = []
-        self.active_state: dict[uuid.UUID, bool] = {TARGET_USER_ID: True}
+        self.active_state: dict[uuid.UUID, bool] = {TARGET_USER_ID: True, OWNER_USER_ID: True}
         self.password_updates = []
+        self.emails: set[str] = set()
+        self.usernames: set[str] = set()
+        # Simulates "membership row exists but the user row itself is
+        # gone" — an edge case set_active/update_password_hash's False
+        # return covers even though it can't happen in the real schema
+        # (users.id cascades to user_organizations), same as
+        # ProductRepository.get_by_id returning None being tested even
+        # though a live FK would normally prevent it.
+        self.missing_user_rows: set[uuid.UUID] = set()
         self.memberships: dict[tuple, MembershipOut] = {
             (TARGET_USER_ID, ORG_ID): MembershipOut(
                 user_id=TARGET_USER_ID, organization_id=ORG_ID, role_id=ROLE_ID,
                 role_name="SALES_STAFF", is_default=True),
+            (OWNER_USER_ID, ORG_ID): MembershipOut(
+                user_id=OWNER_USER_ID, organization_id=ORG_ID, role_id=OWNER_ROLE_ID,
+                role_name="OWNER", is_default=True),
+            (OUTSIDER_USER_ID, OTHER_ORG_ID): MembershipOut(
+                user_id=OUTSIDER_USER_ID, organization_id=OTHER_ORG_ID, role_id=ROLE_ID,
+                role_name="SALES_STAFF", is_default=True),
         }
 
-    def create_user(self, email, full_name, hashed_password, organization_id, role_id):
-        self.created.append((email, full_name, hashed_password))
+    def create_user(self, email, full_name, hashed_password, organization_id, role_id,
+                    username, phone=None):
+        self.created.append((email, full_name, hashed_password, username, phone))
+        self.emails.add(email)
+        self.usernames.add(username)
         now = datetime.now(timezone.utc)
-        return UserOut(id=uuid.uuid4(), email=email, full_name=full_name, is_active=True,
-                      is_superuser=False, must_change_password=False, created_at=now,
-                      last_login_at=None)
+        return UserOut(id=uuid.uuid4(), email=email, username=username, full_name=full_name,
+                      phone=phone, is_active=True, is_superuser=False,
+                      must_change_password=False, created_at=now, last_login_at=None)
 
-    def set_active(self, user_id, is_active):
+    def email_exists(self, email):
+        return email in self.emails
+
+    def username_exists(self, username):
+        return username in self.usernames
+
+    def list_users(self, organization_id):
+        return [
+            UserSummaryOut(id=m.user_id, email="x@acme.test", username="x",
+                          full_name="X", phone=None, is_active=True, is_superuser=False,
+                          must_change_password=False, role_id=m.role_id,
+                          role_name=m.role_name, created_at=datetime.now(timezone.utc),
+                          last_login_at=None)
+            for (uid, org), m in self.memberships.items() if org == organization_id
+        ]
+
+    def list_roles(self):
+        return [RoleOut(id=ROLE_ID, name="SALES_STAFF", description=None, is_system=True)]
+
+    def set_active(self, user_id, organization_id, is_active):
+        if (user_id, organization_id) not in self.memberships:
+            return False
+        if user_id in self.missing_user_rows:
+            return False
         self.active_state[user_id] = is_active
+        return True
 
-    def update_password_hash(self, user_id, new_hash, must_change_password=False):
+    def update_password_hash(self, user_id, organization_id, new_hash,
+                             must_change_password=False):
+        if (user_id, organization_id) not in self.memberships:
+            return False
+        if user_id in self.missing_user_rows:
+            return False
         self.password_updates.append((user_id, new_hash, must_change_password))
+        return True
 
     def get_membership(self, user_id, organization_id):
         return self.memberships.get((user_id, organization_id))
@@ -97,10 +164,10 @@ class FakeOrganizationRepository:
         raise NotImplementedError
 
 
-def _service_as(permissions, repo=None):
+def _service_as(permissions, repo=None, organization_id=ORG_ID):
     repo = repo or FakeUserRepository()
     sessions = SessionManager(idle_timeout=timedelta(minutes=30))
-    sessions.start(user_id=uuid.uuid4(), organization_id=ORG_ID, role_id=ROLE_ID,
+    sessions.start(user_id=uuid.uuid4(), organization_id=organization_id, role_id=ROLE_ID,
                    permissions=frozenset(permissions), is_superuser=False,
                    must_change_password=False, now=datetime.now(timezone.utc))
     audit_log = FakeAuditLogRepository()
@@ -108,25 +175,7 @@ def _service_as(permissions, repo=None):
     return UserService(repo, sessions, audit_log, organizations), repo, sessions, audit_log
 
 
-def test_admin_with_users_manage_can_deactivate():
-    service, repo, _, _ = _service_as({"users.manage"})
-    service.deactivate_user(TARGET_USER_ID)
-    assert repo.active_state[TARGET_USER_ID] is False
-
-
-def test_viewer_without_users_manage_is_denied_deactivate():
-    service, repo, _, _ = _service_as({"reports.view"})  # anything but users.manage
-    with pytest.raises(PermissionDeniedError):
-        service.deactivate_user(TARGET_USER_ID)
-    assert repo.active_state[TARGET_USER_ID] is True  # unchanged
-
-
-def test_denied_activate_does_not_touch_the_repository():
-    service, repo, _, _ = _service_as(set())
-    with pytest.raises(PermissionDeniedError):
-        service.activate_user(TARGET_USER_ID)
-    assert repo.active_state == {TARGET_USER_ID: True}
-
+# -- create_user ------------------------------------------------------------#
 
 def test_denied_create_user_does_not_touch_the_repository():
     service, repo, _, _ = _service_as(set())
@@ -136,15 +185,117 @@ def test_denied_create_user_does_not_touch_the_repository():
 
 
 def test_authorized_create_user_hashes_the_password_not_plaintext():
-    service, repo, _, _ = _service_as({"users.manage"})
+    service, repo, _, _ = _service_as({"users.create"})
     service.create_user("new@acme.test", "New Person", "pass1234", ORG_ID, ROLE_ID)
-    email, full_name, hashed = repo.created[0]
+    email, full_name, hashed, username, phone = repo.created[0]
     assert email == "new@acme.test"
     assert hashed != "pass1234"
     assert hashed.startswith("$argon2id$")
 
 
-def test_reset_password_requires_users_manage():
+def test_create_user_without_a_username_derives_one_from_the_email():
+    service, repo, _, _ = _service_as({"users.create"})
+    service.create_user("new.person@acme.test", "New Person", "pass1234", ORG_ID, ROLE_ID)
+    _email, _full_name, _hashed, username, _phone = repo.created[0]
+    assert username == "new.person"
+
+
+def test_create_user_rejects_duplicate_email():
+    service, repo, _, _ = _service_as({"users.create"})
+    repo.emails.add("dup@acme.test")
+    with pytest.raises(DuplicateEmailError):
+        service.create_user("dup@acme.test", "New Person", "pass1234", ORG_ID, ROLE_ID)
+
+
+def test_create_user_rejects_an_explicitly_chosen_duplicate_username():
+    service, repo, _, _ = _service_as({"users.create"})
+    repo.usernames.add("takenname")
+    with pytest.raises(DuplicateUsernameError):
+        service.create_user("new@acme.test", "New Person", "pass1234", ORG_ID, ROLE_ID,
+                            username="takenname")
+
+
+# -- list_users / list_roles -------------------------------------------------#
+
+def test_list_users_requires_users_view():
+    service, _, _, _ = _service_as(set())
+    with pytest.raises(PermissionDeniedError):
+        service.list_users()
+
+
+def test_list_users_scoped_to_the_callers_organization():
+    service, _, _, _ = _service_as({"users.view"})
+    result = service.list_users()
+    assert {u.id for u in result} == {TARGET_USER_ID, OWNER_USER_ID}
+
+
+def test_list_roles_requires_users_view():
+    service, _, _, _ = _service_as(set())
+    with pytest.raises(PermissionDeniedError):
+        service.list_roles()
+
+
+# -- activate/deactivate -----------------------------------------------------#
+
+def test_admin_with_users_update_can_activate():
+    service, repo, _, _ = _service_as({"users.update"})
+    repo.active_state[TARGET_USER_ID] = False
+    service.activate_user(TARGET_USER_ID)
+    assert repo.active_state[TARGET_USER_ID] is True
+
+
+def test_admin_with_users_deactivate_can_deactivate():
+    service, repo, _, _ = _service_as({"users.deactivate"})
+    service.deactivate_user(TARGET_USER_ID)
+    assert repo.active_state[TARGET_USER_ID] is False
+
+
+def test_viewer_without_permission_is_denied_deactivate():
+    service, repo, _, _ = _service_as({"reports.view"})  # anything but users.deactivate
+    with pytest.raises(PermissionDeniedError):
+        service.deactivate_user(TARGET_USER_ID)
+    assert repo.active_state[TARGET_USER_ID] is True  # unchanged
+
+
+def test_denied_activate_does_not_touch_the_repository():
+    service, repo, _, _ = _service_as(set())
+    with pytest.raises(PermissionDeniedError):
+        service.activate_user(TARGET_USER_ID)
+    assert repo.active_state == {TARGET_USER_ID: True, OWNER_USER_ID: True}
+
+
+def test_deactivate_a_user_who_is_not_a_member_of_the_callers_org_raises_membership_not_found():
+    service, repo, _, _ = _service_as({"users.deactivate"})
+    with pytest.raises(MembershipNotFoundError):
+        service.deactivate_user(OUTSIDER_USER_ID)
+    # the cross-tenant write never reached the repository at all
+    assert OUTSIDER_USER_ID not in repo.active_state
+
+
+def test_reset_password_on_a_user_outside_the_callers_org_raises_membership_not_found():
+    service, repo, _, _ = _service_as({"users.reset_password"})
+    with pytest.raises(MembershipNotFoundError):
+        service.reset_password(OUTSIDER_USER_ID)
+    assert repo.password_updates == []
+
+
+def test_deactivate_the_organizations_owner_is_refused():
+    service, repo, _, _ = _service_as({"users.deactivate"})
+    with pytest.raises(OwnerProtectedError):
+        service.deactivate_user(OWNER_USER_ID)
+    assert repo.active_state[OWNER_USER_ID] is True
+
+
+def test_change_role_of_the_organizations_owner_is_refused():
+    service, repo, _, _ = _service_as({"users.manage_roles"})
+    with pytest.raises(OwnerProtectedError):
+        service.change_user_role(OWNER_USER_ID, OTHER_ROLE_ID)
+    assert repo.memberships[(OWNER_USER_ID, ORG_ID)].role_name == "OWNER"
+
+
+# -- reset_password -----------------------------------------------------------#
+
+def test_reset_password_requires_users_reset_password():
     service, repo, _, _ = _service_as(set())
     with pytest.raises(PermissionDeniedError):
         service.reset_password(TARGET_USER_ID)
@@ -152,7 +303,7 @@ def test_reset_password_requires_users_manage():
 
 
 def test_reset_password_returns_a_one_time_temporary_password_and_forces_change():
-    service, repo, _, _ = _service_as({"users.manage"})
+    service, repo, _, _ = _service_as({"users.reset_password"})
     temp_password = service.reset_password(TARGET_USER_ID)
     assert isinstance(temp_password, str) and len(temp_password) >= 12
     user_id, new_hash, must_change = repo.password_updates[-1]
@@ -160,6 +311,40 @@ def test_reset_password_returns_a_one_time_temporary_password_and_forces_change(
     assert must_change is True
     assert new_hash != temp_password  # never stores plaintext
 
+
+def test_reset_password_on_missing_user_raises_user_not_found():
+    service, repo, _, _ = _service_as({"users.reset_password"})
+    repo.missing_user_rows.add(TARGET_USER_ID)  # membership row exists, user row doesn't
+    with pytest.raises(UserNotFoundError):
+        service.reset_password(TARGET_USER_ID)
+
+
+# -- change_user_role ---------------------------------------------------------#
+
+def test_change_user_role_requires_users_manage_roles():
+    service, repo, _, _ = _service_as(set())
+    with pytest.raises(PermissionDeniedError):
+        service.change_user_role(TARGET_USER_ID, OTHER_ROLE_ID)
+
+
+def test_change_user_role_ignores_any_other_organization_than_the_callers_own():
+    # Even though OUTSIDER_USER_ID is a real member of OTHER_ORG_ID, the
+    # caller's session is scoped to ORG_ID — organization_id is derived
+    # from the session, not accepted as an argument, so there is no way to
+    # point this call at a different tenant.
+    service, repo, _, _ = _service_as({"users.manage_roles"}, organization_id=ORG_ID)
+    with pytest.raises(MembershipNotFoundError):
+        service.change_user_role(OUTSIDER_USER_ID, OTHER_ROLE_ID)
+
+
+def test_authorized_change_user_role_updates_and_audits():
+    service, repo, _, audit_log = _service_as({"users.manage_roles"})
+    updated = service.change_user_role(TARGET_USER_ID, OTHER_ROLE_ID)
+    assert updated.role_name == "MANAGER"
+    assert any(e["action"] == "user.role_changed" for e in audit_log.entries)
+
+
+# -- unauthenticated -----------------------------------------------------------#
 
 def test_unauthenticated_call_raises_not_authenticated_not_permission_denied():
     repo = FakeUserRepository()

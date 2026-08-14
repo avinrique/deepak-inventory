@@ -40,7 +40,8 @@ def world(live_db):
                           tax_percent=Decimal("13"), minimum_stock_level=Decimal("0"))
         warehouse_a = Warehouse(organization_id=org.id, code="MAIN", name="Main")
         warehouse_b = Warehouse(organization_id=org.id, code="SECOND", name="Second")
-        user = User(email="tester@example.com", hashed_password="x", full_name="Tester")
+        user = User(email="tester@example.com", username="tester", hashed_password="x",
+                   full_name="Tester")
         session.add_all([product, warehouse_a, warehouse_b, user])
         session.flush()
         return {

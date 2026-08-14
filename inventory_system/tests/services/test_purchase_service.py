@@ -45,9 +45,9 @@ from app.services.purchase_service import PurchaseService
 ORG_ID = uuid.uuid4()
 UNIT = UnitOut(id=uuid.uuid4(), name="Piece", abbreviation="pc")
 
-ALL_PERMISSIONS = frozenset({"purchase.create", "purchase.read", "purchase.update",
-                             "purchase.approve", "purchase.receive", "purchase.cancel",
-                             "purchase.return"})
+ALL_PERMISSIONS = frozenset({"purchases.create", "purchases.view", "purchases.update",
+                             "purchases.approve", "purchases.receive", "purchases.cancel",
+                             "purchases.return"})
 
 
 class FakeSupplierRepository:
@@ -425,7 +425,7 @@ def test_cannot_cancel_an_order_with_partial_receipts():
 def test_status_transitions_require_permission():
     service, supplier, product = _setup()
     po = service.create_purchase_order(_po_data(supplier.id, product.id))
-    limited, _, purchase_orders, _ = _service(permissions=frozenset({"purchase.read"}))
+    limited, _, purchase_orders, _ = _service(permissions=frozenset({"purchases.view"}))
     with pytest.raises(PermissionDeniedError):
         limited.submit_purchase_order(po.id)
 
@@ -485,7 +485,7 @@ def test_receive_goods_requires_permission():
     po = service.create_purchase_order(_po_data(supplier.id, product.id))
     service.submit_purchase_order(po.id)
     approved = service.approve_purchase_order(po.id)
-    limited, _, _, _ = _service(permissions=frozenset({"purchase.read"}))
+    limited, _, _, _ = _service(permissions=frozenset({"purchases.view"}))
     with pytest.raises(PermissionDeniedError):
         limited.receive_goods(ReceiveGoodsRequest(
             purchase_order_id=po.id,
@@ -526,6 +526,6 @@ def test_record_return_requires_permission():
         purchase_order_id=po.id,
         lines=[GoodsReceiptLineInput(purchase_order_item_id=approved.items[0].id,
                                      quantity=Decimal("10"))]))
-    limited, _, _, _ = _service(permissions=frozenset({"purchase.read"}))
+    limited, _, _, _ = _service(permissions=frozenset({"purchases.view"}))
     with pytest.raises(PermissionDeniedError):
         limited.record_return(po.id, approved.items[0].id, Decimal("1"), "damaged")

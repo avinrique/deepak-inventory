@@ -62,7 +62,7 @@ def test_create_category_requires_product_create_permission():
 
 
 def test_create_category_succeeds_with_permission():
-    service, categories, _, _ = _service({"product.create"})
+    service, categories, _, _ = _service({"products.create"})
     service.create_category(CategoryCreate(name="Beverages"))
     assert len(categories.created) == 1
     assert categories.created[0][0] == ORG_ID
@@ -75,19 +75,19 @@ def test_list_categories_requires_product_read_permission():
 
 
 def test_delete_brand_requires_product_delete_permission():
-    service, _, brands, _ = _service({"product.create"})
+    service, _, brands, _ = _service({"products.create"})
     with pytest.raises(PermissionDeniedError):
         service.delete_brand(uuid.uuid4())
 
 
 def test_create_brand_succeeds_with_permission():
-    service, _, brands, _ = _service({"product.create"})
+    service, _, brands, _ = _service({"products.create"})
     service.create_brand(BrandCreate(name="Acme"))
     assert len(brands.created) == 1
 
 
 def test_create_unit_succeeds_with_permission():
-    service, _, _, units = _service({"product.create"})
+    service, _, _, units = _service({"products.create"})
     service.create_unit(UnitCreate(name="Kilogram", abbreviation="kg"))
     assert len(units.created) == 1
 

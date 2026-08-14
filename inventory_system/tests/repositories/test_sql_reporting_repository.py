@@ -67,7 +67,7 @@ def world(live_db):
         warehouse = Warehouse(organization_id=org.id, code="WH-A", name="Main")
         supplier = Supplier(organization_id=org.id, name="Acme Supplier")
         customer = Customer(organization_id=org.id, name="Acme Customer")
-        user = User(email="clerk@example.com", hashed_password="x", full_name="Clerk")
+        user = User(email="clerk@example.com", username="clerk", hashed_password="x", full_name="Clerk")
         session.add_all([p1, p2, p3, warehouse, supplier, customer, user])
         session.flush()
 
@@ -311,7 +311,7 @@ def discount_world(live_db):
                           minimum_stock_level=Decimal("0"))
         warehouse = Warehouse(organization_id=org.id, code="MAIN", name="Main")
         customer = Customer(organization_id=org.id, name="Discount Customer")
-        user = User(email="seller@example.com", hashed_password="x", full_name="Seller")
+        user = User(email="seller@example.com", username="seller", hashed_password="x", full_name="Seller")
         session.add_all([product, warehouse, customer, user])
         session.flush()
         return {"org_id": org.id, "product_id": product.id, "warehouse_id": warehouse.id,

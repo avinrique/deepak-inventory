@@ -45,7 +45,7 @@ from app.services.sales_service import SalesService
 ORG_ID = uuid.uuid4()
 UNIT = UnitOut(id=uuid.uuid4(), name="Piece", abbreviation="pc")
 
-ALL_PERMISSIONS = frozenset({"sales.create", "sales.read", "sales.update", "sales.confirm",
+ALL_PERMISSIONS = frozenset({"sales.create", "sales.view", "sales.update", "sales.confirm",
                              "sales.fulfill", "sales.cancel", "sales.invoice", "sales.payment",
                              "sales.refund"})
 WAREHOUSE_ID = uuid.uuid4()
@@ -413,7 +413,7 @@ def test_cannot_cancel_a_fulfilled_order():
 def test_status_transitions_require_permission():
     service, customer, product = _setup()
     so = service.create_sales_order(_so_data(customer.id, product.id))
-    limited, _, _, _ = _service(permissions=frozenset({"sales.read"}))
+    limited, _, _, _ = _service(permissions=frozenset({"sales.view"}))
     with pytest.raises(PermissionDeniedError):
         limited.confirm_sales_order(so.id)
 
@@ -429,7 +429,7 @@ def _fulfilled(service, customer, product):
 def test_generate_invoice_requires_permission():
     service, customer, product = _setup()
     fulfilled = _fulfilled(service, customer, product)
-    limited, _, _, _ = _service(permissions=frozenset({"sales.read"}))
+    limited, _, _, _ = _service(permissions=frozenset({"sales.view"}))
     with pytest.raises(PermissionDeniedError):
         limited.generate_invoice(fulfilled.id)
 
@@ -457,7 +457,7 @@ def test_record_payment_requires_permission():
     service, customer, product = _setup()
     fulfilled = _fulfilled(service, customer, product)
     invoice = service.generate_invoice(fulfilled.id)
-    limited, _, _, _ = _service(permissions=frozenset({"sales.read"}))
+    limited, _, _, _ = _service(permissions=frozenset({"sales.view"}))
     with pytest.raises(PermissionDeniedError):
         limited.record_payment(PaymentRequest(invoice_id=invoice.id, amount=Decimal("1"),
                                               method=PaymentMethod.CASH))
@@ -475,7 +475,7 @@ def test_record_return_requires_reason():
 def test_record_return_requires_permission():
     service, customer, product = _setup()
     fulfilled = _fulfilled(service, customer, product)
-    limited, _, _, _ = _service(permissions=frozenset({"sales.read"}))
+    limited, _, _, _ = _service(permissions=frozenset({"sales.view"}))
     with pytest.raises(PermissionDeniedError):
         limited.record_sales_return(fulfilled.id, fulfilled.items[0].id, Decimal("1"),
                                     "damaged")

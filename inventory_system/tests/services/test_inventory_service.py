@@ -39,7 +39,7 @@ from app.services.inventory_service import InventoryService
 ORG_ID = uuid.uuid4()
 UNIT = UnitOut(id=uuid.uuid4(), name="Piece", abbreviation="pc")
 
-ALL_PERMISSIONS = frozenset({"warehouse.manage", "inventory.read", "inventory.adjust",
+ALL_PERMISSIONS = frozenset({"warehouse.manage", "inventory.view", "inventory.adjust",
                              "inventory.transfer"})
 
 
@@ -380,7 +380,7 @@ def test_transfer_requires_inventory_transfer_permission():
     service, warehouse_a, product = _setup()
     warehouse_b = service.create_warehouse(WarehouseCreate(code="SECOND", name="Second"))
     limited, _, _, _ = _service(
-        permissions=frozenset({"inventory.read", "inventory.adjust"}))
+        permissions=frozenset({"inventory.view", "inventory.adjust"}))
     with pytest.raises(PermissionDeniedError):
         limited.transfer_stock(TransferRequest(product_id=product.id,
                                                from_warehouse_id=warehouse_a.id,
@@ -413,7 +413,7 @@ def test_reserve_more_than_on_hand_raises_insufficient_stock():
 
 def test_stock_operations_require_inventory_adjust_permission():
     service, warehouse, product = _setup()
-    limited, _, _, _ = _service(permissions=frozenset({"inventory.read"}))
+    limited, _, _, _ = _service(permissions=frozenset({"inventory.view"}))
     with pytest.raises(PermissionDeniedError):
         limited.stock_in(StockMoveRequest(product_id=product.id, warehouse_id=warehouse.id,
                                           quantity=Decimal("1")))

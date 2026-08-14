@@ -82,8 +82,8 @@ class FakeAuditLogRepository:
                             "entity_id": entity_id, "changes": changes})
 
 
-def _service(permissions=frozenset({"product.create", "product.read", "product.update",
-                                    "product.delete"}), repo=None, audit_log=None):
+def _service(permissions=frozenset({"products.create", "products.view", "products.update",
+                                    "products.delete"}), repo=None, audit_log=None):
     from datetime import datetime, timezone
     repo = repo or FakeProductRepository()
     audit_log = audit_log if audit_log is not None else FakeAuditLogRepository()
@@ -171,7 +171,7 @@ def test_update_product_missing_raises_not_found():
 
 
 def test_update_product_requires_permission():
-    service, repo = _service(permissions={"product.create"})
+    service, repo = _service(permissions={"products.create"})
     created = service.create_product(_create_data())
     other_service, _ = _service(permissions=frozenset(), repo=repo)
     with pytest.raises(PermissionDeniedError):
@@ -191,7 +191,7 @@ def test_archive_then_restore_round_trips_status():
 
 
 def test_archive_requires_product_delete_permission():
-    service, repo = _service(permissions={"product.create"})
+    service, repo = _service(permissions={"products.create"})
     created = service.create_product(_create_data())
     other_service, _ = _service(permissions=frozenset(), repo=repo)
     with pytest.raises(PermissionDeniedError):

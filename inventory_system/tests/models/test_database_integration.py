@@ -22,8 +22,8 @@ def _make_owner_membership(session):
     role = Role(name="Owner", is_system=True)
     perm = Permission(code="bills.create")
     role.permissions.append(RolePermission(permission=perm))
-    user = User(email="owner@acme.test", hashed_password=hash_password("s3cret!"),
-               full_name="Ada Owner")
+    user = User(email="owner@acme.test", username="owner",
+               hashed_password=hash_password("s3cret!"), full_name="Ada Owner")
     session.add_all([org, role, perm, user])
     session.flush()
     session.add(UserOrganization(user_id=user.id, organization_id=org.id, role_id=role.id,
@@ -55,15 +55,15 @@ def test_duplicate_email_rejected_by_unique_index(live_db):
         _make_owner_membership(session)
     with pytest.raises(IntegrityError):
         with get_session() as session:
-            session.add(User(email="owner@acme.test", hashed_password=hash_password("x"),
-                             full_name="Dup"))
+            session.add(User(email="owner@acme.test", username="dup",
+                             hashed_password=hash_password("x"), full_name="Dup"))
 
 
 def test_mixed_case_email_rejected_by_check_constraint(live_db):
     with pytest.raises(IntegrityError):
         with get_session() as session:
-            session.add(User(email="Mixed@Case.test", hashed_password=hash_password("x"),
-                             full_name="Bad"))
+            session.add(User(email="Mixed@Case.test", username="baduser",
+                             hashed_password=hash_password("x"), full_name="Bad"))
 
 
 def test_deleting_assigned_role_is_restricted(live_db):

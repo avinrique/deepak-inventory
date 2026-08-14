@@ -166,7 +166,7 @@ the only code that has to change to swap backends.
 7. **Phase 5 (optional).** Multi-organization self-service (today, an
    `AuthService.login` caller resolves ambiguous multi-org accounts via an
    explicit `organization_id`, and only `UserService` — already
-   `users.manage`-gated — can create users, so there's no self-service
+   `users.create`-gated — can create users, so there's no self-service
    signup yet).
 
 ## Why PySide6, and why not migrate the legacy app in place
@@ -262,7 +262,7 @@ mass reset. `User.hashed_password` never holds anything else — verified by
 `test_authorized_create_user_hashes_the_password_not_plaintext`.
 
 **Password reset:** there's no email/SMS infrastructure in a desktop app,
-so `UserService.reset_password` (itself `users.manage`-gated) is the
+so `UserService.reset_password` (itself `users.reset_password`-gated) is the
 realistic mechanism — generates a random temporary password, returns it
 *once* for the admin to relay out-of-band, and sets
 `must_change_password=True` so the temporary password only ever unlocks

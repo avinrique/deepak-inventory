@@ -45,15 +45,19 @@ def _admin_session_manager(org_id, role_id) -> SessionManager:
     approach) fails once the action being tested writes an audit entry.
     """
     with get_session() as session:
-        admin = User(email=f"admin-{uuid.uuid4().hex[:8]}@acme.test", hashed_password="x",
-                    full_name="Admin")
+        suffix = uuid.uuid4().hex[:8]
+        admin = User(email=f"admin-{suffix}@acme.test", username=f"admin-{suffix}",
+                    hashed_password="x", full_name="Admin")
         session.add(admin)
         session.flush()
         admin_id = admin.id
     sessions = SessionManager(idle_timeout=timedelta(minutes=30))
     sessions.start(user_id=admin_id, organization_id=org_id, role_id=role_id,
-                   permissions=frozenset({"users.manage"}), is_superuser=False,
-                   must_change_password=False, now=datetime.now(timezone.utc))
+                   permissions=frozenset({"users.view", "users.create", "users.update",
+                                         "users.deactivate", "users.reset_password",
+                                         "users.manage_roles"}),
+                   is_superuser=False, must_change_password=False,
+                   now=datetime.now(timezone.utc))
     return sessions
 
 
@@ -220,7 +224,7 @@ def test_change_user_role_records_audit_log_entry(org_and_role):
     created = user_service.create_user("staff@acme.test", "Staff Person", "s3cret!1",
                                        org_id, role_id)
 
-    user_service.change_user_role(created.id, org_id, other_role_id)
+    user_service.change_user_role(created.id, other_role_id)
 
     with get_session() as session:
         entries = (session.query(AuditLog)

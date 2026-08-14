@@ -42,6 +42,22 @@ def check_permission(session: Session, code: str) -> None:
         raise PermissionDeniedError(code)
 
 
+def has_permission(session: Session, code: str) -> bool:
+    """Non-raising counterpart to check_permission — for "should I show
+    this button/menu item" UI hints, never for the actual enforcement
+    boundary (that's check_permission/@require_permission, always called
+    again at the top of the Service method itself). A True here is only
+    ever a convenience; a UI bypass of the check that produced it still
+    hits the real check_permission call inside the Service and is denied
+    there.
+    """
+    try:
+        check_permission(session, code)
+    except (PasswordChangeRequiredError, PermissionDeniedError):
+        return False
+    return True
+
+
 def require_permission(code: str):
     def decorator(fn):
         @wraps(fn)

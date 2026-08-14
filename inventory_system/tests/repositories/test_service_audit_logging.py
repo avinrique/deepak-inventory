@@ -38,7 +38,8 @@ def world(live_db):
         session.add(org)
         session.flush()
         unit = Unit(organization_id=org.id, name="Piece", abbreviation="pc")
-        admin = User(email="admin@acme.test", hashed_password="x", full_name="Admin")
+        admin = User(email="admin@acme.test", username="admin", hashed_password="x",
+                    full_name="Admin")
         session.add_all([unit, admin])
         session.flush()
         return {"org_id": org.id, "unit_id": unit.id, "admin_id": admin.id}
@@ -66,7 +67,7 @@ def _product_data(**overrides):
 # -- product changes --------------------------------------------------------#
 
 def test_create_product_records_audit_log_entry(world):
-    sessions = _sessions(world["org_id"], world["admin_id"], {"product.create"})
+    sessions = _sessions(world["org_id"], world["admin_id"], {"products.create"})
     actor_id = sessions.peek().user_id
     service = ProductService(SqlProductRepository(), sessions, SqlAuditLogRepository())
 
@@ -82,7 +83,7 @@ def test_create_product_records_audit_log_entry(world):
 
 
 def test_update_product_records_audit_log_entry_with_before_after(world):
-    sessions = _sessions(world["org_id"], world["admin_id"], {"product.create", "product.update"})
+    sessions = _sessions(world["org_id"], world["admin_id"], {"products.create", "products.update"})
     service = ProductService(SqlProductRepository(), sessions, SqlAuditLogRepository())
     created = service.create_product(_product_data(unit_id=world["unit_id"]))
 
@@ -97,7 +98,7 @@ def test_update_product_records_audit_log_entry_with_before_after(world):
 
 
 def test_update_product_with_no_actual_changes_does_not_record_audit_log(world):
-    sessions = _sessions(world["org_id"], world["admin_id"], {"product.create", "product.update"})
+    sessions = _sessions(world["org_id"], world["admin_id"], {"products.create", "products.update"})
     service = ProductService(SqlProductRepository(), sessions, SqlAuditLogRepository())
     created = service.create_product(_product_data(unit_id=world["unit_id"]))
 
@@ -110,7 +111,7 @@ def test_update_product_with_no_actual_changes_does_not_record_audit_log(world):
 
 
 def test_archive_and_restore_product_record_audit_log_entries(world):
-    sessions = _sessions(world["org_id"], world["admin_id"], {"product.create", "product.delete", "product.update"})
+    sessions = _sessions(world["org_id"], world["admin_id"], {"products.create", "products.delete", "products.update"})
     service = ProductService(SqlProductRepository(), sessions, SqlAuditLogRepository())
     created = service.create_product(_product_data(unit_id=world["unit_id"]))
 

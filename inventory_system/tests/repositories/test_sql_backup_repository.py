@@ -21,7 +21,8 @@ from app.repositories.sql.backup_repository import SqlBackupRepository
 def world(live_db):
     with get_session() as session:
         org = Organization(name="Acme Traders")
-        admin = User(email="admin@acme.test", hashed_password="x", full_name="Admin")
+        admin = User(email="admin@acme.test", username="admin", hashed_password="x",
+                    full_name="Admin")
         session.add_all([org, admin])
         session.flush()
         return {"org_id": org.id, "admin_id": admin.id}
