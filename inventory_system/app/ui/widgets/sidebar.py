@@ -51,7 +51,7 @@ class Sidebar(QWidget):
         layout.addWidget(self._list, stretch=1)
 
         footer = QLabel("  VAT 13% default")
-        footer.setStyleSheet(f"color: #475569; font-size: 10px; padding: 16px 22px;")
+        footer.setStyleSheet(f"color: {SIDEBAR_MUTED}; font-size: 10px; padding: 16px 22px;")
         layout.addWidget(footer)
 
         self._list.setCurrentRow(0)

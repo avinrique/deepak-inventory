@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 
 from PySide6.QtCore import QThreadPool, Qt
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -55,7 +55,7 @@ from app.security.session import SessionManager
 from app.services.backup_service import BackupService
 from app.services.inventory_service import InventoryService
 from app.services.organization_service import OrganizationService
-from app.ui.theme import MUTED
+from app.ui.theme import MUTED, RED
 from app.ui.widgets.async_content import AsyncContentArea
 from app.ui.widgets.confirm_dialog import confirm_typed
 from app.ui.widgets.page_header import PageHeader
@@ -654,7 +654,7 @@ class _BackupPanel(QWidget):
             for col, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 if col == 3 and backup.status.value == "FAILED":
-                    item.setForeground(Qt.GlobalColor.red)
+                    item.setForeground(QColor(RED))
                 table.setItem(row, col, item)
         return table
 
