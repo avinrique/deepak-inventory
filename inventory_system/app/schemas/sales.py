@@ -4,8 +4,15 @@ from decimal import Decimal
 
 from pydantic import BaseModel
 
-from app.domain.pricing import line_subtotal, line_tax, line_total
-from app.domain.sales import PaymentMethod, SalesOrderStatus
+from app.domain.pricing import line_subtotal
+from app.domain.sales import (
+    PaymentMethod,
+    SalesOrderStatus,
+    line_discount,
+    line_subtotal_after_discount,
+    line_tax_after_discount,
+    line_total_after_discount,
+)
 
 
 class CustomerCreate(BaseModel):
@@ -49,6 +56,7 @@ class SalesOrderItemInput(BaseModel):
     quantity_ordered: Decimal
     unit_price: Decimal
     tax_percent: Decimal = Decimal("0")
+    discount_percent: Decimal = Decimal("0")
 
 
 class SalesOrderItemOut(BaseModel):
@@ -58,6 +66,7 @@ class SalesOrderItemOut(BaseModel):
     quantity_fulfilled: Decimal
     unit_price: Decimal
     tax_percent: Decimal
+    discount_percent: Decimal
 
     @property
     def quantity_outstanding(self) -> Decimal:
@@ -65,15 +74,25 @@ class SalesOrderItemOut(BaseModel):
 
     @property
     def subtotal(self) -> Decimal:
+        """List price before discount or tax."""
         return line_subtotal(self.quantity_ordered, self.unit_price)
 
     @property
+    def discount_amount(self) -> Decimal:
+        return line_discount(self.quantity_ordered, self.unit_price, self.discount_percent)
+
+    @property
     def tax_amount(self) -> Decimal:
-        return line_tax(self.quantity_ordered, self.unit_price, self.tax_percent)
+        """Computed on the post-discount price — see
+        app.domain.sales.line_tax_after_discount.
+        """
+        return line_tax_after_discount(self.quantity_ordered, self.unit_price,
+                                       self.discount_percent, self.tax_percent)
 
     @property
     def total(self) -> Decimal:
-        return line_total(self.quantity_ordered, self.unit_price, self.tax_percent)
+        return line_total_after_discount(self.quantity_ordered, self.unit_price,
+                                         self.discount_percent, self.tax_percent)
 
 
 class SalesOrderCreate(BaseModel):
@@ -109,6 +128,10 @@ class SalesOrderOut(BaseModel):
     @property
     def subtotal(self) -> Decimal:
         return sum((item.subtotal for item in self.items), Decimal("0"))
+
+    @property
+    def discount_amount(self) -> Decimal:
+        return sum((item.discount_amount for item in self.items), Decimal("0"))
 
     @property
     def tax_amount(self) -> Decimal:

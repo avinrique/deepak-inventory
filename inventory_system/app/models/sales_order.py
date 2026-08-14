@@ -95,6 +95,8 @@ class SalesOrderItem(UUIDPKMixin, TimestampMixin, Base):
         CheckConstraint("unit_price >= 0", name="ck_so_items_unit_price_non_negative"),
         CheckConstraint("tax_percent >= 0 AND tax_percent <= 100",
                         name="ck_so_items_tax_percent_range"),
+        CheckConstraint("discount_percent >= 0 AND discount_percent <= 100",
+                        name="ck_so_items_discount_percent_range"),
         Index("ix_so_items_sales_order_id", "sales_order_id"),
         Index("ix_so_items_product_id", "product_id"),
     )
@@ -113,6 +115,11 @@ class SalesOrderItem(UUIDPKMixin, TimestampMixin, Base):
     unit_price: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     tax_percent: Mapped[Decimal] = mapped_column(Numeric(5, 2), nullable=False,
                                                  default=Decimal("0"))
+    # Applied to this line's subtotal *before* tax (tax is charged on the
+    # discounted price) — see app.domain.sales.line_subtotal_after_discount.
+    # Purchasing has no equivalent field: a supplier's price is what it is.
+    discount_percent: Mapped[Decimal] = mapped_column(Numeric(5, 2), nullable=False,
+                                                       default=Decimal("0"))
 
     sales_order: Mapped["SalesOrder"] = relationship(back_populates="items")
     product: Mapped["Product"] = relationship()

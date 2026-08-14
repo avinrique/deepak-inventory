@@ -53,7 +53,8 @@ def validate_customer(*, name: str) -> list[str]:
 
 
 def validate_sales_order_item(*, quantity_ordered: Decimal, unit_price: Decimal,
-                              tax_percent: Decimal) -> list[str]:
+                              tax_percent: Decimal,
+                              discount_percent: Decimal = Decimal("0")) -> list[str]:
     errors = []
     if quantity_ordered <= 0:
         errors.append("Quantity must be greater than zero.")
@@ -61,7 +62,37 @@ def validate_sales_order_item(*, quantity_ordered: Decimal, unit_price: Decimal,
         errors.append("Unit price cannot be negative.")
     if not (Decimal("0") <= tax_percent <= Decimal("100")):
         errors.append("Tax percent must be between 0 and 100.")
+    if not (Decimal("0") <= discount_percent <= Decimal("100")):
+        errors.append("Discount percent must be between 0 and 100.")
     return errors
+
+
+# Discount is a sales-specific concept (a supplier price is what it is —
+# Purchasing has no discount field), so these live here rather than in the
+# shared app.domain.pricing, and are applied *before* tax: tax is charged
+# on the discounted price, not the list price, matching standard invoicing
+# convention.
+def line_discount(quantity: Decimal, unit_price: Decimal, discount_percent: Decimal) -> Decimal:
+    return line_subtotal(quantity, unit_price) * discount_percent / Decimal("100")
+
+
+def line_subtotal_after_discount(quantity: Decimal, unit_price: Decimal,
+                                 discount_percent: Decimal) -> Decimal:
+    return line_subtotal(quantity, unit_price) - line_discount(quantity, unit_price,
+                                                                discount_percent)
+
+
+def line_tax_after_discount(quantity: Decimal, unit_price: Decimal, discount_percent: Decimal,
+                            tax_percent: Decimal) -> Decimal:
+    return line_subtotal_after_discount(quantity, unit_price,
+                                        discount_percent) * tax_percent / Decimal("100")
+
+
+def line_total_after_discount(quantity: Decimal, unit_price: Decimal, discount_percent: Decimal,
+                              tax_percent: Decimal) -> Decimal:
+    after_discount = line_subtotal_after_discount(quantity, unit_price, discount_percent)
+    return after_discount + line_tax_after_discount(quantity, unit_price, discount_percent,
+                                                     tax_percent)
 
 
 def format_invoice_number(prefix: str, sequence_value: int) -> str:

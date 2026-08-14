@@ -175,7 +175,7 @@ class _ActivityFilter(QObject):
 def _build_page(key: str, container: Container) -> QWidget:
     if key == "dashboard":
         from app.ui.pages.dashboard_page import DashboardPage
-        return DashboardPage(container.dashboard_service())
+        return DashboardPage(container.reporting_service())
     if key == "inventory":
         from app.ui.pages.inventory_page import InventoryPage
         return InventoryPage(container.stock_service())
@@ -200,7 +200,9 @@ def _build_page(key: str, container: Container) -> QWidget:
         return CustomersPage()
     if key == "reports":
         from app.ui.pages.reports_page import ReportsPage
-        return ReportsPage()
+        return ReportsPage(container.reporting_service(), container.product_service(),
+                           container.catalog_service(), container.inventory_service(),
+                           container.purchase_service(), container.sales_service())
     if key == "users":
         from app.ui.pages.users_page import UsersPage
         return UsersPage()

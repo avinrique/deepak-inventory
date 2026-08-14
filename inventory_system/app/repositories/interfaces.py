@@ -19,6 +19,7 @@ from app.schemas.inventory import (
     WarehouseUpdate,
 )
 from app.schemas.party import PartyOut
+from app.schemas.reporting import DashboardMetrics, ReportFilter, ReportResult
 from app.schemas.sales import (
     CustomerCreate,
     CustomerOut,
@@ -358,6 +359,41 @@ class SalesOrderRepository(Protocol):
     def record_return(self, organization_id: uuid.UUID, sales_order_id: uuid.UUID,
                       sales_order_item_id: uuid.UUID, quantity: Decimal, reason: str,
                       returned_by: uuid.UUID) -> SalesReturnOut: ...
+
+
+class ReportingRepository(Protocol):
+    """Read-only, and always SQL-aggregated — no method here loads a whole
+    table's rows into Python to sum/count/group them in application code
+    (see app.repositories.sql.reporting_repository's module docstring).
+    """
+
+    def get_dashboard_metrics(self, organization_id: uuid.UUID,
+                              filter: ReportFilter) -> DashboardMetrics: ...
+
+    def stock_report(self, organization_id: uuid.UUID, filter: ReportFilter) -> ReportResult: ...
+
+    def sales_report(self, organization_id: uuid.UUID, filter: ReportFilter) -> ReportResult: ...
+
+    def purchase_report(self, organization_id: uuid.UUID,
+                        filter: ReportFilter) -> ReportResult: ...
+
+    def profit_report(self, organization_id: uuid.UUID,
+                      filter: ReportFilter) -> ReportResult: ...
+
+    def low_stock_report(self, organization_id: uuid.UUID,
+                         filter: ReportFilter) -> ReportResult: ...
+
+    def supplier_report(self, organization_id: uuid.UUID,
+                        filter: ReportFilter) -> ReportResult: ...
+
+    def customer_report(self, organization_id: uuid.UUID,
+                        filter: ReportFilter) -> ReportResult: ...
+
+    def product_movement_report(self, organization_id: uuid.UUID,
+                                filter: ReportFilter) -> ReportResult: ...
+
+    def inventory_valuation_report(self, organization_id: uuid.UUID,
+                                   filter: ReportFilter) -> ReportResult: ...
 
 
 class AuditLogRepository(Protocol):
