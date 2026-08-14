@@ -335,6 +335,15 @@ class SqlSalesOrderRepository:
                 return None
             return _invoice_to_out(invoice)
 
+    def get_invoice_by_sales_order(self, organization_id: uuid.UUID,
+                                   sales_order_id: uuid.UUID) -> InvoiceOut | None:
+        with get_session() as db:
+            invoice = (db.query(Invoice)
+                      .filter_by(organization_id=organization_id,
+                                sales_order_id=sales_order_id)
+                      .first())
+            return _invoice_to_out(invoice) if invoice is not None else None
+
     def get_invoice_document(self, organization_id: uuid.UUID,
                             invoice_id: uuid.UUID) -> InvoiceDocumentData | None:
         with get_session() as db:

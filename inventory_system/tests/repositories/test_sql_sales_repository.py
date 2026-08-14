@@ -323,6 +323,24 @@ def test_get_invoice_document_payment_status_paid(world):
     assert doc.payment_status.value == "PAID"
 
 
+def test_get_invoice_by_sales_order_returns_the_generated_invoice(world):
+    repo = _repo()
+    so = _fulfilled_so(world, quantity=Decimal("1"), unit_price=Decimal("100"))
+    invoice = repo.generate_invoice(world["org_id"], so.id, world["user_id"])
+
+    found = repo.get_invoice_by_sales_order(world["org_id"], so.id)
+
+    assert found is not None
+    assert found.id == invoice.id
+    assert found.invoice_number == invoice.invoice_number
+
+
+def test_get_invoice_by_sales_order_none_when_not_yet_generated(world):
+    repo = _repo()
+    so = _confirmed_so(world)   # not fulfilled/invoiced yet
+    assert repo.get_invoice_by_sales_order(world["org_id"], so.id) is None
+
+
 def test_get_invoice_document_missing_returns_none(world):
     import uuid
     repo = _repo()

@@ -355,6 +355,9 @@ class SalesOrderRepository(Protocol):
     def get_invoice(self, organization_id: uuid.UUID,
                    invoice_id: uuid.UUID) -> InvoiceOut | None: ...
 
+    def get_invoice_by_sales_order(self, organization_id: uuid.UUID,
+                                   sales_order_id: uuid.UUID) -> InvoiceOut | None: ...
+
     def get_invoice_document(self, organization_id: uuid.UUID,
                             invoice_id: uuid.UUID) -> InvoiceDocumentData | None: ...
 

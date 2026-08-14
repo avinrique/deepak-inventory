@@ -201,6 +201,10 @@ class FakeSalesOrderRepository:
     def get_invoice(self, organization_id, invoice_id):
         return self.invoices.get(invoice_id)
 
+    def get_invoice_by_sales_order(self, organization_id, sales_order_id):
+        return next((inv for inv in self.invoices.values()
+                    if inv.sales_order_id == sales_order_id), None)
+
     def record_payment(self, organization_id, data: PaymentRequest, recorded_by) -> PaymentOut:
         invoice = self.invoices[data.invoice_id]
         so = next(o for o in self.orders.values() if o.id == invoice.sales_order_id)
@@ -481,3 +485,30 @@ def test_record_return_missing_sales_order_raises_not_found():
     service, _, _ = _setup()
     with pytest.raises(SalesOrderNotFoundError):
         service.record_sales_return(uuid.uuid4(), uuid.uuid4(), Decimal("1"), "damaged")
+
+
+# -- get_invoice_by_sales_order --------------------------------------------#
+
+def test_get_invoice_by_sales_order_returns_none_before_invoicing():
+    service, customer, product = _setup()
+    fulfilled = _fulfilled(service, customer, product)
+    assert service.get_invoice_by_sales_order(fulfilled.id) is None
+
+
+def test_get_invoice_by_sales_order_returns_the_invoice_once_generated():
+    service, customer, product = _setup()
+    fulfilled = _fulfilled(service, customer, product)
+    invoice = service.generate_invoice(fulfilled.id)
+
+    found = service.get_invoice_by_sales_order(fulfilled.id)
+
+    assert found is not None
+    assert found.id == invoice.id
+
+
+def test_get_invoice_by_sales_order_requires_permission():
+    service, customer, product = _setup()
+    fulfilled = _fulfilled(service, customer, product)
+    limited, _, _, _ = _service(permissions=frozenset())
+    with pytest.raises(PermissionDeniedError):
+        limited.get_invoice_by_sales_order(fulfilled.id)

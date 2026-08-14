@@ -180,8 +180,8 @@ def _build_page(key: str, container: Container) -> QWidget:
         from app.ui.pages.inventory_page import InventoryPage
         return InventoryPage(container.stock_service())
     if key == "sales":
-        from app.ui.pages.sales_page import SalesPage
-        return SalesPage(container.billing_service())
+        from app.ui.pages.sales_orders_page import SalesOrdersPage
+        return SalesOrdersPage(container.sales_service(), container.inventory_service())
     if key == "purchases":
         from app.ui.pages.purchases_page import PurchasesPage
         return PurchasesPage(container.billing_service())

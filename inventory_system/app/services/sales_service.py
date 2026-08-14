@@ -217,6 +217,15 @@ class SalesService:
             raise InvoiceNotFoundError(invoice_id)
         return result
 
+    @require_permission("sales.read")
+    def get_invoice_by_sales_order(self, sales_order_id: uuid.UUID) -> InvoiceOut | None:
+        """None (not an error) when no invoice has been generated yet for
+        this order — callers (e.g. the Sales page's "View Invoice" action)
+        use this to distinguish "not generated yet" from a real failure.
+        """
+        return self._sales_orders.get_invoice_by_sales_order(self._organization_id(),
+                                                              sales_order_id)
+
     @require_permission("sales.payment")
     def record_payment(self, data: PaymentRequest) -> PaymentOut:
         if data.amount <= 0:
