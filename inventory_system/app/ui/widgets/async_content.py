@@ -4,6 +4,7 @@ the shared QThreadPool) — keeps that orchestration in one place instead of
 Dashboard/Inventory/Sales/Purchases each reimplementing the same dance, and
 keeps I/O off the UI thread.
 """
+import logging
 from collections.abc import Callable
 from typing import Any
 
@@ -12,6 +13,8 @@ from PySide6.QtWidgets import QStackedWidget, QWidget
 
 from app.ui.widgets.states import ErrorStateWidget, LoadingStateWidget
 from app.workers.base_worker import Worker
+
+_logger = logging.getLogger(__name__)
 
 
 class AsyncContentArea(QStackedWidget):
@@ -66,4 +69,5 @@ class AsyncContentArea(QStackedWidget):
     def _on_error(self, exc: Exception, generation: int) -> None:
         if generation != self._generation:
             return
+        _logger.exception("Loading data failed", exc_info=exc)
         self.setCurrentWidget(self._error_widget)

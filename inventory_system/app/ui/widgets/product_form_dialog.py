@@ -6,6 +6,13 @@ hands them to ProductService, and displays whatever it returns or raises
 normalization, price/tax validation, and duplicate checks all happen in
 app.domain.product / ProductService, not in this class.
 
+Categories/brands/units are passed in already-fetched (see ProductsPage,
+which loads them once via a background Worker and caches them) rather
+than this dialog querying CatalogService itself in __init__ — doing that
+query synchronously used to block the GUI thread on every single dialog
+open (a real, measured freeze, not theoretical), since __init__ runs
+before dialog.exec() returns control to the event loop.
+
 read_only=True turns this into a view-only dialog (fields disabled, no
 Save button) — the caller decides that based on whether the current
 session actually has product.update, giving "View Product" without a
@@ -31,8 +38,7 @@ from app.core.exceptions import (
     ProductNotFoundError,
     ProductValidationError,
 )
-from app.schemas.product import ProductCreate, ProductOut, ProductUpdate
-from app.services.catalog_service import CatalogService
+from app.schemas.product import BrandOut, CategoryOut, ProductCreate, ProductOut, ProductUpdate, UnitOut
 from app.services.product_service import ProductService
 from app.ui.theme import RED, STYLESHEET
 from app.workers.base_worker import Worker
@@ -41,7 +47,8 @@ _NONE_ITEM = "—"
 
 
 class ProductFormDialog(QDialog):
-    def __init__(self, product_service: ProductService, catalog_service: CatalogService,
+    def __init__(self, product_service: ProductService, categories: list[CategoryOut],
+                brands: list[BrandOut], units: list[UnitOut],
                 product: ProductOut | None = None, read_only: bool = False, parent=None,
                 default_tax_percent: Decimal = Decimal("0")):
         super().__init__(parent)
@@ -75,26 +82,23 @@ class ProductFormDialog(QDialog):
         form.addRow("Description", self._description)
 
         self._category = QComboBox()
-        self._categories = catalog_service.list_categories()
         self._category.addItem(_NONE_ITEM, None)
-        for c in self._categories:
+        for c in categories:
             self._category.addItem(c.name, c.id)
         if product and product.category:
             self._select_by_data(self._category, product.category.id)
         form.addRow("Category", self._category)
 
         self._brand = QComboBox()
-        self._brands = catalog_service.list_brands()
         self._brand.addItem(_NONE_ITEM, None)
-        for b in self._brands:
+        for b in brands:
             self._brand.addItem(b.name, b.id)
         if product and product.brand:
             self._select_by_data(self._brand, product.brand.id)
         form.addRow("Brand", self._brand)
 
         self._unit = QComboBox()
-        self._units = catalog_service.list_units()
-        for u in self._units:
+        for u in units:
             self._unit.addItem(f"{u.name} ({u.abbreviation})", u.id)
         if product:
             self._select_by_data(self._unit, product.unit.id)

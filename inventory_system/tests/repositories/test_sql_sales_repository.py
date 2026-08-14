@@ -245,6 +245,43 @@ def test_fulfill_multi_line_order_deducts_each_product(world):
     assert level2.quantity_on_hand == Decimal("44")
 
 
+def test_fulfill_rolls_back_earlier_lines_when_a_later_line_has_insufficient_stock(world):
+    """fulfill_sale loops over every item in one transaction (see the
+    module docstring). Item 1 has plenty of stock and would succeed on its
+    own; item 2 doesn't. Proves the whole fulfillment is atomic — item 1's
+    already-applied deduction must not survive just because it happened to
+    be processed before the item that failed.
+    """
+    _stock_in(world, Decimal("50"))  # plenty for product 1
+    with get_session() as session:
+        inv2 = Inventory(organization_id=world["org_id"], product_id=world["product2_id"],
+                         warehouse_id=world["warehouse_id"], quantity_on_hand=Decimal("2"))
+        session.add(inv2)  # NOT enough for product 2's order
+
+    repo = _repo()
+    data = SalesOrderCreate(
+        customer_id=world["customer_id"], warehouse_id=world["warehouse_id"],
+        items=[SalesOrderItemInput(product_id=world["product_id"], quantity_ordered=Decimal("4"),
+                                   unit_price=Decimal("15"), tax_percent=Decimal("0")),
+              SalesOrderItemInput(product_id=world["product2_id"], quantity_ordered=Decimal("6"),
+                                 unit_price=Decimal("30"), tax_percent=Decimal("0"))])
+    so = repo.create(world["org_id"], data, world["user_id"])
+    so = repo.confirm(world["org_id"], so.id, world["user_id"])
+
+    with pytest.raises(Exception):  # InsufficientStockError, from _apply on product 2
+        repo.fulfill_sale(world["org_id"], so.id, world["user_id"])
+
+    inv_repo = SqlInventoryRepository()
+    level1 = inv_repo.get_level(world["org_id"], world["product_id"], world["warehouse_id"])
+    level2 = inv_repo.get_level(world["org_id"], world["product2_id"], world["warehouse_id"])
+    assert level1.quantity_on_hand == Decimal("50")  # product 1's deduction did NOT persist
+    assert level2.quantity_on_hand == Decimal("2")
+
+    unchanged = repo.get_by_id(world["org_id"], so.id)
+    assert unchanged.status == SalesOrderStatus.CONFIRMED  # never advanced to FULFILLED
+    assert all(i.quantity_fulfilled == Decimal("0") for i in unchanged.items)
+
+
 def test_fulfill_records_audit_log_entry(world):
     _stock_in(world, Decimal("50"))
     repo = _repo()

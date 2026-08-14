@@ -176,3 +176,25 @@ def test_restore_backup_missing_file_fails_safely(live_db):
     outcome = restore_backup(settings.test_database_url, "/nonexistent/path/backup.dump")
     assert outcome.success is False
     assert outcome.error_message is not None
+
+
+def test_restore_backup_with_unreachable_host_fails_safely_without_leaking_password(
+        tmp_path, live_db):
+    # A real, valid backup file — restore must fail on the *connection*,
+    # not on the file being unreadable, to actually exercise the
+    # restore-time-DB-unavailable path (vs. create_backup's already-tested
+    # unreachable-host case).
+    outcome = create_backup(settings.test_database_url, str(tmp_path))
+    assert outcome.success
+
+    bad_url = "postgresql+psycopg://baduser:sup3rsecret@127.0.0.1:1/inventory_test"
+    restore_outcome = restore_backup(bad_url, outcome.file_path)
+
+    assert restore_outcome.success is False
+    assert restore_outcome.error_message is not None
+    assert "sup3rsecret" not in restore_outcome.error_message
+
+    # The real database (still holding whatever live_db seeded) must be
+    # completely untouched by the failed attempt.
+    with get_session() as session:
+        session.query(Organization).count()  # must not raise — DB still intact

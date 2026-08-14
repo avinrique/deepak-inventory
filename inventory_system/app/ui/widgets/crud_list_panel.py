@@ -6,6 +6,7 @@ field text, builds the given Pydantic schema, and calls whatever
 create/update/delete/list callables it was given — CatalogService owns the
 actual rules (permissions, persistence).
 """
+import logging
 from collections.abc import Callable
 from typing import Any
 
@@ -25,6 +26,8 @@ from PySide6.QtWidgets import (
 from app.ui.theme import RED
 from app.ui.widgets.confirm_dialog import confirm
 from app.workers.base_worker import Worker
+
+_logger = logging.getLogger(__name__)
 
 
 class CrudListPanel(QWidget):
@@ -95,8 +98,12 @@ class CrudListPanel(QWidget):
     def reload(self) -> None:
         worker = Worker(self._list_fn)
         worker.signals.finished.connect(self._on_loaded)
-        worker.signals.error.connect(lambda exc: self._show_error("Couldn't load the list."))
+        worker.signals.error.connect(self._on_load_error)
         QThreadPool.globalInstance().start(worker)
+
+    def _on_load_error(self, exc: Exception) -> None:
+        _logger.exception("Couldn't load the list", exc_info=exc)
+        self._show_error("Couldn't load the list.")
 
     def _on_loaded(self, items: list) -> None:
         self._items = items
@@ -152,6 +159,7 @@ class CrudListPanel(QWidget):
 
     def _on_save_error(self, exc: Exception) -> None:
         self._save_button.setEnabled(True)
+        _logger.exception("Couldn't save catalog item", exc_info=exc)
         self._show_error("Couldn't save — that name may already be in use.")
 
     def _delete(self) -> None:
@@ -163,9 +171,12 @@ class CrudListPanel(QWidget):
         target_id = self._selected_id
         worker = Worker(self._delete_fn, target_id)
         worker.signals.finished.connect(lambda _: (self._clear_form(), self.reload()))
-        worker.signals.error.connect(lambda exc: self._show_error(
-            "Couldn't delete — it's probably in use by a product."))
+        worker.signals.error.connect(self._on_delete_error)
         QThreadPool.globalInstance().start(worker)
+
+    def _on_delete_error(self, exc: Exception) -> None:
+        _logger.exception("Couldn't delete catalog item", exc_info=exc)
+        self._show_error("Couldn't delete — it's probably in use by a product.")
 
     def _show_error(self, message: str) -> None:
         self._error_label.setText(message)

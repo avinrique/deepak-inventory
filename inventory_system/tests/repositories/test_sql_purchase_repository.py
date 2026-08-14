@@ -15,7 +15,17 @@ import pytest
 
 from app.database.session import get_session
 from app.domain.purchasing import PurchaseOrderStatus
-from app.models import AuditLog, Inventory, Organization, Product, Supplier, Unit, User, Warehouse
+from app.models import (
+    AuditLog,
+    GoodsReceipt,
+    Inventory,
+    Organization,
+    Product,
+    Supplier,
+    Unit,
+    User,
+    Warehouse,
+)
 from app.repositories.sql.inventory_repository import SqlInventoryRepository
 from app.repositories.sql.purchase_repository import SqlPurchaseOrderRepository
 from app.repositories.sql.supplier_repository import SqlSupplierRepository
@@ -313,6 +323,52 @@ def test_receive_goods_multiple_line_items_in_one_receipt(world):
     level2 = inv_repo.get_level(world["org_id"], world["product2_id"], world["warehouse_id"])
     assert level1.quantity_on_hand == Decimal("10")
     assert level2.quantity_on_hand == Decimal("4")
+
+
+def test_receive_goods_rolls_back_earlier_lines_when_a_later_line_over_receives(world):
+    """A single receive_goods call spanning multiple line items is one
+    transaction (see the module docstring's explanation of why
+    receive_goods reuses inventory_repository._apply directly rather than
+    going through SqlInventoryRepository). If line 2 is rejected (over-
+    receipt), line 1's already-applied inventory increase — earlier in the
+    same Python loop, already flushed to the session — must not survive:
+    proves the whole receipt is atomic, not "best effort per line".
+    """
+    repo = _repo()
+    data = PurchaseOrderCreate(
+        supplier_id=world["supplier_id"], warehouse_id=world["warehouse_id"],
+        items=[PurchaseOrderItemInput(product_id=world["product_id"],
+                                      quantity_ordered=Decimal("10"), unit_price=Decimal("5"),
+                                      tax_percent=Decimal("0")),
+              PurchaseOrderItemInput(product_id=world["product2_id"],
+                                    quantity_ordered=Decimal("4"), unit_price=Decimal("8"),
+                                    tax_percent=Decimal("0"))])
+    po = repo.create(world["org_id"], data, world["user_id"])
+    repo.submit(world["org_id"], po.id)
+    po = repo.approve(world["org_id"], po.id, world["user_id"])
+
+    lines = [
+        GoodsReceiptLineInput(purchase_order_item_id=po.items[0].id,
+                              quantity=Decimal("10")),  # legitimate, applied first
+        GoodsReceiptLineInput(purchase_order_item_id=po.items[1].id,
+                              quantity=Decimal("999")),  # over-receipt, rejected
+    ]
+
+    with pytest.raises(Exception):  # PurchaseOrderValidationError
+        repo.receive_goods(world["org_id"], po.id, lines, world["user_id"])
+
+    inv_repo = SqlInventoryRepository()
+    level1 = inv_repo.get_level(world["org_id"], world["product_id"], world["warehouse_id"])
+    level2 = inv_repo.get_level(world["org_id"], world["product2_id"], world["warehouse_id"])
+    assert level1.quantity_on_hand == Decimal("0")   # line 1's increase did NOT persist
+    assert level2.quantity_on_hand == Decimal("0")
+
+    unchanged = repo.get_by_id(world["org_id"], po.id)
+    assert unchanged.status == PurchaseOrderStatus.APPROVED  # never advanced to RECEIVED
+    assert all(i.quantity_received == Decimal("0") for i in unchanged.items)
+
+    with get_session() as session:
+        assert session.query(GoodsReceipt).filter_by(purchase_order_id=po.id).count() == 0
 
 
 # -- purchase returns -------------------------------------------------------#

@@ -64,7 +64,19 @@ class ProductsPage(QWidget):
             worker = Worker(organization_service.get_current_organization)
             worker.signals.finished.connect(
                 lambda org: setattr(self, "_default_tax_percent", org.default_tax_percent))
+            worker.signals.error.connect(
+                lambda exc: _logger.exception("Failed to load default tax percent",
+                                              exc_info=exc))
             QThreadPool.globalInstance().start(worker)
+
+        # Loaded once via a background Worker (see _load_catalog_options)
+        # rather than queried synchronously wherever they're needed — a
+        # per-dialog-open or per-page-load synchronous CatalogService call
+        # used to block the GUI thread. Cached here and handed to
+        # ProductFormDialog/the filter dropdowns already-fetched.
+        self._categories: list = []
+        self._brands: list = []
+        self._units: list = []
 
         self._page = 1
         self._sort_by = "name"
@@ -152,14 +164,44 @@ class ProductsPage(QWidget):
             add_button.clicked.connect(self._open_add_dialog)
             bar.addWidget(add_button)
 
-        self._populate_filter_options()
+        self._load_catalog_options()
         return bar
 
-    def _populate_filter_options(self) -> None:
-        for category in self._catalog_service.list_categories():
+    def _load_catalog_options(self) -> None:
+        def load():
+            return (self._catalog_service.list_categories(),
+                    self._catalog_service.list_brands(), self._catalog_service.list_units())
+
+        worker = Worker(load)
+        worker.signals.finished.connect(self._on_catalog_options_loaded)
+        worker.signals.error.connect(self._on_catalog_options_error)
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_catalog_options_loaded(self, result) -> None:
+        self._categories, self._brands, self._units = result
+
+        previous_category = self._category_filter.currentData()
+        previous_brand = self._brand_filter.currentData()
+
+        self._category_filter.clear()
+        self._category_filter.addItem("All Categories", None)
+        for category in self._categories:
             self._category_filter.addItem(category.name, category.id)
-        for brand in self._catalog_service.list_brands():
+        self._brand_filter.clear()
+        self._brand_filter.addItem("All Brands", None)
+        for brand in self._brands:
             self._brand_filter.addItem(brand.name, brand.id)
+
+        index = self._category_filter.findData(previous_category)
+        if index >= 0:
+            self._category_filter.setCurrentIndex(index)
+        index = self._brand_filter.findData(previous_brand)
+        if index >= 0:
+            self._brand_filter.setCurrentIndex(index)
+
+    def _on_catalog_options_error(self, exc: Exception) -> None:
+        _logger.exception("Failed to load catalog options (categories/brands/units)",
+                          exc_info=exc)
 
     # -- row actions ----------------------------------------------------#
     def _build_row_actions(self) -> QHBoxLayout:
@@ -290,8 +332,8 @@ class ProductsPage(QWidget):
 
     # -- dialogs -------------------------------------------------------- #
     def _open_add_dialog(self) -> None:
-        dialog = ProductFormDialog(self._product_service, self._catalog_service,
-                                   parent=self,
+        dialog = ProductFormDialog(self._product_service, self._categories, self._brands,
+                                   self._units, parent=self,
                                    default_tax_percent=self._default_tax_percent)
         if dialog.exec():
             self.refresh()
@@ -301,19 +343,16 @@ class ProductsPage(QWidget):
         if product is None:
             return
         read_only = not self._can("product.update")
-        dialog = ProductFormDialog(self._product_service, self._catalog_service,
-                                   product=product, read_only=read_only, parent=self)
+        dialog = ProductFormDialog(self._product_service, self._categories, self._brands,
+                                   self._units, product=product, read_only=read_only,
+                                   parent=self)
         if dialog.exec():
             self.refresh()
 
     def _open_catalog_manager(self) -> None:
         dialog = CatalogManagerDialog(self._catalog_service, parent=self)
         dialog.exec()
-        self._category_filter.clear()
-        self._category_filter.addItem("All Categories", None)
-        self._brand_filter.clear()
-        self._brand_filter.addItem("All Brands", None)
-        self._populate_filter_options()
+        self._load_catalog_options()  # catalog may have changed — reload, off the GUI thread
         self.refresh()
 
     def _archive_selected(self) -> None:
