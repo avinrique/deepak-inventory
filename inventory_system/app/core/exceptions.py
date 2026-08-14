@@ -91,3 +91,34 @@ class InsufficientStockError(AppError):
 class InvalidTransferError(AppError):
     def __init__(self, message: str):
         super().__init__(message)
+
+
+class SupplierNotFoundError(AppError):
+    def __init__(self, supplier_id):
+        self.supplier_id = supplier_id
+        super().__init__(f"Supplier {supplier_id!r} not found")
+
+
+class PurchaseOrderNotFoundError(AppError):
+    def __init__(self, purchase_order_id):
+        self.purchase_order_id = purchase_order_id
+        super().__init__(f"Purchase order {purchase_order_id!r} not found")
+
+
+class PurchaseOrderItemNotFoundError(AppError):
+    def __init__(self, purchase_order_item_id):
+        self.purchase_order_item_id = purchase_order_item_id
+        super().__init__(f"Purchase order item {purchase_order_item_id!r} not found")
+
+
+class PurchaseOrderValidationError(AppError):
+    def __init__(self, errors: list[str]):
+        self.errors = errors
+        super().__init__("; ".join(errors))
+
+
+class InvalidPurchaseOrderTransitionError(AppError):
+    def __init__(self, current, target):
+        self.current = current
+        self.target = target
+        super().__init__(f"Cannot move purchase order from {current!r} to {target!r}")

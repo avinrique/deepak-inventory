@@ -19,6 +19,19 @@ from app.schemas.inventory import (
     WarehouseUpdate,
 )
 from app.schemas.party import PartyOut
+from app.schemas.purchasing import (
+    GoodsReceiptLineInput,
+    GoodsReceiptOut,
+    PurchaseOrderCreate,
+    PurchaseOrderFilter,
+    PurchaseOrderOut,
+    PurchaseOrderPage,
+    PurchaseOrderUpdate,
+    PurchaseReturnOut,
+    SupplierCreate,
+    SupplierOut,
+    SupplierUpdate,
+)
 from app.schemas.product import (
     BrandCreate,
     BrandOut,
@@ -221,3 +234,68 @@ class InventoryRepository(Protocol):
 
     def list_transactions(self, organization_id: uuid.UUID,
                           filter: TransactionFilter) -> InventoryTransactionPage: ...
+
+
+class SupplierRepository(Protocol):
+    def create(self, organization_id: uuid.UUID, data: SupplierCreate) -> SupplierOut: ...
+
+    def update(self, organization_id: uuid.UUID, supplier_id: uuid.UUID,
+              data: SupplierUpdate) -> SupplierOut | None: ...
+
+    def get_by_id(self, organization_id: uuid.UUID,
+                 supplier_id: uuid.UUID) -> SupplierOut | None: ...
+
+    def list_all(self, organization_id: uuid.UUID) -> list[SupplierOut]: ...
+
+
+class PurchaseOrderRepository(Protocol):
+    """Every state-changing method runs inside one database transaction —
+    see app.repositories.sql.purchase_repository. receive_goods and
+    record_return additionally update the inventory ledger and append an
+    audit log entry in that same transaction, by reusing
+    app.repositories.sql.inventory_repository's locked ``_apply`` helper
+    directly rather than calling InventoryRepository (which would open its
+    own, separate transaction).
+    """
+
+    def create(self, organization_id: uuid.UUID, data: PurchaseOrderCreate,
+              created_by: uuid.UUID) -> PurchaseOrderOut: ...
+
+    def update(self, organization_id: uuid.UUID, purchase_order_id: uuid.UUID,
+              data: PurchaseOrderUpdate) -> PurchaseOrderOut | None: ...
+
+    def get_by_id(self, organization_id: uuid.UUID,
+                 purchase_order_id: uuid.UUID) -> PurchaseOrderOut | None: ...
+
+    def search(self, organization_id: uuid.UUID,
+              filter: PurchaseOrderFilter) -> PurchaseOrderPage: ...
+
+    def submit(self, organization_id: uuid.UUID,
+              purchase_order_id: uuid.UUID) -> PurchaseOrderOut | None: ...
+
+    def approve(self, organization_id: uuid.UUID, purchase_order_id: uuid.UUID,
+              approved_by: uuid.UUID) -> PurchaseOrderOut | None: ...
+
+    def cancel(self, organization_id: uuid.UUID,
+              purchase_order_id: uuid.UUID) -> PurchaseOrderOut | None: ...
+
+    def receive_goods(self, organization_id: uuid.UUID, purchase_order_id: uuid.UUID,
+                      lines: list[GoodsReceiptLineInput], received_by: uuid.UUID,
+                      notes: str | None = None) -> GoodsReceiptOut: ...
+
+    def record_return(self, organization_id: uuid.UUID, purchase_order_id: uuid.UUID,
+                      purchase_order_item_id: uuid.UUID, quantity: Decimal, reason: str,
+                      returned_by: uuid.UUID) -> PurchaseReturnOut: ...
+
+
+class AuditLogRepository(Protocol):
+    """Append-only — there is deliberately no read/list method here yet;
+    nothing in this codebase consumes audit log entries yet (see
+    audit_logs.view in app.security.permissions, granted but not wired to
+    anything). Writing is what Purchasing's goods-receipt flow needs now.
+    """
+
+    def record(self, *, organization_id: uuid.UUID | None, user_id: uuid.UUID | None,
+              actor_email: str | None, organization_name: str | None, action: str,
+              entity_type: str | None = None, entity_id: uuid.UUID | None = None,
+              changes: dict | None = None) -> None: ...

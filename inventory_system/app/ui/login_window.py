@@ -94,9 +94,6 @@ class LoginWindow(QWidget):
     def _submit(self) -> None:
         email = self._email.text().strip()
         password = self._password.text()
-        print(f"TEMPDEBUG login attempt email={email!r} password_len={len(password)} "
-             f"database_url={__import__('app.config.settings', fromlist=['settings']).settings.database_url!r}",
-             flush=True)
         self._error_label.hide()
         if not email or not password:
             self._show_error("Enter your email and password.")
@@ -114,7 +111,6 @@ class LoginWindow(QWidget):
         self.login_succeeded.emit(session)
 
     def _on_error(self, exc: Exception) -> None:
-        print(f"TEMPDEBUG login error type={type(exc).__name__} message={exc!r}", flush=True)
         self._set_busy(False)
         if isinstance(exc, InvalidCredentialsError):
             self._show_error("Incorrect email or password.")

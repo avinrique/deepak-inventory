@@ -16,6 +16,8 @@ from app.repositories.sql.brand_repository import SqlBrandRepository
 from app.repositories.sql.category_repository import SqlCategoryRepository
 from app.repositories.sql.inventory_repository import SqlInventoryRepository
 from app.repositories.sql.product_repository import SqlProductRepository
+from app.repositories.sql.purchase_repository import SqlPurchaseOrderRepository
+from app.repositories.sql.supplier_repository import SqlSupplierRepository
 from app.repositories.sql.unit_repository import SqlUnitRepository
 from app.repositories.sql.user_repository import SqlUserRepository
 from app.repositories.sql.warehouse_repository import SqlWarehouseRepository
@@ -27,6 +29,7 @@ from app.services.dashboard_service import DashboardService
 from app.services.inventory_service import InventoryService
 from app.services.party_service import PartyService
 from app.services.product_service import ProductService
+from app.services.purchase_service import PurchaseService
 from app.services.stock_service import StockService
 from app.services.user_service import UserService
 
@@ -81,6 +84,8 @@ class Container:
         self.product_repo = SqlProductRepository()
         self.warehouse_repo = SqlWarehouseRepository()
         self.inventory_repo = SqlInventoryRepository()
+        self.supplier_repo = SqlSupplierRepository()
+        self.purchase_order_repo = SqlPurchaseOrderRepository()
         self.sessions = SessionManager(
             idle_timeout=timedelta(minutes=settings.session_idle_timeout_minutes))
 
@@ -114,3 +119,7 @@ class Container:
     def inventory_service(self) -> InventoryService:
         return InventoryService(self.warehouse_repo, self.inventory_repo, self.product_repo,
                                 self.sessions)
+
+    def purchase_service(self) -> PurchaseService:
+        return PurchaseService(self.supplier_repo, self.purchase_order_repo, self.product_repo,
+                               self.warehouse_repo, self.sessions)
