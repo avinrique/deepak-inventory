@@ -197,7 +197,8 @@ class PurchaseService:
         # CANCELLED-reachable status. Once something's been received, a
         # purchase return is the correct tool, not cancellation.
         self._transition_or_raise(purchase_order_id, PurchaseOrderStatus.CANCELLED)
-        result = self._purchase_orders.cancel(self._organization_id(), purchase_order_id)
+        result = self._purchase_orders.cancel(self._organization_id(), purchase_order_id,
+                                              self._current_user_id())
         if result is None:
             raise PurchaseOrderNotFoundError(purchase_order_id)
         return result

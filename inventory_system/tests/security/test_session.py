@@ -159,3 +159,25 @@ def test_mark_password_changed_clears_the_flag():
 def test_mark_password_changed_is_a_noop_when_logged_out():
     manager = _manager()
     manager.mark_password_changed()  # must not raise
+
+
+def test_set_idle_timeout_changes_the_effective_timeout_live():
+    manager = _manager(minutes=30)
+    _start(manager)
+    manager.set_idle_timeout(timedelta(minutes=5))
+
+    # 10 minutes idle: fine under the original 30-minute timeout, expired
+    # under the new 5-minute one — proves the change took effect on the
+    # already-running session, not just future ones.
+    later = T0 + timedelta(minutes=10)
+    with pytest.raises(SessionExpiredError):
+        manager.current(now=later)
+
+
+def test_set_idle_timeout_can_also_extend_it():
+    manager = _manager(minutes=5)
+    _start(manager)
+    manager.set_idle_timeout(timedelta(minutes=30))
+
+    later = T0 + timedelta(minutes=10)
+    assert manager.current(now=later).user_id == USER_ID

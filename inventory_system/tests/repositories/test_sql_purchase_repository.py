@@ -100,6 +100,19 @@ def test_update_replaces_items_wholesale(world):
     assert updated.items[0].quantity_ordered == Decimal("5")
 
 
+def test_create_assigns_sequential_order_numbers_with_configured_prefix(world):
+    repo = _repo()
+    with get_session() as session:
+        org = session.get(Organization, world["org_id"])
+        org.purchase_number_prefix = "PUR-"
+
+    po1 = _create_po(world)
+    po2 = _create_po(world)
+
+    assert po1.order_number == "PUR-000001"
+    assert po2.order_number == "PUR-000002"
+
+
 # -- status transitions ----------------------------------------------------#
 
 def test_submit_then_approve(world):
@@ -117,8 +130,39 @@ def test_submit_then_approve(world):
 def test_cancel_from_draft(world):
     repo = _repo()
     po = _create_po(world)
-    cancelled = repo.cancel(world["org_id"], po.id)
+    cancelled = repo.cancel(world["org_id"], po.id, world["user_id"])
     assert cancelled.status == PurchaseOrderStatus.CANCELLED
+
+
+def test_approve_records_audit_log_entry(world):
+    repo = _repo()
+    po = _create_po(world)
+    repo.submit(world["org_id"], po.id)
+    repo.approve(world["org_id"], po.id, world["user_id"])
+
+    with get_session() as session:
+        entries = (session.query(AuditLog)
+                  .filter_by(action="purchase_order.approve", entity_id=po.id).all())
+        assert len(entries) == 1
+        assert entries[0].user_id == world["user_id"]
+        assert entries[0].actor_email == "buyer@example.com"
+        assert entries[0].changes["before"]["status"] == "SUBMITTED"
+        assert entries[0].changes["after"]["status"] == "APPROVED"
+
+
+def test_cancel_records_audit_log_entry(world):
+    repo = _repo()
+    po = _create_po(world)
+    repo.cancel(world["org_id"], po.id, world["user_id"])
+
+    with get_session() as session:
+        entries = (session.query(AuditLog)
+                  .filter_by(action="purchase_order.cancel", entity_id=po.id).all())
+        assert len(entries) == 1
+        assert entries[0].user_id == world["user_id"]
+        assert entries[0].actor_email == "buyer@example.com"
+        assert entries[0].changes["before"]["status"] == "DRAFT"
+        assert entries[0].changes["after"]["status"] == "CANCELLED"
 
 
 # -- receiving goods -------------------------------------------------------#

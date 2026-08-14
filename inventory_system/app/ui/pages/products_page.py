@@ -12,6 +12,7 @@ stopping an unauthorized write.
 """
 import logging
 from datetime import datetime, timezone
+from decimal import Decimal
 
 from PySide6.QtCore import Qt, QThreadPool, QTimer
 from PySide6.QtWidgets import (
@@ -52,11 +53,18 @@ _logger = logging.getLogger(__name__)
 
 class ProductsPage(QWidget):
     def __init__(self, product_service: ProductService, catalog_service: CatalogService,
-                sessions: SessionManager):
+                sessions: SessionManager, organization_service=None):
         super().__init__()
         self._product_service = product_service
         self._catalog_service = catalog_service
         self._sessions = sessions
+        self._organization_service = organization_service
+        self._default_tax_percent = Decimal("0")
+        if organization_service is not None:
+            worker = Worker(organization_service.get_current_organization)
+            worker.signals.finished.connect(
+                lambda org: setattr(self, "_default_tax_percent", org.default_tax_percent))
+            QThreadPool.globalInstance().start(worker)
 
         self._page = 1
         self._sort_by = "name"
@@ -283,7 +291,8 @@ class ProductsPage(QWidget):
     # -- dialogs -------------------------------------------------------- #
     def _open_add_dialog(self) -> None:
         dialog = ProductFormDialog(self._product_service, self._catalog_service,
-                                   parent=self)
+                                   parent=self,
+                                   default_tax_percent=self._default_tax_percent)
         if dialog.exec():
             self.refresh()
 

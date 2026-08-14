@@ -3,12 +3,22 @@ from decimal import Decimal
 from app.domain.purchasing import (
     PurchaseOrderStatus,
     can_transition,
+    format_purchase_order_number,
     line_subtotal,
     line_tax,
     line_total,
     validate_purchase_order_item,
     validate_supplier,
 )
+
+
+def test_format_purchase_order_number_pads_to_six_digits():
+    assert format_purchase_order_number("PO-", 1) == "PO-000001"
+    assert format_purchase_order_number("PO-", 42) == "PO-000042"
+
+
+def test_format_purchase_order_number_uses_configured_prefix():
+    assert format_purchase_order_number("ACME-", 7) == "ACME-000007"
 
 
 def test_draft_can_move_to_submitted_or_cancelled():

@@ -103,7 +103,7 @@ def world(live_db):
         items=[PurchaseOrderItemInput(product_id=ids["p1_id"], quantity_ordered=Decimal("999"),
                                       unit_price=Decimal("10"), tax_percent=Decimal("0"))]),
         ids["user_id"])
-    po_repo.cancel(ids["org_id"], cancelled_po.id)
+    po_repo.cancel(ids["org_id"], cancelled_po.id, ids["user_id"])
 
     def _sale(product_id, quantity, unit_price, tax_percent, pay_amount):
         so = so_repo.create(ids["org_id"], SalesOrderCreate(
@@ -129,7 +129,7 @@ def world(live_db):
         items=[SalesOrderItemInput(product_id=ids["p2_id"], quantity_ordered=Decimal("999"),
                                    unit_price=Decimal("30"), tax_percent=Decimal("0"))]),
         ids["user_id"])
-    so_repo.cancel(ids["org_id"], cancelled_so.id)
+    so_repo.cancel(ids["org_id"], cancelled_so.id, ids["user_id"])
 
     ids["so1_id"] = so1.id
     ids["so2_id"] = so2.id

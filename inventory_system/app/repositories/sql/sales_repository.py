@@ -238,9 +238,28 @@ class SqlSalesOrderRepository:
             db.flush()
             return _to_out(so)
 
-    def cancel(self, organization_id: uuid.UUID,
-              sales_order_id: uuid.UUID) -> SalesOrderOut | None:
-        return self._transition(organization_id, sales_order_id, SalesOrderStatus.CANCELLED)
+    def cancel(self, organization_id: uuid.UUID, sales_order_id: uuid.UUID,
+              cancelled_by: uuid.UUID) -> SalesOrderOut | None:
+        with get_session() as db:
+            so = db.get(SalesOrder, sales_order_id)
+            if so is None or so.organization_id != organization_id:
+                return None
+            previous_status = so.status
+            so.status = SalesOrderStatus.CANCELLED
+            db.flush()
+
+            user = db.get(User, cancelled_by)
+            org = db.get(Organization, organization_id)
+            record_audit_log(
+                db, organization_id=organization_id, user_id=cancelled_by,
+                actor_email=user.email if user else None,
+                organization_name=org.name if org else None,
+                action="sales_order.cancel", entity_type="sales_order", entity_id=so.id,
+                changes={"before": {"status": previous_status.value},
+                        "after": {"status": SalesOrderStatus.CANCELLED.value}})
+
+            db.flush()
+            return _to_out(so)
 
     def fulfill_sale(self, organization_id: uuid.UUID, sales_order_id: uuid.UUID,
                     fulfilled_by: uuid.UUID) -> SalesOrderOut:
@@ -259,7 +278,8 @@ class SqlSalesOrderRepository:
                 _apply(db, organization_id=organization_id, product_id=item.product_id,
                       warehouse_id=so.warehouse_id, transaction_type=InventoryTransactionType.SALE,
                       quantity_change=-item.quantity_ordered, performed_by=fulfilled_by,
-                      reference_type="sales_order_item", reference_id=item.id)
+                      reference_type="sales_order_item", reference_id=item.id,
+                      enforce_low_stock_policy=True)
                 item.quantity_fulfilled = item.quantity_ordered
 
             so.status = SalesOrderStatus.FULFILLED

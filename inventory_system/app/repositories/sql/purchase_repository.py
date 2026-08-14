@@ -24,6 +24,8 @@ import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 
+from sqlalchemy.exc import IntegrityError
+
 from app.core.exceptions import (
     InvalidPurchaseOrderTransitionError,
     PurchaseOrderItemNotFoundError,
@@ -32,13 +34,14 @@ from app.core.exceptions import (
 )
 from app.database.session import get_session
 from app.domain.inventory import InventoryTransactionType
-from app.domain.purchasing import PurchaseOrderStatus
+from app.domain.purchasing import PurchaseOrderStatus, format_purchase_order_number
 from app.models import (
     GoodsReceipt,
     GoodsReceiptItem,
     Organization,
     PurchaseOrder,
     PurchaseOrderItem,
+    PurchaseOrderSequence,
     PurchaseReturn,
     User,
 )
@@ -67,11 +70,39 @@ def _item_to_out(item: PurchaseOrderItem) -> PurchaseOrderItemOut:
 
 def _to_out(po: PurchaseOrder) -> PurchaseOrderOut:
     return PurchaseOrderOut(
-        id=po.id, supplier_id=po.supplier_id, warehouse_id=po.warehouse_id, status=po.status,
+        id=po.id, order_number=po.order_number, supplier_id=po.supplier_id,
+        warehouse_id=po.warehouse_id, status=po.status,
         expected_date=po.expected_date, notes=po.notes, created_by=po.created_by,
         approved_by=po.approved_by, approved_at=po.approved_at,
         items=[_item_to_out(i) for i in po.items], created_at=po.created_at,
         updated_at=po.updated_at)
+
+
+def _lock_or_create_purchase_order_sequence(db, organization_id: uuid.UUID
+                                            ) -> PurchaseOrderSequence:
+    seq = (db.query(PurchaseOrderSequence).filter_by(organization_id=organization_id)
+          .with_for_update().first())
+    if seq is not None:
+        return seq
+
+    # First purchase order ever created for this organization — same
+    # SAVEPOINT-protected create as
+    # sales_repository._lock_or_create_invoice_sequence, for the same
+    # concurrent-first-write race.
+    savepoint = db.begin_nested()
+    try:
+        seq = PurchaseOrderSequence(organization_id=organization_id, next_value=1)
+        db.add(seq)
+        db.flush()
+        savepoint.commit()
+        return seq
+    except IntegrityError:
+        savepoint.rollback()
+        seq = (db.query(PurchaseOrderSequence).filter_by(organization_id=organization_id)
+              .with_for_update().first())
+        if seq is None:
+            raise
+        return seq
 
 
 def _receipt_to_out(receipt: GoodsReceipt) -> GoodsReceiptOut:
@@ -98,7 +129,14 @@ class SqlPurchaseOrderRepository:
     def create(self, organization_id: uuid.UUID, data: PurchaseOrderCreate,
               created_by: uuid.UUID) -> PurchaseOrderOut:
         with get_session() as db:
-            po = PurchaseOrder(organization_id=organization_id, supplier_id=data.supplier_id,
+            org = db.get(Organization, organization_id)
+            seq = _lock_or_create_purchase_order_sequence(db, organization_id)
+            order_number = format_purchase_order_number(org.purchase_number_prefix,
+                                                         seq.next_value)
+            seq.next_value += 1
+
+            po = PurchaseOrder(organization_id=organization_id, order_number=order_number,
+                               supplier_id=data.supplier_id,
                                warehouse_id=data.warehouse_id,
                                status=PurchaseOrderStatus.DRAFT,
                                expected_date=data.expected_date, notes=data.notes,
@@ -189,16 +227,47 @@ class SqlPurchaseOrderRepository:
             po = db.get(PurchaseOrder, purchase_order_id)
             if po is None or po.organization_id != organization_id:
                 return None
+            previous_status = po.status
             po.status = PurchaseOrderStatus.APPROVED
             po.approved_by = approved_by
             po.approved_at = datetime.now(timezone.utc)
             db.flush()
+
+            user = db.get(User, approved_by)
+            org = db.get(Organization, organization_id)
+            record_audit_log(
+                db, organization_id=organization_id, user_id=approved_by,
+                actor_email=user.email if user else None,
+                organization_name=org.name if org else None,
+                action="purchase_order.approve", entity_type="purchase_order", entity_id=po.id,
+                changes={"before": {"status": previous_status.value},
+                        "after": {"status": PurchaseOrderStatus.APPROVED.value}})
+
+            db.flush()
             return _to_out(po)
 
-    def cancel(self, organization_id: uuid.UUID,
-              purchase_order_id: uuid.UUID) -> PurchaseOrderOut | None:
-        return self._transition(organization_id, purchase_order_id,
-                                PurchaseOrderStatus.CANCELLED)
+    def cancel(self, organization_id: uuid.UUID, purchase_order_id: uuid.UUID,
+              cancelled_by: uuid.UUID) -> PurchaseOrderOut | None:
+        with get_session() as db:
+            po = db.get(PurchaseOrder, purchase_order_id)
+            if po is None or po.organization_id != organization_id:
+                return None
+            previous_status = po.status
+            po.status = PurchaseOrderStatus.CANCELLED
+            db.flush()
+
+            user = db.get(User, cancelled_by)
+            org = db.get(Organization, organization_id)
+            record_audit_log(
+                db, organization_id=organization_id, user_id=cancelled_by,
+                actor_email=user.email if user else None,
+                organization_name=org.name if org else None,
+                action="purchase_order.cancel", entity_type="purchase_order", entity_id=po.id,
+                changes={"before": {"status": previous_status.value},
+                        "after": {"status": PurchaseOrderStatus.CANCELLED.value}})
+
+            db.flush()
+            return _to_out(po)
 
     def receive_goods(self, organization_id: uuid.UUID, purchase_order_id: uuid.UUID,
                       lines: list[GoodsReceiptLineInput], received_by: uuid.UUID,

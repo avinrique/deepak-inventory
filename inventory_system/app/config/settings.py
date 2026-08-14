@@ -19,6 +19,10 @@ class Settings(BaseSettings):
     default_vat_percent: str = "13"
     log_dir: str = "logs"
     session_idle_timeout_minutes: int = 30
+    # Where pg_dump backup files are written/read from — a local directory,
+    # never a path derived from user input at call time (see
+    # app.backup.postgres_backup).
+    backup_dir: str = "backups"
 
     # Deliberately separate from database_url, and unset by default: DB
     # integration tests (tests/models, tests/repositories/test_sql_*) skip

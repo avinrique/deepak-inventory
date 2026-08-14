@@ -6,6 +6,7 @@ Individual modules should still be imported explicitly wherever a specific
 class is used; this file exists for its import side effect.
 """
 from app.models.audit_log import AuditLog
+from app.models.backup import DatabaseBackup
 from app.models.base import Base
 from app.models.brand import Brand
 from app.models.category import Category
@@ -18,6 +19,7 @@ from app.models.purchase_order import (
     GoodsReceiptItem,
     PurchaseOrder,
     PurchaseOrderItem,
+    PurchaseOrderSequence,
     PurchaseReturn,
 )
 from app.models.role import Permission, Role, RolePermission
@@ -43,6 +45,7 @@ __all__ = [
     "Organization",
     "UserOrganization",
     "AuditLog",
+    "DatabaseBackup",
     "Category",
     "Brand",
     "Unit",
@@ -57,6 +60,7 @@ __all__ = [
     "PurchaseOrderItem",
     "GoodsReceipt",
     "GoodsReceiptItem",
+    "PurchaseOrderSequence",
     "PurchaseReturn",
     "Customer",
     "SalesOrder",

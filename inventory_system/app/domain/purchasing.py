@@ -65,3 +65,13 @@ def validate_purchase_order_item(*, quantity_ordered: Decimal, unit_price: Decim
     return errors
 
 
+def format_purchase_order_number(prefix: str, sequence_value: int) -> str:
+    """The configurable half of purchase order numbering — mirrors
+    app.domain.sales.format_invoice_number exactly. Uniqueness/
+    gaplessness is a transactional concern handled by the locked
+    per-organization counter in app.repositories.sql.purchase_repository
+    (see PurchaseOrderSequence); this function is pure formatting.
+    """
+    return f"{prefix}{sequence_value:06d}"
+
+

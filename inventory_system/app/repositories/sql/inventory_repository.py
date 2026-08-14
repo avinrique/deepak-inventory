@@ -29,10 +29,25 @@ from decimal import Decimal
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.core.exceptions import InsufficientStockError, InvalidTransferError, InventoryValidationError
+from app.core.exceptions import (
+    InsufficientStockError,
+    InvalidTransferError,
+    InventoryValidationError,
+    LowStockBlockedError,
+)
 from app.database.session import get_session
-from app.domain.inventory import RESERVED_TYPES, InventoryTransactionType
-from app.models import Inventory, InventoryTransaction, Organization, StockAdjustment, StockTransfer, Warehouse
+from app.domain.inventory import RESERVED_TYPES, InventoryTransactionType, LowStockBehavior
+from app.models import (
+    Inventory,
+    InventoryTransaction,
+    Organization,
+    Product,
+    StockAdjustment,
+    StockTransfer,
+    User,
+    Warehouse,
+)
+from app.repositories.sql.audit_log_repository import record_audit_log
 from app.schemas.inventory import InventoryLevel, InventoryTransactionOut, InventoryTransactionPage, TransactionFilter
 
 
@@ -90,7 +105,8 @@ def _apply(db: Session, *, organization_id: uuid.UUID, product_id: uuid.UUID,
           warehouse_id: uuid.UUID, transaction_type: InventoryTransactionType,
           quantity_change: Decimal, performed_by: uuid.UUID,
           reference_type: str | None = None, reference_id: uuid.UUID | None = None,
-          notes: str | None = None) -> InventoryTransaction:
+          notes: str | None = None, enforce_low_stock_policy: bool = False
+          ) -> InventoryTransaction:
     row = _lock_or_create_inventory_row(db, organization_id, product_id, warehouse_id)
 
     if transaction_type in RESERVED_TYPES:
@@ -109,6 +125,17 @@ def _apply(db: Session, *, organization_id: uuid.UUID, product_id: uuid.UUID,
             if org is None or not org.allow_negative_stock:
                 raise InsufficientStockError(product_id, warehouse_id,
                                              row.quantity_on_hand, -quantity_change)
+        # enforce_low_stock_policy is only ever passed by
+        # SalesOrderRepository.fulfill_sale — see app.domain.inventory.
+        # LowStockBehavior's docstring for why manual adjustments/damage/
+        # transfers deliberately never enforce this.
+        if enforce_low_stock_policy and quantity_change < 0:
+            org = db.get(Organization, organization_id)
+            if org is not None and org.low_stock_behavior == LowStockBehavior.BLOCK_SALE:
+                product = db.get(Product, product_id)
+                if product is not None and new_on_hand < product.minimum_stock_level:
+                    raise LowStockBlockedError(product_id, warehouse_id, new_on_hand,
+                                               product.minimum_stock_level)
         # Reserved stock is a promise against physical quantity that
         # actually exists — on-hand dropping below it (e.g. an
         # organization with allow_negative_stock=True selling past
@@ -183,6 +210,18 @@ class SqlInventoryRepository:
                 performed_by=performed_by, inventory_transaction_id=tx.id)
             db.add(adjustment)
             db.flush()
+
+            user = db.get(User, performed_by)
+            org = db.get(Organization, organization_id)
+            record_audit_log(
+                db, organization_id=organization_id, user_id=performed_by,
+                actor_email=user.email if user else None,
+                organization_name=org.name if org else None,
+                action="inventory.adjustment", entity_type="product", entity_id=product_id,
+                changes={"warehouse_id": str(warehouse_id), "quantity_change": str(quantity_change),
+                        "reason": reason, "resulting_on_hand": str(tx.quantity_on_hand_after)})
+
+            db.flush()
             return _to_tx_out(tx)
 
     def transfer(self, organization_id: uuid.UUID, product_id: uuid.UUID,
@@ -210,6 +249,18 @@ class SqlInventoryRepository:
                 quantity=quantity, notes=notes, performed_by=performed_by,
                 out_transaction_id=out_tx.id, in_transaction_id=in_tx.id)
             db.add(transfer)
+            db.flush()
+
+            user = db.get(User, performed_by)
+            org = db.get(Organization, organization_id)
+            record_audit_log(
+                db, organization_id=organization_id, user_id=performed_by,
+                actor_email=user.email if user else None,
+                organization_name=org.name if org else None,
+                action="inventory.transfer", entity_type="product", entity_id=product_id,
+                changes={"from_warehouse_id": str(from_warehouse_id),
+                        "to_warehouse_id": str(to_warehouse_id), "quantity": str(quantity)})
+
             db.flush()
             return _to_tx_out(out_tx), _to_tx_out(in_tx)
 

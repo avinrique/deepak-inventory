@@ -44,6 +44,16 @@ class SessionManager:
         self._idle_timeout = idle_timeout
         self._session: Session | None = None
 
+    def set_idle_timeout(self, idle_timeout: timedelta) -> None:
+        """Lets the configured timeout change live, without restarting the
+        app — called with the organization's session_timeout_minutes
+        Settings value on login (AuthService.login) and whenever that
+        setting is saved (OrganizationService.update_organization), so a
+        change takes effect for the current session immediately rather
+        than only on the next login.
+        """
+        self._idle_timeout = idle_timeout
+
     def start(self, *, user_id: uuid.UUID, organization_id: uuid.UUID | None,
              role_id: uuid.UUID | None, permissions: frozenset[str], is_superuser: bool,
              must_change_password: bool, now: datetime) -> Session:

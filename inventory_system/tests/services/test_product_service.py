@@ -70,15 +70,28 @@ class FakeProductRepository:
         raise NotImplementedError  # not exercised by these tests
 
 
+class FakeAuditLogRepository:
+    def __init__(self):
+        self.entries: list[dict] = []
+
+    def record(self, *, organization_id, user_id, actor_email, organization_name, action,
+              entity_type=None, entity_id=None, changes=None):
+        self.entries.append({"organization_id": organization_id, "user_id": user_id,
+                            "actor_email": actor_email, "organization_name": organization_name,
+                            "action": action, "entity_type": entity_type,
+                            "entity_id": entity_id, "changes": changes})
+
+
 def _service(permissions=frozenset({"product.create", "product.read", "product.update",
-                                    "product.delete"}), repo=None):
+                                    "product.delete"}), repo=None, audit_log=None):
     from datetime import datetime, timezone
     repo = repo or FakeProductRepository()
+    audit_log = audit_log if audit_log is not None else FakeAuditLogRepository()
     sessions = SessionManager(idle_timeout=timedelta(minutes=30))
     sessions.start(user_id=uuid.uuid4(), organization_id=ORG_ID, role_id=uuid.uuid4(),
                    permissions=frozenset(permissions), is_superuser=False,
                    must_change_password=False, now=datetime.now(timezone.utc))
-    return ProductService(repo, sessions), repo
+    return ProductService(repo, sessions, audit_log), repo
 
 
 def _create_data(**overrides):

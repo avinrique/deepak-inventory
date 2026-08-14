@@ -106,3 +106,34 @@ def validate_warehouse(*, code: str, name: str) -> list[str]:
 
 def normalize_warehouse_code(code: str) -> str:
     return code.strip().upper()
+
+
+class LowStockBehavior(str, Enum):
+    """Organization-level policy for what happens when a sale would take a
+    product's on-hand quantity below its Product.minimum_stock_level —
+    see InventoryRepository._apply's ``enforce_low_stock_policy`` param,
+    used only by SalesOrderRepository.fulfill_sale. Deliberately not
+    enforced on manual adjustments/damage/transfers: those are the tools
+    an operator uses to *fix* a low-stock situation, so blocking them on
+    the same policy would be self-defeating.
+    """
+    WARN_ONLY = "WARN_ONLY"      # no blocking — reporting/dashboard still flags it
+    BLOCK_SALE = "BLOCK_SALE"    # fulfill_sale refuses a sale that would breach it
+
+
+class StockValuationMethod(str, Enum):
+    """Which costing method inventory valuation is reported under.
+
+    Honesty note: this codebase has no per-receipt cost-layer history
+    (InventoryTransaction does not carry a unit cost) — valuation is
+    currently always computed from Product.purchase_price, the same
+    "standard cost" figure regardless of which method is selected here.
+    Storing and surfacing the choice now is still worthwhile: it is real,
+    validated, persisted configuration ready for a future costing engine
+    to consume, and the report labels which method is configured rather
+    than silently ignoring the setting. See
+    SqlReportingRepository.inventory_valuation_report.
+    """
+    FIFO = "FIFO"
+    LIFO = "LIFO"
+    WEIGHTED_AVERAGE = "WEIGHTED_AVERAGE"

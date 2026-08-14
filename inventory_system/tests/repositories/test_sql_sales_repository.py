@@ -127,8 +127,23 @@ def test_confirm_sets_confirmed_by_and_at(world):
 def test_cancel_from_draft(world):
     repo = _repo()
     so = _create_so(world)
-    cancelled = repo.cancel(world["org_id"], so.id)
+    cancelled = repo.cancel(world["org_id"], so.id, world["user_id"])
     assert cancelled.status == SalesOrderStatus.CANCELLED
+
+
+def test_cancel_records_audit_log_entry(world):
+    repo = _repo()
+    so = _create_so(world)
+    repo.cancel(world["org_id"], so.id, world["user_id"])
+
+    with get_session() as session:
+        entries = (session.query(AuditLog)
+                  .filter_by(action="sales_order.cancel", entity_id=so.id).all())
+        assert len(entries) == 1
+        assert entries[0].user_id == world["user_id"]
+        assert entries[0].actor_email == "clerk@example.com"
+        assert entries[0].changes["before"]["status"] == "DRAFT"
+        assert entries[0].changes["after"]["status"] == "CANCELLED"
 
 
 # -- fulfillment ------------------------------------------------------------#
@@ -157,6 +172,45 @@ def test_fulfill_rejects_insufficient_stock_and_rolls_back(world):
     assert unchanged.status == SalesOrderStatus.CONFIRMED
     assert unchanged.items[0].quantity_fulfilled == Decimal("0")
     assert _inventory_on_hand(world) == Decimal("5")
+
+
+def test_fulfill_blocked_when_it_would_breach_minimum_stock_and_policy_is_block_sale(world):
+    from app.core.exceptions import LowStockBlockedError
+    from app.domain.inventory import LowStockBehavior
+
+    _stock_in(world, Decimal("10"))
+    with get_session() as session:
+        org = session.get(Organization, world["org_id"])
+        org.low_stock_behavior = LowStockBehavior.BLOCK_SALE
+        product = session.get(Product, world["product_id"])
+        product.minimum_stock_level = Decimal("5")
+
+    repo = _repo()
+    so = _confirmed_so(world, quantity=Decimal("8"))  # 10 - 8 = 2, below minimum of 5
+
+    with pytest.raises(LowStockBlockedError):
+        repo.fulfill_sale(world["org_id"], so.id, world["user_id"])
+
+    # Nothing committed from the blocked attempt.
+    unchanged = repo.get_by_id(world["org_id"], so.id)
+    assert unchanged.status == SalesOrderStatus.CONFIRMED
+    assert _inventory_on_hand(world) == Decimal("10")
+
+
+def test_fulfill_allowed_below_minimum_when_policy_is_warn_only(world):
+    # WARN_ONLY is the default — fulfilling below minimum_stock_level must
+    # still succeed; only BLOCK_SALE enforces the policy.
+    _stock_in(world, Decimal("10"))
+    with get_session() as session:
+        product = session.get(Product, world["product_id"])
+        product.minimum_stock_level = Decimal("5")
+
+    repo = _repo()
+    so = _confirmed_so(world, quantity=Decimal("8"))
+
+    fulfilled = repo.fulfill_sale(world["org_id"], so.id, world["user_id"])
+    assert fulfilled.status == SalesOrderStatus.FULFILLED
+    assert _inventory_on_hand(world) == Decimal("2")
 
 
 def test_fulfill_only_allowed_from_confirmed(world):
@@ -516,6 +570,23 @@ def test_record_return_creates_return_in_ledger_entry(world):
         tx = session.get(InventoryTransaction, result.inventory_transaction_id)
         assert tx.transaction_type.value == "RETURN_IN"
         assert tx.quantity_change == Decimal("2")
+
+
+def test_record_return_records_audit_log_entry(world):
+    repo = _repo()
+    so = _fulfilled_so(world, quantity=Decimal("10"))
+
+    repo.record_return(world["org_id"], so.id, so.items[0].id, Decimal("2"), "damaged",
+                       world["user_id"])
+
+    with get_session() as session:
+        entries = (session.query(AuditLog)
+                  .filter_by(action="sales_order.record_return", entity_id=so.id).all())
+        assert len(entries) == 1
+        assert entries[0].user_id == world["user_id"]
+        assert entries[0].actor_email == "clerk@example.com"
+        assert entries[0].changes["quantity"] == "2"
+        assert entries[0].changes["reason"] == "damaged"
 
 
 # -- customer repository -----------------------------------------------------#

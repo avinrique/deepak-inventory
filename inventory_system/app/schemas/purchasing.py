@@ -96,6 +96,7 @@ class PurchaseOrderUpdate(BaseModel):
 
 class PurchaseOrderOut(BaseModel):
     id: uuid.UUID
+    order_number: str | None
     supplier_id: uuid.UUID
     warehouse_id: uuid.UUID
     status: PurchaseOrderStatus

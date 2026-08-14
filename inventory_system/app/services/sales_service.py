@@ -188,7 +188,8 @@ class SalesService:
         # as a target from FULFILLED/COMPLETED — same reasoning as
         # PurchaseService.cancel_purchase_order.
         self._transition_or_raise(sales_order_id, SalesOrderStatus.CANCELLED)
-        result = self._sales_orders.cancel(self._organization_id(), sales_order_id)
+        result = self._sales_orders.cancel(self._organization_id(), sales_order_id,
+                                           self._current_user_id())
         if result is None:
             raise SalesOrderNotFoundError(sales_order_id)
         return result

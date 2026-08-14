@@ -147,6 +147,27 @@ def test_adjustment_creates_stock_adjustment_row_linked_to_ledger_entry(world):
         assert adjustment.quantity_change == Decimal("-2")
 
 
+def test_adjustment_records_audit_log_entry(world):
+    from app.models import AuditLog
+
+    repo = _repo()
+    repo.stock_in(world["org_id"], world["product_id"], world["warehouse_a_id"],
+                  Decimal("10"), world["user_id"])
+    repo.adjust(world["org_id"], world["product_id"], world["warehouse_a_id"],
+               Decimal("-2"), "Recount shortfall", world["user_id"])
+
+    with get_session() as session:
+        entries = (session.query(AuditLog)
+                  .filter_by(action="inventory.adjustment", entity_id=world["product_id"])
+                  .all())
+        assert len(entries) == 1
+        assert entries[0].user_id == world["user_id"]
+        assert entries[0].actor_email == "tester@example.com"
+        assert entries[0].changes["reason"] == "Recount shortfall"
+        assert entries[0].changes["quantity_change"] == "-2"
+        assert entries[0].changes["resulting_on_hand"] == "8.000"
+
+
 # -- transfer ----------------------------------------------------------- #
 
 def test_transfer_moves_stock_and_records_stock_transfer_row(world):
@@ -187,6 +208,26 @@ def test_transfer_insufficient_source_stock_rolls_back_both_sides(world):
     assert dest_level.quantity_on_hand == Decimal("0")
     src_level = repo.get_level(world["org_id"], world["product_id"], world["warehouse_a_id"])
     assert src_level.quantity_on_hand == Decimal("2")
+
+
+def test_transfer_records_audit_log_entry(world):
+    from app.models import AuditLog
+
+    repo = _repo()
+    repo.stock_in(world["org_id"], world["product_id"], world["warehouse_a_id"],
+                 Decimal("10"), world["user_id"])
+    repo.transfer(world["org_id"], world["product_id"], world["warehouse_a_id"],
+                 world["warehouse_b_id"], Decimal("6"), world["user_id"], notes="rebalance")
+
+    with get_session() as session:
+        entries = (session.query(AuditLog)
+                  .filter_by(action="inventory.transfer", entity_id=world["product_id"]).all())
+        assert len(entries) == 1
+        assert entries[0].user_id == world["user_id"]
+        assert entries[0].actor_email == "tester@example.com"
+        assert entries[0].changes["from_warehouse_id"] == str(world["warehouse_a_id"])
+        assert entries[0].changes["to_warehouse_id"] == str(world["warehouse_b_id"])
+        assert entries[0].changes["quantity"] == "6"
 
 
 def test_transfer_rejects_same_warehouse(world):

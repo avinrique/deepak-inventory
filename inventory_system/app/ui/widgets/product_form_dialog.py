@@ -42,7 +42,8 @@ _NONE_ITEM = "—"
 
 class ProductFormDialog(QDialog):
     def __init__(self, product_service: ProductService, catalog_service: CatalogService,
-                product: ProductOut | None = None, read_only: bool = False, parent=None):
+                product: ProductOut | None = None, read_only: bool = False, parent=None,
+                default_tax_percent: Decimal = Decimal("0")):
         super().__init__(parent)
         self._product_service = product_service
         self._product = product
@@ -105,7 +106,8 @@ class ProductFormDialog(QDialog):
         self._selling_price = QLineEdit(str(product.selling_price) if product else "0")
         form.addRow("Selling Price *", self._selling_price)
 
-        self._tax_percent = QLineEdit(str(product.tax_percent) if product else "0")
+        self._tax_percent = QLineEdit(
+            str(product.tax_percent) if product else str(default_tax_percent))
         form.addRow("Tax %", self._tax_percent)
 
         self._minimum_stock_level = QLineEdit(

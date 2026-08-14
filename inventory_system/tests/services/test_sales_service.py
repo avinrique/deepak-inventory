@@ -168,7 +168,7 @@ class FakeSalesOrderRepository:
         self.orders[sales_order_id] = updated
         return updated
 
-    def cancel(self, organization_id, sales_order_id):
+    def cancel(self, organization_id, sales_order_id, cancelled_by):
         existing = self.orders[sales_order_id]
         updated = existing.model_copy(update={"status": SalesOrderStatus.CANCELLED})
         self.orders[sales_order_id] = updated

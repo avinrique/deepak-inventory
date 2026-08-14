@@ -188,7 +188,7 @@ def _build_page(key: str, container: Container) -> QWidget:
     if key == "products":
         from app.ui.pages.products_page import ProductsPage
         return ProductsPage(container.product_service(), container.catalog_service(),
-                            container.sessions)
+                            container.sessions, container.organization_service())
     if key == "warehouses":
         from app.ui.pages.warehouses_page import WarehousesPage
         return WarehousesPage()
@@ -208,5 +208,6 @@ def _build_page(key: str, container: Container) -> QWidget:
         return UsersPage()
     if key == "settings":
         from app.ui.pages.settings_page import SettingsPage
-        return SettingsPage(container.organization_service(), container.sessions)
+        return SettingsPage(container.organization_service(), container.backup_service(),
+                            container.inventory_service(), container.sessions)
     raise ValueError(f"Unknown module key: {key!r}")

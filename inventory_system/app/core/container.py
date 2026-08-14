@@ -12,6 +12,8 @@ from datetime import timedelta
 
 from app.config.settings import settings
 from app.repositories.interfaces import BillRepository, PartyRepository, StockRepository
+from app.repositories.sql.audit_log_repository import SqlAuditLogRepository
+from app.repositories.sql.backup_repository import SqlBackupRepository
 from app.repositories.sql.brand_repository import SqlBrandRepository
 from app.repositories.sql.category_repository import SqlCategoryRepository
 from app.repositories.sql.customer_repository import SqlCustomerRepository
@@ -27,6 +29,7 @@ from app.repositories.sql.user_repository import SqlUserRepository
 from app.repositories.sql.warehouse_repository import SqlWarehouseRepository
 from app.security.session import SessionManager
 from app.services.auth_service import AuthService
+from app.services.backup_service import BackupService
 from app.services.billing_service import BillingService
 from app.services.catalog_service import CatalogService
 from app.services.dashboard_service import DashboardService
@@ -97,6 +100,8 @@ class Container:
         self.sales_order_repo = SqlSalesOrderRepository()
         self.reporting_repo = SqlReportingRepository()
         self.organization_repo = SqlOrganizationRepository()
+        self.audit_log_repo = SqlAuditLogRepository()
+        self.backup_repo = SqlBackupRepository()
         self.sessions = SessionManager(
             idle_timeout=timedelta(minutes=settings.session_idle_timeout_minutes))
 
@@ -111,17 +116,19 @@ class Container:
         return PartyService(self.party_repo)
 
     def auth_service(self) -> AuthService:
-        return AuthService(self.user_repo, self.sessions)
+        return AuthService(self.user_repo, self.sessions, self.audit_log_repo,
+                           self.organization_repo)
 
     def user_service(self) -> UserService:
-        return UserService(self.user_repo, self.sessions)
+        return UserService(self.user_repo, self.sessions, self.audit_log_repo,
+                           self.organization_repo)
 
     def dashboard_service(self) -> DashboardService:
         return DashboardService(self.billing_service(), self.stock_service(),
                                 self.party_service())
 
     def product_service(self) -> ProductService:
-        return ProductService(self.product_repo, self.sessions)
+        return ProductService(self.product_repo, self.sessions, self.audit_log_repo)
 
     def catalog_service(self) -> CatalogService:
         return CatalogService(self.category_repo, self.brand_repo, self.unit_repo,
@@ -143,4 +150,9 @@ class Container:
         return ReportingService(self.reporting_repo, self.sessions)
 
     def organization_service(self) -> OrganizationService:
-        return OrganizationService(self.organization_repo, self.sessions)
+        return OrganizationService(self.organization_repo, self.sessions, self.audit_log_repo,
+                                   self.warehouse_repo)
+
+    def backup_service(self) -> BackupService:
+        return BackupService(self.backup_repo, self.sessions, self.audit_log_repo,
+                             self.organization_repo)

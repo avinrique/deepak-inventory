@@ -87,10 +87,43 @@ def _membership(user_id, org_id=ORG_ID, role_id=ROLE_ID, is_default=True):
                          role_name="MANAGER", is_default=is_default)
 
 
-def _service(repo=None, sessions=None):
+class FakeOrganizationRepository:
+    """Empty by default — AuthService treats a missing organization as "no
+    Settings to apply", so login's session-timeout push and
+    change_password's password-policy check are both no-ops unless a test
+    explicitly seeds one via .orgs[ORG_ID] = OrganizationOut(...).
+    """
+    def __init__(self):
+        self.orgs: dict[uuid.UUID, object] = {}
+
+    def get_by_id(self, organization_id):
+        return self.orgs.get(organization_id)
+
+    def update(self, organization_id, data):
+        raise NotImplementedError
+
+    def get_logo(self, organization_id):
+        raise NotImplementedError
+
+
+class FakeAuditLogRepository:
+    def __init__(self):
+        self.entries: list[dict] = []
+
+    def record(self, *, organization_id, user_id, actor_email, organization_name, action,
+              entity_type=None, entity_id=None, changes=None):
+        self.entries.append({"organization_id": organization_id, "user_id": user_id,
+                            "actor_email": actor_email, "organization_name": organization_name,
+                            "action": action, "entity_type": entity_type,
+                            "entity_id": entity_id, "changes": changes})
+
+
+def _service(repo=None, sessions=None, audit_log=None, organizations=None):
     repo = repo or FakeUserRepository()
     sessions = sessions or SessionManager(idle_timeout=timedelta(minutes=30))
-    return AuthService(repo, sessions), repo, sessions
+    audit_log = audit_log or FakeAuditLogRepository()
+    organizations = organizations or FakeOrganizationRepository()
+    return AuthService(repo, sessions, audit_log, organizations), repo, sessions, audit_log
 
 
 def test_login_with_correct_password_succeeds():
@@ -98,7 +131,7 @@ def test_login_with_correct_password_succeeds():
     user_id = repo.seed_user("owner@acme.test", "s3cret!")
     repo.memberships[user_id] = [_membership(user_id)]
     repo.role_permissions[ROLE_ID] = frozenset({"sales.create"})
-    service, repo, sessions = _service(repo)
+    service, repo, sessions, _ = _service(repo)
 
     session = service.login("owner@acme.test", "s3cret!")
 
@@ -113,7 +146,7 @@ def test_login_is_case_insensitive_and_trims_email():
     repo = FakeUserRepository()
     user_id = repo.seed_user("owner@acme.test", "s3cret!")
     repo.memberships[user_id] = [_membership(user_id)]
-    service, _, _ = _service(repo)
+    service, _, _, _ = _service(repo)
     session = service.login("  Owner@Acme.TEST  ", "s3cret!")
     assert session.user_id == user_id
 
@@ -121,14 +154,14 @@ def test_login_is_case_insensitive_and_trims_email():
 def test_login_wrong_password_rejected():
     repo = FakeUserRepository()
     repo.seed_user("owner@acme.test", "s3cret!")
-    service, repo, sessions = _service(repo)
+    service, repo, sessions, _ = _service(repo)
     with pytest.raises(InvalidCredentialsError):
         service.login("owner@acme.test", "wrong")
     assert sessions.is_authenticated is False
 
 
 def test_login_unknown_email_rejected_generically():
-    service, _, sessions = _service()
+    service, _, sessions, _ = _service()
     with pytest.raises(InvalidCredentialsError):
         service.login("nobody@acme.test", "whatever")
     assert sessions.is_authenticated is False
@@ -137,7 +170,7 @@ def test_login_unknown_email_rejected_generically():
 def test_login_inactive_user_rejected():
     repo = FakeUserRepository()
     repo.seed_user("owner@acme.test", "s3cret!", is_active=False)
-    service, _, sessions = _service(repo)
+    service, _, sessions, _ = _service(repo)
     with pytest.raises(InvalidCredentialsError):
         service.login("owner@acme.test", "s3cret!")
     assert sessions.is_authenticated is False
@@ -150,7 +183,7 @@ def test_login_ambiguous_organization_without_default_is_rejected():
         _membership(user_id, org_id=ORG_ID, is_default=False),
         _membership(user_id, org_id=OTHER_ORG_ID, is_default=False),
     ]
-    service, _, _ = _service(repo)
+    service, _, _, _ = _service(repo)
     with pytest.raises(AmbiguousOrganizationError):
         service.login("owner@acme.test", "s3cret!")
 
@@ -162,7 +195,7 @@ def test_login_picks_default_membership_when_multiple_orgs():
         _membership(user_id, org_id=ORG_ID, is_default=False),
         _membership(user_id, org_id=OTHER_ORG_ID, is_default=True),
     ]
-    service, _, _ = _service(repo)
+    service, _, _, _ = _service(repo)
     session = service.login("owner@acme.test", "s3cret!")
     assert session.organization_id == OTHER_ORG_ID
 
@@ -174,7 +207,7 @@ def test_login_explicit_organization_id_overrides_default():
         _membership(user_id, org_id=ORG_ID, is_default=True),
         _membership(user_id, org_id=OTHER_ORG_ID, is_default=False),
     ]
-    service, _, _ = _service(repo)
+    service, _, _, _ = _service(repo)
     session = service.login("owner@acme.test", "s3cret!", organization_id=OTHER_ORG_ID)
     assert session.organization_id == OTHER_ORG_ID
 
@@ -182,7 +215,7 @@ def test_login_explicit_organization_id_overrides_default():
 def test_login_superuser_with_no_memberships_still_succeeds():
     repo = FakeUserRepository()
     repo.seed_user("root@acme.test", "s3cret!", is_superuser=True)
-    service, _, sessions = _service(repo)
+    service, _, sessions, _ = _service(repo)
     session = service.login("root@acme.test", "s3cret!")
     assert session.is_superuser is True
     assert session.organization_id is None
@@ -191,7 +224,7 @@ def test_login_superuser_with_no_memberships_still_succeeds():
 def test_login_carries_must_change_password_into_session():
     repo = FakeUserRepository()
     repo.seed_user("owner@acme.test", "temp-pass", must_change_password=True)
-    service, _, _ = _service(repo)
+    service, _, _, _ = _service(repo)
     session = service.login("owner@acme.test", "temp-pass")
     assert session.must_change_password is True
 
@@ -199,7 +232,7 @@ def test_login_carries_must_change_password_into_session():
 def test_logout_ends_the_session():
     repo = FakeUserRepository()
     repo.seed_user("owner@acme.test", "s3cret!")
-    service, _, sessions = _service(repo)
+    service, _, sessions, _ = _service(repo)
     service.login("owner@acme.test", "s3cret!")
     service.logout()
     assert sessions.is_authenticated is False
@@ -208,7 +241,7 @@ def test_logout_ends_the_session():
 def test_change_password_with_correct_old_password_succeeds():
     repo = FakeUserRepository()
     user_id = repo.seed_user("owner@acme.test", "old-pass")
-    service, repo, sessions = _service(repo)
+    service, repo, sessions, _ = _service(repo)
     service.login("owner@acme.test", "old-pass")
 
     service.change_password("old-pass", "new-pass")
@@ -223,14 +256,14 @@ def test_change_password_with_correct_old_password_succeeds():
 def test_change_password_with_wrong_old_password_rejected():
     repo = FakeUserRepository()
     repo.seed_user("owner@acme.test", "old-pass")
-    service, _, _ = _service(repo)
+    service, _, _, _ = _service(repo)
     service.login("owner@acme.test", "old-pass")
     with pytest.raises(InvalidCredentialsError):
         service.change_password("wrong-old-pass", "new-pass")
 
 
 def test_change_password_requires_a_session():
-    service, _, _ = _service()
+    service, _, _, _ = _service()
     with pytest.raises(NotAuthenticatedError):
         service.change_password("anything", "new-pass")
 
@@ -238,7 +271,7 @@ def test_change_password_requires_a_session():
 def test_change_password_clears_must_change_password_flag():
     repo = FakeUserRepository()
     repo.seed_user("owner@acme.test", "temp-pass", must_change_password=True)
-    service, _, sessions = _service(repo)
+    service, _, sessions, _ = _service(repo)
     session = service.login("owner@acme.test", "temp-pass")
     assert session.must_change_password is True
 
@@ -253,7 +286,7 @@ def test_login_after_idle_timeout_requires_relogin_for_protected_calls():
     repo.memberships[user_id] = [_membership(user_id)]
     repo.role_permissions[ROLE_ID] = frozenset({"sales.create"})
     sessions = SessionManager(idle_timeout=timedelta(minutes=30))
-    service, repo, sessions = _service(repo, sessions)
+    service, repo, sessions, _ = _service(repo, sessions)
     service.login("owner@acme.test", "s3cret!")
 
     sessions._session.last_activity_at -= timedelta(hours=1)  # noqa: SLF001 - simulate idle

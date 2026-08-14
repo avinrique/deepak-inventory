@@ -61,6 +61,16 @@ class SqlUserRepository:
             rows = db.query(UserOrganization).filter_by(user_id=user_id).all()
             return [_to_membership_out(m, m.role.name) for m in rows]
 
+    def update_membership_role(self, user_id: uuid.UUID, organization_id: uuid.UUID,
+                              role_id: uuid.UUID) -> MembershipOut | None:
+        with get_session() as db:
+            m = db.get(UserOrganization, (user_id, organization_id))
+            if m is None:
+                return None
+            m.role_id = role_id
+            db.flush()
+            return _to_membership_out(m, m.role.name)
+
     def get_role_permissions(self, role_id: uuid.UUID) -> frozenset[str]:
         with get_session() as db:
             role = db.get(Role, role_id)

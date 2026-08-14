@@ -21,7 +21,7 @@ import uuid
 from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import CheckConstraint, Date, DateTime, Enum, ForeignKey, Index, Numeric, String, Text, func
+from sqlalchemy import BigInteger, CheckConstraint, Date, DateTime, Enum, ForeignKey, Index, Numeric, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -34,11 +34,19 @@ class PurchaseOrder(UUIDPKMixin, TimestampMixin, Base):
     __table_args__ = (
         Index("ix_purchase_orders_org_status", "organization_id", "status"),
         Index("ix_purchase_orders_org_supplier", "organization_id", "supplier_id"),
+        Index("ix_purchase_orders_org_order_number", "organization_id", "order_number",
+             unique=True),
     )
 
     organization_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"),
         nullable=False)
+    # Assigned atomically at creation from PurchaseOrderSequence — see
+    # SqlPurchaseOrderRepository.create, mirroring how Invoice.invoice_number
+    # is assigned from InvoiceSequence. Nullable purely so a handful of rows
+    # created before this column existed (pre-migration) don't need a risky
+    # backfill; every row created going forward always gets one.
+    order_number: Mapped[str | None] = mapped_column(String(40), nullable=True)
     # RESTRICT: a supplier/warehouse referenced by a purchase order can't be
     # deleted out from under it — same policy as Product.category_id.
     supplier_id: Mapped[uuid.UUID] = mapped_column(
@@ -205,3 +213,25 @@ class PurchaseReturn(UUIDPKMixin, Base):
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"PurchaseReturn(id={self.id!r}, quantity={self.quantity!r})"
+
+
+class PurchaseOrderSequence(Base):
+    """Backs configurable, unique purchase order numbering — one row per
+    organization, incremented under a row lock inside the same transaction
+    as the PurchaseOrder it's numbering (see
+    SqlPurchaseOrderRepository.create). Mirrors
+    app.models.sales_order.InvoiceSequence exactly, including why it's an
+    ordinary locked row rather than a Postgres SEQUENCE: a native
+    sequence's counter does not roll back if the surrounding transaction
+    aborts, which would burn numbers on failed purchase order creation.
+    """
+    __tablename__ = "purchase_order_sequences"
+
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"),
+        primary_key=True)
+    next_value: Mapped[int] = mapped_column(BigInteger, nullable=False, default=1)
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return (f"PurchaseOrderSequence(organization_id={self.organization_id!r}, "
+               f"next_value={self.next_value!r})")

@@ -7,7 +7,9 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Protocol
 
+from app.domain.backup import BackupStatus
 from app.domain.product import ProductStatus
+from app.schemas.backup import BackupOut
 from app.schemas.bill import BillCreate, BillOut
 from app.schemas.inventory import (
     InventoryLevel,
@@ -107,6 +109,9 @@ class UserRepository(Protocol):
                        organization_id: uuid.UUID) -> MembershipOut | None: ...
 
     def list_memberships(self, user_id: uuid.UUID) -> list[MembershipOut]: ...
+
+    def update_membership_role(self, user_id: uuid.UUID, organization_id: uuid.UUID,
+                              role_id: uuid.UUID) -> MembershipOut | None: ...
 
     def get_role_permissions(self, role_id: uuid.UUID) -> frozenset[str]: ...
 
@@ -293,8 +298,8 @@ class PurchaseOrderRepository(Protocol):
     def approve(self, organization_id: uuid.UUID, purchase_order_id: uuid.UUID,
               approved_by: uuid.UUID) -> PurchaseOrderOut | None: ...
 
-    def cancel(self, organization_id: uuid.UUID,
-              purchase_order_id: uuid.UUID) -> PurchaseOrderOut | None: ...
+    def cancel(self, organization_id: uuid.UUID, purchase_order_id: uuid.UUID,
+              cancelled_by: uuid.UUID) -> PurchaseOrderOut | None: ...
 
     def receive_goods(self, organization_id: uuid.UUID, purchase_order_id: uuid.UUID,
                       lines: list[GoodsReceiptLineInput], received_by: uuid.UUID,
@@ -343,8 +348,8 @@ class SalesOrderRepository(Protocol):
     def confirm(self, organization_id: uuid.UUID, sales_order_id: uuid.UUID,
               confirmed_by: uuid.UUID) -> SalesOrderOut | None: ...
 
-    def cancel(self, organization_id: uuid.UUID,
-              sales_order_id: uuid.UUID) -> SalesOrderOut | None: ...
+    def cancel(self, organization_id: uuid.UUID, sales_order_id: uuid.UUID,
+              cancelled_by: uuid.UUID) -> SalesOrderOut | None: ...
 
     def fulfill_sale(self, organization_id: uuid.UUID, sales_order_id: uuid.UUID,
                     fulfilled_by: uuid.UUID) -> SalesOrderOut: ...
@@ -410,6 +415,8 @@ class OrganizationRepository(Protocol):
     def update(self, organization_id: uuid.UUID,
               data: OrganizationUpdate) -> OrganizationOut | None: ...
 
+    def get_logo(self, organization_id: uuid.UUID) -> tuple[bytes, str | None] | None: ...
+
 
 class AuditLogRepository(Protocol):
     """Append-only — there is deliberately no read/list method here yet;
@@ -423,3 +430,24 @@ class AuditLogRepository(Protocol):
               actor_email: str | None, organization_name: str | None, action: str,
               entity_type: str | None = None, entity_id: uuid.UUID | None = None,
               changes: dict | None = None) -> None: ...
+
+
+class BackupRepository(Protocol):
+    """Backup metadata is deliberately not organization-scoped — see
+    app.models.backup.DatabaseBackup's docstring: a backup covers the
+    whole physical database, not one tenant's slice of it.
+    """
+
+    def record(self, *, organization_id: uuid.UUID | None, created_by: uuid.UUID | None,
+              filename: str, file_path: str, file_size_bytes: int | None,
+              checksum_sha256: str | None, status: BackupStatus, verified: bool,
+              error_message: str | None, completed_at: datetime | None) -> BackupOut: ...
+
+    def update_verification(self, backup_id: uuid.UUID, *,
+                            verified: bool) -> BackupOut | None: ...
+
+    def get_by_id(self, backup_id: uuid.UUID) -> BackupOut | None: ...
+
+    def list_all(self) -> list[BackupOut]: ...
+
+    def delete(self, backup_id: uuid.UUID) -> None: ...

@@ -93,6 +93,26 @@ class InvalidTransferError(AppError):
         super().__init__(message)
 
 
+class LowStockBlockedError(AppError):
+    """Raised when Organization.low_stock_behavior is BLOCK_SALE and a sale
+    would take a product's on-hand quantity below its
+    Product.minimum_stock_level — distinct from InsufficientStockError:
+    there is physically enough stock to fulfill the sale, the organization
+    has simply chosen to protect its reorder buffer.
+    """
+
+    def __init__(self, product_id, warehouse_id, resulting_quantity: Decimal,
+                minimum_stock_level: Decimal):
+        self.product_id = product_id
+        self.warehouse_id = warehouse_id
+        self.resulting_quantity = resulting_quantity
+        self.minimum_stock_level = minimum_stock_level
+        super().__init__(
+            f"Fulfilling this would leave product {product_id!r} at warehouse "
+            f"{warehouse_id!r} at {resulting_quantity}, below its minimum stock level of "
+            f"{minimum_stock_level}.")
+
+
 class SupplierNotFoundError(AppError):
     def __init__(self, supplier_id):
         self.supplier_id = supplier_id
@@ -174,6 +194,52 @@ class OrganizationNotFoundError(AppError):
 
 
 class OrganizationValidationError(AppError):
+    def __init__(self, errors: list[str]):
+        self.errors = errors
+        super().__init__("; ".join(errors))
+
+
+class MembershipNotFoundError(AppError):
+    def __init__(self, user_id, organization_id):
+        self.user_id = user_id
+        self.organization_id = organization_id
+        super().__init__(f"User {user_id!r} has no membership in organization "
+                         f"{organization_id!r}")
+
+
+class BackupNotFoundError(AppError):
+    def __init__(self, backup_id):
+        self.backup_id = backup_id
+        super().__init__(f"Backup {backup_id!r} not found")
+
+
+class BackupFailedError(AppError):
+    """error_message is already sanitized by app.backup.postgres_backup —
+    safe to display to the user as-is."""
+    def __init__(self, error_message: str | None):
+        self.error_message = error_message
+        super().__init__(error_message or "Backup failed.")
+
+
+class BackupNotVerifiedError(AppError):
+    def __init__(self, backup_id):
+        self.backup_id = backup_id
+        super().__init__(f"Backup {backup_id!r} has not passed verification — refusing to "
+                         "restore from it. Re-run verification or choose another backup.")
+
+
+class BackupRestoreFailedError(AppError):
+    """error_message is already sanitized by app.backup.postgres_backup —
+    safe to display to the user as-is."""
+    def __init__(self, error_message: str | None):
+        self.error_message = error_message
+        super().__init__(error_message or "Restore failed.")
+
+
+class PasswordPolicyViolationError(AppError):
+    """Raised by UserService.create_user/AuthService.change_password when a
+    user-supplied password doesn't meet the organization's configured
+    password policy (see app.domain.security_policy)."""
     def __init__(self, errors: list[str]):
         self.errors = errors
         super().__init__("; ".join(errors))

@@ -126,7 +126,8 @@ class FakePurchaseOrderRepository:
                                       quantity_received=Decimal("0"), unit_price=i.unit_price,
                                       tax_percent=i.tax_percent)
                 for i in data.items]
-        po = PurchaseOrderOut(id=uuid.uuid4(), supplier_id=data.supplier_id,
+        po = PurchaseOrderOut(id=uuid.uuid4(), order_number=f"PO-{len(self.orders) + 1:06d}",
+                              supplier_id=data.supplier_id,
                               warehouse_id=data.warehouse_id, status=PurchaseOrderStatus.DRAFT,
                               expected_date=data.expected_date, notes=data.notes,
                               created_by=created_by, approved_by=None, approved_at=None,
@@ -170,7 +171,7 @@ class FakePurchaseOrderRepository:
                                approved_by=approved_by,
                                approved_at=datetime.now(timezone.utc))
 
-    def cancel(self, organization_id, purchase_order_id):
+    def cancel(self, organization_id, purchase_order_id, cancelled_by):
         return self._set_status(purchase_order_id, PurchaseOrderStatus.CANCELLED)
 
     def receive_goods(self, organization_id, purchase_order_id, lines, received_by,

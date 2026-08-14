@@ -17,6 +17,9 @@ Role design notes:
 - ACCOUNTANT is read-heavy plus the two "money already moved" operations
   (sales.refund, purchase.approve) that finance typically signs off on.
 - VIEWER is read-only across every domain.
+- backup.create/backup.restore are granted only through _ALL (OWNER/ADMIN)
+  — deliberately absent from _OPERATIONAL, so no other role gets them even
+  though MANAGER otherwise has nearly every operational permission.
 """
 from dataclasses import dataclass
 
@@ -57,6 +60,8 @@ PERMISSIONS: list[PermissionDef] = [
                   "Create/activate/deactivate users, reset passwords, assign roles"),
     PermissionDef("settings.manage", "Manage organization settings"),
     PermissionDef("audit_logs.view", "View the audit trail"),
+    PermissionDef("backup.create", "Create a database backup"),
+    PermissionDef("backup.restore", "Restore the database from a backup"),
 ]
 PERMISSION_CODES: frozenset[str] = frozenset(p.code for p in PERMISSIONS)
 

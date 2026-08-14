@@ -16,19 +16,28 @@ from app.core.exceptions import (
     ProductValidationError,
 )
 from app.domain.product import ProductStatus, normalize_barcode, normalize_sku, validate_product
-from app.repositories.interfaces import ProductRepository
+from app.repositories.interfaces import AuditLogRepository, ProductRepository
 from app.schemas.product import ProductCreate, ProductFilter, ProductOut, ProductPage, ProductUpdate
 from app.security.authorization import require_permission
 from app.security.session import SessionManager
 
 
 class ProductService:
-    def __init__(self, products: ProductRepository, sessions: SessionManager):
+    def __init__(self, products: ProductRepository, sessions: SessionManager,
+                audit_log: AuditLogRepository):
         self._products = products
         self._sessions = sessions
+        self._audit_log = audit_log
 
     def _organization_id(self) -> uuid.UUID:
         return self._sessions.current(now=datetime.now(timezone.utc)).organization_id
+
+    def _audit(self, *, action: str, entity_id: uuid.UUID, changes: dict | None = None) -> None:
+        session = self._sessions.peek()
+        actor_id = session.user_id if session else None
+        self._audit_log.record(organization_id=self._organization_id(), user_id=actor_id,
+                               actor_email=None, organization_name=None, action=action,
+                               entity_type="product", entity_id=entity_id, changes=changes)
 
     @require_permission("product.create")
     def create_product(self, data: ProductCreate) -> ProductOut:
@@ -49,7 +58,12 @@ class ProductService:
             raise DuplicateBarcodeError(barcode)
 
         normalized = data.model_copy(update={"sku": sku, "barcode": barcode})
-        return self._products.create(org_id, normalized)
+        created = self._products.create(org_id, normalized)
+        self._audit(action="product.create", entity_id=created.id,
+                   changes={"sku": created.sku, "name": created.name,
+                           "purchase_price": str(created.purchase_price),
+                           "selling_price": str(created.selling_price)})
+        return created
 
     @require_permission("product.update")
     def update_product(self, product_id: uuid.UUID, data: ProductUpdate) -> ProductOut:
@@ -87,6 +101,18 @@ class ProductService:
         result = self._products.update(org_id, product_id, ProductUpdate(**updates))
         if result is None:
             raise ProductNotFoundError(product_id)
+
+        # Only the fields the caller actually set, and only where the value
+        # genuinely changed — a before/after diff, not a full-record dump.
+        before, after = {}, {}
+        for field in updates:
+            old_value, new_value = getattr(existing, field), getattr(result, field)
+            if old_value != new_value:
+                before[field] = str(old_value)
+                after[field] = str(new_value)
+        if before:
+            self._audit(action="product.update", entity_id=product_id,
+                       changes={"before": before, "after": after})
         return result
 
     @require_permission("product.read")
@@ -103,10 +129,12 @@ class ProductService:
     @require_permission("product.delete")
     def archive_product(self, product_id: uuid.UUID) -> None:
         self._products.set_status(self._organization_id(), product_id, ProductStatus.ARCHIVED)
+        self._audit(action="product.archive", entity_id=product_id)
 
     @require_permission("product.update")
     def restore_product(self, product_id: uuid.UUID) -> None:
         self._products.set_status(self._organization_id(), product_id, ProductStatus.ACTIVE)
+        self._audit(action="product.restore", entity_id=product_id)
 
     @staticmethod
     def is_available_for_transactions(product: ProductOut) -> bool:
