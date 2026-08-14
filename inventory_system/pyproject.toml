@@ -1,0 +1,18 @@
+[project]
+name = "inventory-system"
+version = "0.1.0"
+description = "Production-grade rewrite of the Inventory Management desktop app (PySide6 + SQLAlchemy + PostgreSQL), replacing the legacy Tkinter/Excel app incrementally."
+requires-python = ">=3.12"
+readme = "README.md"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.black]
+line-length = 92
+target-version = ["py312"]
+
+[tool.ruff]
+line-length = 92
+target-version = "py312"

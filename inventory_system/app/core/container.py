@@ -1,0 +1,107 @@
+"""Composition root: builds Services with the configured backend's
+repositories. This is the one place `excel/` vs `sql/` repository classes
+get chosen — Services and the UI only ever see the Protocols in
+app.repositories.interfaces, never a concrete implementation.
+
+Note: `settings.backend` only selects where *inventory* (Bill/Stock/Party)
+data lives. Authentication (User/Role/...) has no Excel equivalent — it
+always talks to `settings.database_url` via SqlUserRepository, regardless
+of which inventory backend is active.
+"""
+from datetime import timedelta
+
+from app.config.settings import settings
+from app.repositories.interfaces import BillRepository, PartyRepository, StockRepository
+from app.repositories.sql.brand_repository import SqlBrandRepository
+from app.repositories.sql.category_repository import SqlCategoryRepository
+from app.repositories.sql.product_repository import SqlProductRepository
+from app.repositories.sql.unit_repository import SqlUnitRepository
+from app.repositories.sql.user_repository import SqlUserRepository
+from app.security.session import SessionManager
+from app.services.auth_service import AuthService
+from app.services.billing_service import BillingService
+from app.services.catalog_service import CatalogService
+from app.services.dashboard_service import DashboardService
+from app.services.party_service import PartyService
+from app.services.product_service import ProductService
+from app.services.stock_service import StockService
+from app.services.user_service import UserService
+
+
+def _build_excel_repositories() -> tuple[BillRepository, BillRepository,
+                                         StockRepository, PartyRepository]:
+    # Imported lazily, and in this order: importing app.repositories.excel
+    # first runs its sys.path shim, which is what makes `import storage`
+    # resolve to the legacy app's file — only needed for the excel backend,
+    # so postgres deployments never touch either.
+    from app.repositories.excel.bill_repository import ExcelBillRepository
+    from app.repositories.excel.party_repository import ExcelPartyRepository
+    from app.repositories.excel.stock_repository import ExcelStockRepository
+    import storage as db
+
+    sales = ExcelBillRepository(db.SALES_FILE)
+    purchases = ExcelBillRepository(db.PURCHASES_FILE)
+    stock = ExcelStockRepository()
+    parties = ExcelPartyRepository()
+    return sales, purchases, stock, parties
+
+
+def _build_sql_repositories() -> tuple[BillRepository, BillRepository,
+                                       StockRepository, PartyRepository]:
+    raise NotImplementedError(
+        "postgres backend: Phase 2 — app/repositories/sql/{bill,stock,party}.py "
+        "are still stubs, see docs/architecture.md")
+
+
+class Container:
+    """Manual dependency-injection container — no framework, just factories.
+
+    Built once in app.main; Services (and, through them, the UI) receive
+    their dependencies via this container rather than constructing
+    repositories themselves.
+    """
+
+    def __init__(self):
+        if settings.backend == "excel":
+            self.sales_repo, self.purchases_repo, self.stock_repo, self.party_repo = (
+                _build_excel_repositories())
+        elif settings.backend == "postgres":
+            self.sales_repo, self.purchases_repo, self.stock_repo, self.party_repo = (
+                _build_sql_repositories())
+        else:
+            raise ValueError(f"Unknown INVENTORY_BACKEND: {settings.backend!r}")
+
+        self.user_repo = SqlUserRepository()
+        self.category_repo = SqlCategoryRepository()
+        self.brand_repo = SqlBrandRepository()
+        self.unit_repo = SqlUnitRepository()
+        self.product_repo = SqlProductRepository()
+        self.sessions = SessionManager(
+            idle_timeout=timedelta(minutes=settings.session_idle_timeout_minutes))
+
+    def billing_service(self) -> BillingService:
+        return BillingService(self.sales_repo, self.purchases_repo, self.stock_repo,
+                              self.party_repo)
+
+    def stock_service(self) -> StockService:
+        return StockService(self.stock_repo)
+
+    def party_service(self) -> PartyService:
+        return PartyService(self.party_repo)
+
+    def auth_service(self) -> AuthService:
+        return AuthService(self.user_repo, self.sessions)
+
+    def user_service(self) -> UserService:
+        return UserService(self.user_repo, self.sessions)
+
+    def dashboard_service(self) -> DashboardService:
+        return DashboardService(self.billing_service(), self.stock_service(),
+                                self.party_service())
+
+    def product_service(self) -> ProductService:
+        return ProductService(self.product_repo, self.sessions)
+
+    def catalog_service(self) -> CatalogService:
+        return CatalogService(self.category_repo, self.brand_repo, self.unit_repo,
+                              self.sessions)

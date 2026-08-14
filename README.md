@@ -71,3 +71,12 @@ the `.exe`), so rebuilding or moving the `.exe` never loses your data.
 - `storage.py` — all Excel reading/writing and business rules (no GUI)
 - `requirements.txt` — dependencies
 - `build_windows.bat` — one-click Windows build script
+
+## Upgrade in progress: `inventory_system/`
+
+A production-grade rewrite (PySide6 + SQLAlchemy + PostgreSQL) is being
+built in [`inventory_system/`](inventory_system/), alongside this app, and
+will replace it once feature-complete. **This app is unaffected and is
+still what real users should run today.** See
+[`inventory_system/docs/architecture.md`](inventory_system/docs/architecture.md)
+for the design and phased migration plan.

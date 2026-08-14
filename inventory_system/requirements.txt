@@ -1,0 +1,20 @@
+# Inventory System — production-grade rewrite (PySide6 + SQLAlchemy +
+# PostgreSQL), replacing the legacy Tkinter/Excel app incrementally. See
+# docs/architecture.md. This file is self-contained: the legacy app at the
+# repo root has its own requirements.txt and does not need any of this.
+#
+# Needed right now (Phase 0/1 code actually imports these):
+PySide6>=6.7
+pydantic>=2.6
+pydantic-settings>=2.2
+python-dotenv>=1.0
+pytest>=8.0
+
+# Needed once Phase 2 (SQLAlchemy/PostgreSQL) is implemented:
+sqlalchemy>=2.0
+alembic>=1.13
+psycopg[binary]>=3.1
+argon2-cffi>=23.1
+
+# Needed once Phase 3 (PDF invoices) is implemented:
+reportlab>=4.1
