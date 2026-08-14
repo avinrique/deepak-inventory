@@ -94,11 +94,11 @@ class InventoryService:
             raise WarehouseNotFoundError(warehouse_id)
         return result
 
-    @require_permission("inventory.read")
+    @require_permission("inventory.view")
     def get_warehouse(self, warehouse_id: uuid.UUID) -> WarehouseOut:
         return self._require_warehouse(warehouse_id)
 
-    @require_permission("inventory.read")
+    @require_permission("inventory.view")
     def list_warehouses(self) -> list[WarehouseOut]:
         return self._warehouses.list_all(self._organization_id())
 
@@ -183,23 +183,23 @@ class InventoryService:
             raise InventoryValidationError(errors)
 
     # -- reads ---------------------------------------------------------#
-    @require_permission("inventory.read")
+    @require_permission("inventory.view")
     def get_inventory_level(self, product_id: uuid.UUID,
                             warehouse_id: uuid.UUID) -> InventoryLevel:
         self._require_product(product_id)
         self._require_warehouse(warehouse_id)
         return self._inventory.get_level(self._organization_id(), product_id, warehouse_id)
 
-    @require_permission("inventory.read")
+    @require_permission("inventory.view")
     def list_levels_for_product(self, product_id: uuid.UUID) -> list[InventoryLevel]:
         self._require_product(product_id)
         return self._inventory.list_levels_for_product(self._organization_id(), product_id)
 
-    @require_permission("inventory.read")
+    @require_permission("inventory.view")
     def get_available_stock(self, product_id: uuid.UUID, warehouse_id: uuid.UUID) -> Decimal:
         level = self.get_inventory_level(product_id, warehouse_id)
         return level.quantity_available
 
-    @require_permission("inventory.read")
+    @require_permission("inventory.view")
     def list_transactions(self, filter: TransactionFilter) -> InventoryTransactionPage:
         return self._inventory.list_transactions(self._organization_id(), filter)

@@ -10,14 +10,20 @@ from datetime import datetime
 
 from app.database.session import get_session
 from app.models import Role, User, UserOrganization
-from app.schemas.user import MembershipOut, UserCredentials, UserOut
+from app.schemas.user import MembershipOut, RoleOut, UserCredentials, UserOut, UserSummaryOut
 
 
 def _to_user_out(user: User) -> UserOut:
-    return UserOut(id=user.id, email=user.email, full_name=user.full_name,
-                   is_active=user.is_active, is_superuser=user.is_superuser,
+    return UserOut(id=user.id, email=user.email, username=user.username,
+                   full_name=user.full_name, phone=user.phone, is_active=user.is_active,
+                   is_superuser=user.is_superuser,
                    must_change_password=user.must_change_password,
                    created_at=user.created_at, last_login_at=user.last_login_at)
+
+
+def _to_role_out(role: Role) -> RoleOut:
+    return RoleOut(id=role.id, name=role.name, description=role.description,
+                   is_system=role.is_system)
 
 
 def _to_credentials(user: User) -> UserCredentials:
@@ -61,6 +67,29 @@ class SqlUserRepository:
             rows = db.query(UserOrganization).filter_by(user_id=user_id).all()
             return [_to_membership_out(m, m.role.name) for m in rows]
 
+    def list_users(self, organization_id: uuid.UUID) -> list[UserSummaryOut]:
+        with get_session() as db:
+            rows = (db.query(UserOrganization)
+                   .filter_by(organization_id=organization_id)
+                   .join(User, User.id == UserOrganization.user_id)
+                   .order_by(User.full_name)
+                   .all())
+            return [
+                UserSummaryOut(id=m.user.id, email=m.user.email, username=m.user.username,
+                              full_name=m.user.full_name, phone=m.user.phone,
+                              is_active=m.user.is_active, is_superuser=m.user.is_superuser,
+                              must_change_password=m.user.must_change_password,
+                              role_id=m.role_id, role_name=m.role.name,
+                              created_at=m.user.created_at,
+                              last_login_at=m.user.last_login_at)
+                for m in rows
+            ]
+
+    def list_roles(self) -> list[RoleOut]:
+        with get_session() as db:
+            roles = db.query(Role).order_by(Role.name).all()
+            return [_to_role_out(r) for r in roles]
+
     def update_membership_role(self, user_id: uuid.UUID, organization_id: uuid.UUID,
                               role_id: uuid.UUID) -> MembershipOut | None:
         with get_session() as db:
@@ -78,34 +107,62 @@ class SqlUserRepository:
                 return frozenset()
             return frozenset(rp.permission.code for rp in role.permissions)
 
-    def create_user(self, email: str, full_name: str, hashed_password: str,
-                    organization_id: uuid.UUID, role_id: uuid.UUID,
-                    is_default: bool = True) -> UserOut:
+    def email_exists(self, email: str) -> bool:
         with get_session() as db:
-            user = User(email=email.strip().lower(), full_name=full_name,
-                       hashed_password=hashed_password)
+            return db.query(User).filter_by(email=email.strip().lower()).first() is not None
+
+    def username_exists(self, username: str) -> bool:
+        with get_session() as db:
+            return (db.query(User).filter_by(username=username.strip().lower()).first()
+                   is not None)
+
+    def create_user(self, email: str, full_name: str, hashed_password: str,
+                    organization_id: uuid.UUID, role_id: uuid.UUID, username: str,
+                    phone: str | None = None, is_default: bool = True) -> UserOut:
+        with get_session() as db:
+            user = User(email=email.strip().lower(), username=username.strip().lower(),
+                       full_name=full_name, phone=phone, hashed_password=hashed_password)
             db.add(user)
             db.flush()  # user.id is populated client-side already, but this
-                        # also surfaces a duplicate-email IntegrityError here
-                        # rather than on some later, harder-to-attribute flush
+                        # also surfaces a duplicate-email/-username IntegrityError
+                        # here rather than on some later, harder-to-attribute flush
             db.add(UserOrganization(user_id=user.id, organization_id=organization_id,
                                     role_id=role_id, is_default=is_default))
             db.flush()
             return _to_user_out(user)
 
-    def set_active(self, user_id: uuid.UUID, is_active: bool) -> None:
+    def set_active(self, user_id: uuid.UUID, organization_id: uuid.UUID,
+                   is_active: bool) -> bool:
+        """Returns False (no write) if the target isn't a member of
+        organization_id — the caller (UserService) is scoped to the calling
+        admin's own organization, and this membership check is what stops a
+        users.manage holder in one organization from reaching a user in a
+        different one purely by guessing/enumerating a UUID.
+        """
         with get_session() as db:
+            membership = db.get(UserOrganization, (user_id, organization_id))
+            if membership is None:
+                return False
             user = db.get(User, user_id)
-            if user is not None:
-                user.is_active = is_active
+            if user is None:
+                return False
+            user.is_active = is_active
+            return True
 
-    def update_password_hash(self, user_id: uuid.UUID, new_hash: str,
-                             must_change_password: bool = False) -> None:
+    def update_password_hash(self, user_id: uuid.UUID, organization_id: uuid.UUID,
+                             new_hash: str, must_change_password: bool = False) -> bool:
+        """Same organization-membership guard as set_active — see its
+        docstring."""
         with get_session() as db:
+            membership = db.get(UserOrganization, (user_id, organization_id))
+            if membership is None:
+                return False
             user = db.get(User, user_id)
-            if user is not None:
-                user.hashed_password = new_hash
-                user.must_change_password = must_change_password
+            if user is None:
+                return False
+            user.hashed_password = new_hash
+            user.must_change_password = must_change_password
+            return True
 
     def clear_must_change_password(self, user_id: uuid.UUID) -> None:
         with get_session() as db:

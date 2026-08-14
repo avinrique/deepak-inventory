@@ -97,14 +97,14 @@ class SalesService:
             raise CustomerNotFoundError(customer_id)
         return result
 
-    @require_permission("sales.read")
+    @require_permission("sales.view")
     def get_customer(self, customer_id: uuid.UUID) -> CustomerOut:
         result = self._customers.get_by_id(self._organization_id(), customer_id)
         if result is None:
             raise CustomerNotFoundError(customer_id)
         return result
 
-    @require_permission("sales.read")
+    @require_permission("sales.view")
     def list_customers(self) -> list[CustomerOut]:
         return self._customers.list_all(self._organization_id())
 
@@ -157,11 +157,11 @@ class SalesService:
             raise SalesOrderNotFoundError(sales_order_id)
         return result
 
-    @require_permission("sales.read")
+    @require_permission("sales.view")
     def get_sales_order(self, sales_order_id: uuid.UUID) -> SalesOrderOut:
         return self._require_sales_order(sales_order_id)
 
-    @require_permission("sales.read")
+    @require_permission("sales.view")
     def search_sales_orders(self, filter: SalesOrderFilter) -> SalesOrderPage:
         return self._sales_orders.search(self._organization_id(), filter)
 
@@ -206,7 +206,7 @@ class SalesService:
         return self._sales_orders.generate_invoice(self._organization_id(), sales_order_id,
                                                    self._current_user_id())
 
-    @require_permission("sales.read")
+    @require_permission("sales.view")
     def get_invoice_document(self, invoice_id: uuid.UUID) -> InvoiceDocumentData:
         # Viewing/(re)printing an already-generated invoice is a read
         # action, not a new financial one — sales.invoice gates *creating*
@@ -218,7 +218,7 @@ class SalesService:
             raise InvoiceNotFoundError(invoice_id)
         return result
 
-    @require_permission("sales.read")
+    @require_permission("sales.view")
     def get_invoice_by_sales_order(self, sales_order_id: uuid.UUID) -> InvoiceOut | None:
         """None (not an error) when no invoice has been generated yet for
         this order — callers (e.g. the Sales page's "View Invoice" action)

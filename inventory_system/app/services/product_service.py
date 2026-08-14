@@ -39,7 +39,7 @@ class ProductService:
                                actor_email=None, organization_name=None, action=action,
                                entity_type="product", entity_id=entity_id, changes=changes)
 
-    @require_permission("product.create")
+    @require_permission("products.create")
     def create_product(self, data: ProductCreate) -> ProductOut:
         org_id = self._organization_id()
         sku = normalize_sku(data.sku)
@@ -65,7 +65,7 @@ class ProductService:
                            "selling_price": str(created.selling_price)})
         return created
 
-    @require_permission("product.update")
+    @require_permission("products.update")
     def update_product(self, product_id: uuid.UUID, data: ProductUpdate) -> ProductOut:
         org_id = self._organization_id()
         existing = self._products.get_by_id(org_id, product_id)
@@ -115,23 +115,23 @@ class ProductService:
                        changes={"before": before, "after": after})
         return result
 
-    @require_permission("product.read")
+    @require_permission("products.view")
     def get_product(self, product_id: uuid.UUID) -> ProductOut:
         result = self._products.get_by_id(self._organization_id(), product_id)
         if result is None:
             raise ProductNotFoundError(product_id)
         return result
 
-    @require_permission("product.read")
+    @require_permission("products.view")
     def search_products(self, filter: ProductFilter) -> ProductPage:
         return self._products.search(self._organization_id(), filter)
 
-    @require_permission("product.delete")
+    @require_permission("products.delete")
     def archive_product(self, product_id: uuid.UUID) -> None:
         self._products.set_status(self._organization_id(), product_id, ProductStatus.ARCHIVED)
         self._audit(action="product.archive", entity_id=product_id)
 
-    @require_permission("product.update")
+    @require_permission("products.update")
     def restore_product(self, product_id: uuid.UUID) -> None:
         self._products.set_status(self._organization_id(), product_id, ProductStatus.ACTIVE)
         self._audit(action="product.restore", entity_id=product_id)

@@ -26,52 +26,52 @@ class CatalogService:
         return self._sessions.current(now=datetime.now(timezone.utc)).organization_id
 
     # -- categories ------------------------------------------------- #
-    @require_permission("product.read")
+    @require_permission("products.view")
     def list_categories(self) -> list[CategoryOut]:
         return self._categories.list_all(self._organization_id())
 
-    @require_permission("product.create")
+    @require_permission("products.create")
     def create_category(self, data: CategoryCreate) -> CategoryOut:
         return self._categories.create(self._organization_id(), data)
 
-    @require_permission("product.update")
+    @require_permission("products.update")
     def update_category(self, category_id: uuid.UUID, data: CategoryCreate) -> CategoryOut | None:
         return self._categories.update(self._organization_id(), category_id, data)
 
-    @require_permission("product.delete")
+    @require_permission("products.delete")
     def delete_category(self, category_id: uuid.UUID) -> None:
         self._categories.delete(self._organization_id(), category_id)
 
     # -- brands ------------------------------------------------------ #
-    @require_permission("product.read")
+    @require_permission("products.view")
     def list_brands(self) -> list[BrandOut]:
         return self._brands.list_all(self._organization_id())
 
-    @require_permission("product.create")
+    @require_permission("products.create")
     def create_brand(self, data: BrandCreate) -> BrandOut:
         return self._brands.create(self._organization_id(), data)
 
-    @require_permission("product.update")
+    @require_permission("products.update")
     def update_brand(self, brand_id: uuid.UUID, data: BrandCreate) -> BrandOut | None:
         return self._brands.update(self._organization_id(), brand_id, data)
 
-    @require_permission("product.delete")
+    @require_permission("products.delete")
     def delete_brand(self, brand_id: uuid.UUID) -> None:
         self._brands.delete(self._organization_id(), brand_id)
 
     # -- units --------------------------------------------------------#
-    @require_permission("product.read")
+    @require_permission("products.view")
     def list_units(self) -> list[UnitOut]:
         return self._units.list_all(self._organization_id())
 
-    @require_permission("product.create")
+    @require_permission("products.create")
     def create_unit(self, data: UnitCreate) -> UnitOut:
         return self._units.create(self._organization_id(), data)
 
-    @require_permission("product.update")
+    @require_permission("products.update")
     def update_unit(self, unit_id: uuid.UUID, data: UnitCreate) -> UnitOut | None:
         return self._units.update(self._organization_id(), unit_id, data)
 
-    @require_permission("product.delete")
+    @require_permission("products.delete")
     def delete_unit(self, unit_id: uuid.UUID) -> None:
         self._units.delete(self._organization_id(), unit_id)

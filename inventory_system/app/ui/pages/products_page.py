@@ -149,15 +149,15 @@ class ProductsPage(QWidget):
 
         bar.addStretch()
 
-        if self._can("product.create") or self._can("product.update") or self._can(
-                "product.delete"):
+        if self._can("products.create") or self._can("products.update") or self._can(
+                "products.delete"):
             manage_catalog_button = QPushButton("Manage Catalog")
             manage_catalog_button.setObjectName("ghost")
             manage_catalog_button.setCursor(Qt.CursorShape.PointingHandCursor)
             manage_catalog_button.clicked.connect(self._open_catalog_manager)
             bar.addWidget(manage_catalog_button)
 
-        if self._can("product.create"):
+        if self._can("products.create"):
             add_button = QPushButton("+ Add Product")
             add_button.setObjectName("primary")
             add_button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -216,7 +216,7 @@ class ProductsPage(QWidget):
         self._view_button.setEnabled(False)
         bar.addWidget(self._view_button)
 
-        if self._can("product.delete"):
+        if self._can("products.delete"):
             self._archive_button = QPushButton("Archive Selected")
             self._archive_button.setObjectName("danger")
             self._archive_button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -224,7 +224,7 @@ class ProductsPage(QWidget):
             self._archive_button.setEnabled(False)
             bar.addWidget(self._archive_button)
 
-        if self._can("product.update"):
+        if self._can("products.update"):
             self._restore_button = QPushButton("Restore Selected")
             self._restore_button.setObjectName("ghost")
             self._restore_button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -342,7 +342,7 @@ class ProductsPage(QWidget):
         product = self._selected_product()
         if product is None:
             return
-        read_only = not self._can("product.update")
+        read_only = not self._can("products.update")
         dialog = ProductFormDialog(self._product_service, self._categories, self._brands,
                                    self._units, product=product, read_only=read_only,
                                    parent=self)

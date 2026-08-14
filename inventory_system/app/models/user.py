@@ -19,11 +19,19 @@ class User(UUIDPKMixin, TimestampMixin, Base):
         # unique index below actually catches "a@b.com" vs "A@b.com".
         CheckConstraint("email = lower(email)", name="ck_users_email_lowercase"),
         Index("ix_users_email", "email", unique=True),
+        # Same lower-cased convention as email — a username is looked up
+        # case-insensitively in practice, so the unique index must operate
+        # on the same normalized value the app always writes.
+        CheckConstraint("username = lower(username)", name="ck_users_username_lowercase"),
+        CheckConstraint("length(trim(username)) > 0", name="ck_users_username_not_blank"),
+        Index("ix_users_username", "username", unique=True),
     )
 
     email: Mapped[str] = mapped_column(String(320), nullable=False)
+    username: Mapped[str] = mapped_column(String(100), nullable=False)
     hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
     full_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    phone: Mapped[str | None] = mapped_column(String(32), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     is_superuser: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     # Set on an admin-initiated password reset; cleared when the user

@@ -243,3 +243,33 @@ class PasswordPolicyViolationError(AppError):
     def __init__(self, errors: list[str]):
         self.errors = errors
         super().__init__("; ".join(errors))
+
+
+class UserNotFoundError(AppError):
+    def __init__(self, user_id):
+        self.user_id = user_id
+        super().__init__(f"User {user_id!r} not found")
+
+
+class DuplicateEmailError(AppError):
+    def __init__(self, email: str):
+        self.email = email
+        super().__init__(f"Email {email!r} already exists")
+
+
+class DuplicateUsernameError(AppError):
+    def __init__(self, username: str):
+        self.username = username
+        super().__init__(f"Username {username!r} already exists")
+
+
+class OwnerProtectedError(AppError):
+    """Raised when an operation would deactivate or demote an
+    organization's Owner — see app.security.permissions's module docstring:
+    "an Owner can't be removed/demoted, there's exactly one per
+    organization" is an invariant enforced here, not just documented.
+    """
+    def __init__(self, user_id):
+        self.user_id = user_id
+        super().__init__(f"User {user_id!r} is this organization's Owner and cannot be "
+                         "deactivated or demoted")

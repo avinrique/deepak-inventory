@@ -75,14 +75,14 @@ class PurchaseService:
         return po
 
     # -- suppliers ------------------------------------------------------ #
-    @require_permission("purchase.update")
+    @require_permission("purchases.update")
     def create_supplier(self, data: SupplierCreate) -> SupplierOut:
         errors = validate_supplier(name=data.name)
         if errors:
             raise PurchaseOrderValidationError(errors)
         return self._suppliers.create(self._organization_id(), data)
 
-    @require_permission("purchase.update")
+    @require_permission("purchases.update")
     def update_supplier(self, supplier_id: uuid.UUID, data: SupplierUpdate) -> SupplierOut:
         if data.name is not None:
             errors = validate_supplier(name=data.name)
@@ -93,14 +93,14 @@ class PurchaseService:
             raise SupplierNotFoundError(supplier_id)
         return result
 
-    @require_permission("purchase.read")
+    @require_permission("purchases.view")
     def get_supplier(self, supplier_id: uuid.UUID) -> SupplierOut:
         result = self._suppliers.get_by_id(self._organization_id(), supplier_id)
         if result is None:
             raise SupplierNotFoundError(supplier_id)
         return result
 
-    @require_permission("purchase.read")
+    @require_permission("purchases.view")
     def list_suppliers(self) -> list[SupplierOut]:
         return self._suppliers.list_all(self._organization_id())
 
@@ -120,7 +120,7 @@ class PurchaseService:
         if errors:
             raise PurchaseOrderValidationError(errors)
 
-    @require_permission("purchase.create")
+    @require_permission("purchases.create")
     def create_purchase_order(self, data: PurchaseOrderCreate) -> PurchaseOrderOut:
         org_id = self._organization_id()
         if self._suppliers.get_by_id(org_id, data.supplier_id) is None:
@@ -134,7 +134,7 @@ class PurchaseService:
         # tests/services/test_purchase_service.py.
         return self._purchase_orders.create(org_id, data, self._current_user_id())
 
-    @require_permission("purchase.update")
+    @require_permission("purchases.update")
     def update_purchase_order(self, purchase_order_id: uuid.UUID,
                               data: PurchaseOrderUpdate) -> PurchaseOrderOut:
         existing = self._require_purchase_order(purchase_order_id)
@@ -154,11 +154,11 @@ class PurchaseService:
             raise PurchaseOrderNotFoundError(purchase_order_id)
         return result
 
-    @require_permission("purchase.read")
+    @require_permission("purchases.view")
     def get_purchase_order(self, purchase_order_id: uuid.UUID) -> PurchaseOrderOut:
         return self._require_purchase_order(purchase_order_id)
 
-    @require_permission("purchase.read")
+    @require_permission("purchases.view")
     def search_purchase_orders(self, filter: PurchaseOrderFilter) -> PurchaseOrderPage:
         return self._purchase_orders.search(self._organization_id(), filter)
 
@@ -169,7 +169,7 @@ class PurchaseService:
             raise InvalidPurchaseOrderTransitionError(existing.status, target)
         return existing
 
-    @require_permission("purchase.update")
+    @require_permission("purchases.update")
     def submit_purchase_order(self, purchase_order_id: uuid.UUID) -> PurchaseOrderOut:
         self._transition_or_raise(purchase_order_id, PurchaseOrderStatus.SUBMITTED)
         result = self._purchase_orders.submit(self._organization_id(), purchase_order_id)
@@ -177,7 +177,7 @@ class PurchaseService:
             raise PurchaseOrderNotFoundError(purchase_order_id)
         return result
 
-    @require_permission("purchase.approve")
+    @require_permission("purchases.approve")
     def approve_purchase_order(self, purchase_order_id: uuid.UUID) -> PurchaseOrderOut:
         self._transition_or_raise(purchase_order_id, PurchaseOrderStatus.APPROVED)
         result = self._purchase_orders.approve(self._organization_id(), purchase_order_id,
@@ -186,7 +186,7 @@ class PurchaseService:
             raise PurchaseOrderNotFoundError(purchase_order_id)
         return result
 
-    @require_permission("purchase.cancel")
+    @require_permission("purchases.cancel")
     def cancel_purchase_order(self, purchase_order_id: uuid.UUID) -> PurchaseOrderOut:
         # No separate "already has received goods" check needed here: the
         # state machine (app.domain.purchasing.ALLOWED_TRANSITIONS) already
@@ -203,7 +203,7 @@ class PurchaseService:
             raise PurchaseOrderNotFoundError(purchase_order_id)
         return result
 
-    @require_permission("purchase.receive")
+    @require_permission("purchases.receive")
     def receive_goods(self, data: ReceiveGoodsRequest) -> GoodsReceiptOut:
         self._require_purchase_order(data.purchase_order_id)
         if not data.lines:
@@ -213,7 +213,7 @@ class PurchaseService:
             self._organization_id(), data.purchase_order_id, data.lines,
             self._current_user_id(), notes=data.notes)
 
-    @require_permission("purchase.return")
+    @require_permission("purchases.return")
     def record_return(self, purchase_order_id: uuid.UUID, purchase_order_item_id: uuid.UUID,
                       quantity: Decimal, reason: str) -> PurchaseReturnOut:
         self._require_purchase_order(purchase_order_id)
