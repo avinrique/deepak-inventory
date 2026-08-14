@@ -122,3 +122,46 @@ class InvalidPurchaseOrderTransitionError(AppError):
         self.current = current
         self.target = target
         super().__init__(f"Cannot move purchase order from {current!r} to {target!r}")
+
+
+class CustomerNotFoundError(AppError):
+    def __init__(self, customer_id):
+        self.customer_id = customer_id
+        super().__init__(f"Customer {customer_id!r} not found")
+
+
+class SalesOrderNotFoundError(AppError):
+    def __init__(self, sales_order_id):
+        self.sales_order_id = sales_order_id
+        super().__init__(f"Sales order {sales_order_id!r} not found")
+
+
+class SalesOrderItemNotFoundError(AppError):
+    def __init__(self, sales_order_item_id):
+        self.sales_order_item_id = sales_order_item_id
+        super().__init__(f"Sales order item {sales_order_item_id!r} not found")
+
+
+class SalesOrderValidationError(AppError):
+    def __init__(self, errors: list[str]):
+        self.errors = errors
+        super().__init__("; ".join(errors))
+
+
+class InvalidSalesOrderTransitionError(AppError):
+    def __init__(self, current, target):
+        self.current = current
+        self.target = target
+        super().__init__(f"Cannot move sales order from {current!r} to {target!r}")
+
+
+class InvoiceNotFoundError(AppError):
+    def __init__(self, invoice_id):
+        self.invoice_id = invoice_id
+        super().__init__(f"Invoice {invoice_id!r} not found")
+
+
+class DuplicateInvoiceError(AppError):
+    def __init__(self, sales_order_id):
+        self.sales_order_id = sales_order_id
+        super().__init__(f"Sales order {sales_order_id!r} already has an invoice")

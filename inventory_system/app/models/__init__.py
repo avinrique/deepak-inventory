@@ -9,6 +9,7 @@ from app.models.audit_log import AuditLog
 from app.models.base import Base
 from app.models.brand import Brand
 from app.models.category import Category
+from app.models.customer import Customer
 from app.models.inventory import Inventory, InventoryTransaction, StockAdjustment, StockTransfer
 from app.models.organization import Organization, UserOrganization
 from app.models.product import Product
@@ -20,6 +21,14 @@ from app.models.purchase_order import (
     PurchaseReturn,
 )
 from app.models.role import Permission, Role, RolePermission
+from app.models.sales_order import (
+    Invoice,
+    InvoiceSequence,
+    Payment,
+    SalesOrder,
+    SalesOrderItem,
+    SalesReturn,
+)
 from app.models.supplier import Supplier
 from app.models.unit import Unit
 from app.models.user import User
@@ -49,4 +58,11 @@ __all__ = [
     "GoodsReceipt",
     "GoodsReceiptItem",
     "PurchaseReturn",
+    "Customer",
+    "SalesOrder",
+    "SalesOrderItem",
+    "Invoice",
+    "Payment",
+    "SalesReturn",
+    "InvoiceSequence",
 ]

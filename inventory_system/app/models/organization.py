@@ -32,6 +32,13 @@ class Organization(UUIDPKMixin, TimestampMixin, Base):
     # that would take a product's on-hand quantity below zero unless this
     # is explicitly turned on. See InventoryRepository.apply_transaction.
     allow_negative_stock: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # The configurable half of invoice numbering (app.domain.sales.
+    # format_invoice_number combines this with a locked per-organization
+    # counter — see app.models.sales_order.InvoiceSequence — to produce
+    # e.g. "INV-000042"). Free-text, not validated beyond non-blank in the
+    # service layer: businesses use wildly different conventions.
+    invoice_number_prefix: Mapped[str] = mapped_column(String(20), nullable=False,
+                                                        default="INV-")
 
     memberships: Mapped[list["UserOrganization"]] = relationship(
         back_populates="organization", cascade="all, delete-orphan")

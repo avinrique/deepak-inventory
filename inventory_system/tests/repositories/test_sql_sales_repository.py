@@ -1,0 +1,412 @@
+"""SqlSalesOrderRepository (and SqlCustomerRepository) against a live
+PostgreSQL database — proves the full sales workflow end to end: creating
+an order never touches inventory, fulfillment atomically validates and
+deducts stock + writes the ledger + advances status + writes an audit
+entry, invoice numbering is unique even under concurrent generation,
+payments accumulate and auto-complete the order once fully paid, and sales
+returns put stock back and are validated against what was actually
+fulfilled.
+
+Uses the ``live_db`` fixture (tests/conftest.py) — see its docstring for
+why this is gated on INVENTORY_TEST_DATABASE_URL, separate from the app's
+real INVENTORY_DATABASE_URL, and how to run these locally.
+"""
+import threading
+from decimal import Decimal
+
+import pytest
+
+from app.database.session import get_session
+from app.domain.sales import PaymentMethod, SalesOrderStatus
+from app.models import AuditLog, Customer, Inventory, Organization, Product, Unit, User, Warehouse
+from app.repositories.sql.customer_repository import SqlCustomerRepository
+from app.repositories.sql.inventory_repository import SqlInventoryRepository
+from app.repositories.sql.sales_repository import SqlSalesOrderRepository
+from app.schemas.sales import (
+    CustomerCreate,
+    PaymentRequest,
+    SalesOrderCreate,
+    SalesOrderItemInput,
+    SalesOrderUpdate,
+)
+
+
+@pytest.fixture()
+def world(live_db):
+    with get_session() as session:
+        org = Organization(name="Acme Retail")
+        session.add(org)
+        session.flush()
+        unit = Unit(organization_id=org.id, name="Piece", abbreviation="pc")
+        session.add(unit)
+        session.flush()
+        product = Product(organization_id=org.id, sku="SKU-1", name="Widget", unit_id=unit.id,
+                          purchase_price=Decimal("10"), selling_price=Decimal("15"),
+                          tax_percent=Decimal("13"), minimum_stock_level=Decimal("0"))
+        product2 = Product(organization_id=org.id, sku="SKU-2", name="Gadget", unit_id=unit.id,
+                           purchase_price=Decimal("20"), selling_price=Decimal("30"),
+                           tax_percent=Decimal("13"), minimum_stock_level=Decimal("0"))
+        warehouse = Warehouse(organization_id=org.id, code="MAIN", name="Main")
+        customer = Customer(organization_id=org.id, name="Jane Buyer")
+        user = User(email="clerk@example.com", hashed_password="x", full_name="Clerk")
+        session.add_all([product, product2, warehouse, customer, user])
+        session.flush()
+        return {
+            "org_id": org.id, "product_id": product.id, "product2_id": product2.id,
+            "warehouse_id": warehouse.id, "customer_id": customer.id, "user_id": user.id,
+        }
+
+
+def _repo():
+    return SqlSalesOrderRepository()
+
+
+def _stock_in(world, quantity=Decimal("100")):
+    SqlInventoryRepository().stock_in(world["org_id"], world["product_id"],
+                                      world["warehouse_id"], quantity, world["user_id"])
+
+
+def _create_so(world, quantity=Decimal("10"), unit_price=Decimal("15"),
+              tax_percent=Decimal("13")):
+    repo = _repo()
+    data = SalesOrderCreate(
+        customer_id=world["customer_id"], warehouse_id=world["warehouse_id"],
+        items=[SalesOrderItemInput(product_id=world["product_id"], quantity_ordered=quantity,
+                                   unit_price=unit_price, tax_percent=tax_percent)])
+    return repo.create(world["org_id"], data, world["user_id"])
+
+
+def _confirmed_so(world, quantity=Decimal("10"), unit_price=Decimal("15"),
+                  tax_percent=Decimal("13")):
+    repo = _repo()
+    so = _create_so(world, quantity=quantity, unit_price=unit_price, tax_percent=tax_percent)
+    return repo.confirm(world["org_id"], so.id, world["user_id"])
+
+
+def _inventory_on_hand(world) -> Decimal:
+    level = SqlInventoryRepository().get_level(world["org_id"], world["product_id"],
+                                               world["warehouse_id"])
+    return level.quantity_on_hand
+
+
+# -- create / edit --------------------------------------------------------#
+
+def test_create_sales_order_starts_as_draft_and_does_not_touch_inventory(world):
+    so = _create_so(world)
+    assert so.status == SalesOrderStatus.DRAFT
+    assert so.items[0].quantity_fulfilled == Decimal("0")
+
+    with get_session() as session:
+        assert session.query(Inventory).count() == 0
+
+
+def test_update_replaces_items_wholesale(world):
+    repo = _repo()
+    so = _create_so(world, quantity=Decimal("5"))
+    updated = repo.update(world["org_id"], so.id, SalesOrderUpdate(
+        items=[SalesOrderItemInput(product_id=world["product2_id"], quantity_ordered=Decimal("3"),
+                                   unit_price=Decimal("30"), tax_percent=Decimal("0"))]))
+    assert len(updated.items) == 1
+    assert updated.items[0].product_id == world["product2_id"]
+    assert updated.items[0].quantity_ordered == Decimal("3")
+
+
+# -- status transitions ----------------------------------------------------#
+
+def test_confirm_sets_confirmed_by_and_at(world):
+    repo = _repo()
+    so = _create_so(world)
+    confirmed = repo.confirm(world["org_id"], so.id, world["user_id"])
+    assert confirmed.status == SalesOrderStatus.CONFIRMED
+    assert confirmed.confirmed_by == world["user_id"]
+    assert confirmed.confirmed_at is not None
+
+
+def test_cancel_from_draft(world):
+    repo = _repo()
+    so = _create_so(world)
+    cancelled = repo.cancel(world["org_id"], so.id)
+    assert cancelled.status == SalesOrderStatus.CANCELLED
+
+
+# -- fulfillment ------------------------------------------------------------#
+
+def test_fulfill_deducts_inventory_and_marks_fulfilled(world):
+    _stock_in(world, Decimal("50"))
+    repo = _repo()
+    so = _confirmed_so(world, quantity=Decimal("10"))
+
+    fulfilled = repo.fulfill_sale(world["org_id"], so.id, world["user_id"])
+
+    assert fulfilled.status == SalesOrderStatus.FULFILLED
+    assert fulfilled.items[0].quantity_fulfilled == Decimal("10")
+    assert _inventory_on_hand(world) == Decimal("40")
+
+
+def test_fulfill_rejects_insufficient_stock_and_rolls_back(world):
+    _stock_in(world, Decimal("5"))
+    repo = _repo()
+    so = _confirmed_so(world, quantity=Decimal("10"))
+
+    with pytest.raises(Exception):  # InsufficientStockError, from _apply
+        repo.fulfill_sale(world["org_id"], so.id, world["user_id"])
+
+    unchanged = repo.get_by_id(world["org_id"], so.id)
+    assert unchanged.status == SalesOrderStatus.CONFIRMED
+    assert unchanged.items[0].quantity_fulfilled == Decimal("0")
+    assert _inventory_on_hand(world) == Decimal("5")
+
+
+def test_fulfill_only_allowed_from_confirmed(world):
+    repo = _repo()
+    so = _create_so(world)  # still DRAFT
+    with pytest.raises(Exception):  # InvalidSalesOrderTransitionError
+        repo.fulfill_sale(world["org_id"], so.id, world["user_id"])
+
+
+def test_fulfill_multi_line_order_deducts_each_product(world):
+    _stock_in(world, Decimal("50"))
+    with get_session() as session:
+        inv2 = Inventory(organization_id=world["org_id"], product_id=world["product2_id"],
+                         warehouse_id=world["warehouse_id"], quantity_on_hand=Decimal("50"))
+        session.add(inv2)
+
+    repo = _repo()
+    data = SalesOrderCreate(
+        customer_id=world["customer_id"], warehouse_id=world["warehouse_id"],
+        items=[SalesOrderItemInput(product_id=world["product_id"], quantity_ordered=Decimal("4"),
+                                   unit_price=Decimal("15"), tax_percent=Decimal("0")),
+              SalesOrderItemInput(product_id=world["product2_id"], quantity_ordered=Decimal("6"),
+                                 unit_price=Decimal("30"), tax_percent=Decimal("0"))])
+    so = repo.create(world["org_id"], data, world["user_id"])
+    so = repo.confirm(world["org_id"], so.id, world["user_id"])
+    repo.fulfill_sale(world["org_id"], so.id, world["user_id"])
+
+    inv_repo = SqlInventoryRepository()
+    level1 = inv_repo.get_level(world["org_id"], world["product_id"], world["warehouse_id"])
+    level2 = inv_repo.get_level(world["org_id"], world["product2_id"], world["warehouse_id"])
+    assert level1.quantity_on_hand == Decimal("46")
+    assert level2.quantity_on_hand == Decimal("44")
+
+
+def test_fulfill_records_audit_log_entry(world):
+    _stock_in(world, Decimal("50"))
+    repo = _repo()
+    so = _confirmed_so(world, quantity=Decimal("5"))
+    repo.fulfill_sale(world["org_id"], so.id, world["user_id"])
+
+    with get_session() as session:
+        entries = (session.query(AuditLog)
+                  .filter_by(action="sales_order.fulfill", entity_id=so.id).all())
+        assert len(entries) == 1
+        assert entries[0].actor_email == "clerk@example.com"
+
+
+# -- invoicing ---------------------------------------------------------- #
+
+def _fulfilled_so(world, quantity=Decimal("10"), unit_price=Decimal("15"),
+                  tax_percent=Decimal("13"), stock=Decimal("100")):
+    _stock_in(world, stock)
+    repo = _repo()
+    so = _confirmed_so(world, quantity=quantity, unit_price=unit_price,
+                       tax_percent=tax_percent)
+    return repo.fulfill_sale(world["org_id"], so.id, world["user_id"])
+
+
+def test_generate_invoice_computes_totals_from_items(world):
+    repo = _repo()
+    so = _fulfilled_so(world, quantity=Decimal("10"), unit_price=Decimal("100"),
+                       tax_percent=Decimal("10"))
+
+    invoice = repo.generate_invoice(world["org_id"], so.id, world["user_id"])
+
+    assert invoice.subtotal == Decimal("1000")
+    assert invoice.tax_amount == Decimal("100.00")
+    assert invoice.total_amount == Decimal("1100.00")
+    assert invoice.invoice_number.startswith("INV-")
+
+
+def test_generate_invoice_requires_fulfilled_status(world):
+    repo = _repo()
+    so = _confirmed_so(world)  # not yet fulfilled
+    with pytest.raises(Exception):  # SalesOrderValidationError
+        repo.generate_invoice(world["org_id"], so.id, world["user_id"])
+
+
+def test_generate_invoice_rejects_duplicate(world):
+    repo = _repo()
+    so = _fulfilled_so(world)
+    repo.generate_invoice(world["org_id"], so.id, world["user_id"])
+    with pytest.raises(Exception):  # DuplicateInvoiceError
+        repo.generate_invoice(world["org_id"], so.id, world["user_id"])
+
+
+def test_invoice_numbers_increment_sequentially_per_organization(world):
+    repo = _repo()
+    numbers = []
+    for _ in range(3):
+        so = _fulfilled_so(world, quantity=Decimal("1"))
+        invoice = repo.generate_invoice(world["org_id"], so.id, world["user_id"])
+        numbers.append(invoice.invoice_number)
+    assert numbers == ["INV-000001", "INV-000002", "INV-000003"]
+
+
+def test_invoice_number_prefix_is_configurable(world):
+    with get_session() as session:
+        org = session.get(Organization, world["org_id"])
+        org.invoice_number_prefix = "ACME-"
+
+    repo = _repo()
+    so = _fulfilled_so(world)
+    invoice = repo.generate_invoice(world["org_id"], so.id, world["user_id"])
+    assert invoice.invoice_number == "ACME-000001"
+
+
+def test_concurrent_invoice_generation_produces_unique_numbers(world):
+    """20 sales orders, fulfilled up front, then 20 threads each generate
+    one invoice concurrently. The locked InvoiceSequence counter must
+    serialize them: 20 invoices, 20 distinct numbers, no collisions.
+    """
+    repo = _repo()
+    order_ids = []
+    for _ in range(20):
+        so = _fulfilled_so(world, quantity=Decimal("1"))
+        order_ids.append(so.id)
+
+    results = []
+    lock = threading.Lock()
+
+    def generate(order_id):
+        invoice = repo.generate_invoice(world["org_id"], order_id, world["user_id"])
+        with lock:
+            results.append(invoice.invoice_number)
+
+    threads = [threading.Thread(target=generate, args=(oid,)) for oid in order_ids]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(results) == 20
+    assert len(set(results)) == 20, "duplicate invoice numbers generated concurrently"
+
+
+# -- payments -------------------------------------------------------------- #
+
+def test_partial_payment_does_not_complete_order(world):
+    repo = _repo()
+    so = _fulfilled_so(world, quantity=Decimal("10"), unit_price=Decimal("100"),
+                       tax_percent=Decimal("0"))
+    invoice = repo.generate_invoice(world["org_id"], so.id, world["user_id"])
+
+    repo.record_payment(world["org_id"],
+                        PaymentRequest(invoice_id=invoice.id, amount=Decimal("400"),
+                                      method=PaymentMethod.CASH), world["user_id"])
+
+    updated = repo.get_by_id(world["org_id"], so.id)
+    assert updated.status == SalesOrderStatus.FULFILLED
+
+
+def test_full_payment_completes_order(world):
+    repo = _repo()
+    so = _fulfilled_so(world, quantity=Decimal("10"), unit_price=Decimal("100"),
+                       tax_percent=Decimal("0"))
+    invoice = repo.generate_invoice(world["org_id"], so.id, world["user_id"])
+
+    repo.record_payment(world["org_id"],
+                        PaymentRequest(invoice_id=invoice.id, amount=Decimal("1000"),
+                                      method=PaymentMethod.CARD), world["user_id"])
+
+    updated = repo.get_by_id(world["org_id"], so.id)
+    assert updated.status == SalesOrderStatus.COMPLETED
+
+
+def test_payment_in_installments_completes_order_once_total_reached(world):
+    repo = _repo()
+    so = _fulfilled_so(world, quantity=Decimal("10"), unit_price=Decimal("100"),
+                       tax_percent=Decimal("0"))
+    invoice = repo.generate_invoice(world["org_id"], so.id, world["user_id"])
+
+    repo.record_payment(world["org_id"],
+                        PaymentRequest(invoice_id=invoice.id, amount=Decimal("600"),
+                                      method=PaymentMethod.CASH), world["user_id"])
+    assert repo.get_by_id(world["org_id"], so.id).status == SalesOrderStatus.FULFILLED
+
+    repo.record_payment(world["org_id"],
+                        PaymentRequest(invoice_id=invoice.id, amount=Decimal("400"),
+                                      method=PaymentMethod.CASH), world["user_id"])
+    assert repo.get_by_id(world["org_id"], so.id).status == SalesOrderStatus.COMPLETED
+
+
+def test_payment_amount_is_decimal_not_float(world):
+    repo = _repo()
+    so = _fulfilled_so(world, quantity=Decimal("3"), unit_price=Decimal("9.99"),
+                       tax_percent=Decimal("0"))
+    invoice = repo.generate_invoice(world["org_id"], so.id, world["user_id"])
+    assert isinstance(invoice.total_amount, Decimal)
+    assert invoice.total_amount == Decimal("29.97")
+
+    payment = repo.record_payment(world["org_id"],
+                                  PaymentRequest(invoice_id=invoice.id,
+                                                amount=Decimal("29.97"),
+                                                method=PaymentMethod.CASH),
+                                  world["user_id"])
+    assert isinstance(payment.amount, Decimal)
+
+
+# -- sales returns ----------------------------------------------------------#
+
+def test_record_return_puts_stock_back_and_reduces_net_fulfilled(world):
+    repo = _repo()
+    so = _fulfilled_so(world, quantity=Decimal("10"))
+    on_hand_after_fulfil = _inventory_on_hand(world)
+
+    result = repo.record_return(world["org_id"], so.id, so.items[0].id, Decimal("3"),
+                                "wrong size", world["user_id"])
+
+    assert result.quantity == Decimal("3")
+    assert _inventory_on_hand(world) == on_hand_after_fulfil + Decimal("3")
+
+    updated = repo.get_by_id(world["org_id"], so.id)
+    assert updated.items[0].quantity_fulfilled == Decimal("7")
+
+
+def test_record_return_rejects_more_than_fulfilled(world):
+    repo = _repo()
+    so = _fulfilled_so(world, quantity=Decimal("5"))
+
+    with pytest.raises(Exception):  # SalesOrderValidationError
+        repo.record_return(world["org_id"], so.id, so.items[0].id, Decimal("6"), "too many",
+                          world["user_id"])
+
+    unchanged = repo.get_by_id(world["org_id"], so.id)
+    assert unchanged.items[0].quantity_fulfilled == Decimal("5")
+
+
+def test_record_return_creates_return_in_ledger_entry(world):
+    repo = _repo()
+    so = _fulfilled_so(world, quantity=Decimal("10"))
+
+    result = repo.record_return(world["org_id"], so.id, so.items[0].id, Decimal("2"),
+                                "damaged", world["user_id"])
+
+    from app.models import InventoryTransaction
+    with get_session() as session:
+        tx = session.get(InventoryTransaction, result.inventory_transaction_id)
+        assert tx.transaction_type.value == "RETURN_IN"
+        assert tx.quantity_change == Decimal("2")
+
+
+# -- customer repository -----------------------------------------------------#
+
+def test_customer_repository_scopes_by_organization(world):
+    with get_session() as session:
+        other_org = Organization(name="Other Org")
+        session.add(other_org)
+        session.flush()
+        other_org_id = other_org.id
+
+    repo = SqlCustomerRepository()
+    created = repo.create(world["org_id"], CustomerCreate(name="New Customer"))
+    assert repo.get_by_id(other_org_id, created.id) is None
+    assert repo.get_by_id(world["org_id"], created.id) is not None

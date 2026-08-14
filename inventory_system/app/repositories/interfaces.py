@@ -19,6 +19,20 @@ from app.schemas.inventory import (
     WarehouseUpdate,
 )
 from app.schemas.party import PartyOut
+from app.schemas.sales import (
+    CustomerCreate,
+    CustomerOut,
+    CustomerUpdate,
+    InvoiceOut,
+    PaymentOut,
+    PaymentRequest,
+    SalesOrderCreate,
+    SalesOrderFilter,
+    SalesOrderOut,
+    SalesOrderPage,
+    SalesOrderUpdate,
+    SalesReturnOut,
+)
 from app.schemas.purchasing import (
     GoodsReceiptLineInput,
     GoodsReceiptOut,
@@ -288,11 +302,70 @@ class PurchaseOrderRepository(Protocol):
                       returned_by: uuid.UUID) -> PurchaseReturnOut: ...
 
 
+class CustomerRepository(Protocol):
+    def create(self, organization_id: uuid.UUID, data: CustomerCreate) -> CustomerOut: ...
+
+    def update(self, organization_id: uuid.UUID, customer_id: uuid.UUID,
+              data: CustomerUpdate) -> CustomerOut | None: ...
+
+    def get_by_id(self, organization_id: uuid.UUID,
+                 customer_id: uuid.UUID) -> CustomerOut | None: ...
+
+    def list_all(self, organization_id: uuid.UUID) -> list[CustomerOut]: ...
+
+
+class SalesOrderRepository(Protocol):
+    """Every state-changing method runs inside one database transaction —
+    see app.repositories.sql.sales_repository. fulfill_sale and
+    record_return update the inventory ledger and append an audit log
+    entry in that same transaction, reusing
+    app.repositories.sql.inventory_repository's locked ``_apply`` helper
+    directly, the same pattern PurchaseOrderRepository uses for goods
+    receipt. generate_invoice and record_payment are sales-specific: no
+    purchasing equivalent exists.
+    """
+
+    def create(self, organization_id: uuid.UUID, data: SalesOrderCreate,
+              created_by: uuid.UUID) -> SalesOrderOut: ...
+
+    def update(self, organization_id: uuid.UUID, sales_order_id: uuid.UUID,
+              data: SalesOrderUpdate) -> SalesOrderOut | None: ...
+
+    def get_by_id(self, organization_id: uuid.UUID,
+                 sales_order_id: uuid.UUID) -> SalesOrderOut | None: ...
+
+    def search(self, organization_id: uuid.UUID,
+              filter: SalesOrderFilter) -> SalesOrderPage: ...
+
+    def confirm(self, organization_id: uuid.UUID, sales_order_id: uuid.UUID,
+              confirmed_by: uuid.UUID) -> SalesOrderOut | None: ...
+
+    def cancel(self, organization_id: uuid.UUID,
+              sales_order_id: uuid.UUID) -> SalesOrderOut | None: ...
+
+    def fulfill_sale(self, organization_id: uuid.UUID, sales_order_id: uuid.UUID,
+                    fulfilled_by: uuid.UUID) -> SalesOrderOut: ...
+
+    def generate_invoice(self, organization_id: uuid.UUID, sales_order_id: uuid.UUID,
+                        generated_by: uuid.UUID) -> InvoiceOut: ...
+
+    def get_invoice(self, organization_id: uuid.UUID,
+                   invoice_id: uuid.UUID) -> InvoiceOut | None: ...
+
+    def record_payment(self, organization_id: uuid.UUID, data: PaymentRequest,
+                      recorded_by: uuid.UUID) -> PaymentOut: ...
+
+    def record_return(self, organization_id: uuid.UUID, sales_order_id: uuid.UUID,
+                      sales_order_item_id: uuid.UUID, quantity: Decimal, reason: str,
+                      returned_by: uuid.UUID) -> SalesReturnOut: ...
+
+
 class AuditLogRepository(Protocol):
     """Append-only — there is deliberately no read/list method here yet;
     nothing in this codebase consumes audit log entries yet (see
     audit_logs.view in app.security.permissions, granted but not wired to
-    anything). Writing is what Purchasing's goods-receipt flow needs now.
+    anything). Writing is what Purchasing's goods-receipt flow and Sales'
+    fulfillment/return/payment flows need.
     """
 
     def record(self, *, organization_id: uuid.UUID | None, user_id: uuid.UUID | None,

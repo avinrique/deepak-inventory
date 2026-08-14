@@ -14,9 +14,11 @@ from app.config.settings import settings
 from app.repositories.interfaces import BillRepository, PartyRepository, StockRepository
 from app.repositories.sql.brand_repository import SqlBrandRepository
 from app.repositories.sql.category_repository import SqlCategoryRepository
+from app.repositories.sql.customer_repository import SqlCustomerRepository
 from app.repositories.sql.inventory_repository import SqlInventoryRepository
 from app.repositories.sql.product_repository import SqlProductRepository
 from app.repositories.sql.purchase_repository import SqlPurchaseOrderRepository
+from app.repositories.sql.sales_repository import SqlSalesOrderRepository
 from app.repositories.sql.supplier_repository import SqlSupplierRepository
 from app.repositories.sql.unit_repository import SqlUnitRepository
 from app.repositories.sql.user_repository import SqlUserRepository
@@ -30,6 +32,7 @@ from app.services.inventory_service import InventoryService
 from app.services.party_service import PartyService
 from app.services.product_service import ProductService
 from app.services.purchase_service import PurchaseService
+from app.services.sales_service import SalesService
 from app.services.stock_service import StockService
 from app.services.user_service import UserService
 
@@ -86,6 +89,8 @@ class Container:
         self.inventory_repo = SqlInventoryRepository()
         self.supplier_repo = SqlSupplierRepository()
         self.purchase_order_repo = SqlPurchaseOrderRepository()
+        self.customer_repo = SqlCustomerRepository()
+        self.sales_order_repo = SqlSalesOrderRepository()
         self.sessions = SessionManager(
             idle_timeout=timedelta(minutes=settings.session_idle_timeout_minutes))
 
@@ -123,3 +128,7 @@ class Container:
     def purchase_service(self) -> PurchaseService:
         return PurchaseService(self.supplier_repo, self.purchase_order_repo, self.product_repo,
                                self.warehouse_repo, self.sessions)
+
+    def sales_service(self) -> SalesService:
+        return SalesService(self.customer_repo, self.sales_order_repo, self.product_repo,
+                            self.warehouse_repo, self.sessions)
