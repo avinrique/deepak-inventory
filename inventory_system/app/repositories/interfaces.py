@@ -65,7 +65,14 @@ from app.schemas.product import (
     UnitOut,
 )
 from app.schemas.stock import StockLevel
-from app.schemas.user import MembershipOut, RoleOut, UserCredentials, UserOut, UserSummaryOut
+from app.schemas.user import (
+    MembershipOut,
+    RoleOut,
+    UserCredentials,
+    UserOut,
+    UserSummaryOut,
+    UserUpdate,
+)
 
 
 class BillRepository(Protocol):
@@ -112,20 +119,29 @@ class UserRepository(Protocol):
 
     def list_users(self, organization_id: uuid.UUID) -> list[UserSummaryOut]: ...
 
+    def get_user(self, user_id: uuid.UUID,
+                organization_id: uuid.UUID) -> UserSummaryOut | None: ...
+
     def list_roles(self) -> list[RoleOut]: ...
+
+    def role_exists(self, role_id: uuid.UUID) -> bool: ...
 
     def update_membership_role(self, user_id: uuid.UUID, organization_id: uuid.UUID,
                               role_id: uuid.UUID) -> MembershipOut | None: ...
 
     def get_role_permissions(self, role_id: uuid.UUID) -> frozenset[str]: ...
 
-    def email_exists(self, email: str) -> bool: ...
+    def email_exists(self, email: str, exclude_user_id: uuid.UUID | None = None) -> bool: ...
 
-    def username_exists(self, username: str) -> bool: ...
+    def username_exists(self, username: str,
+                        exclude_user_id: uuid.UUID | None = None) -> bool: ...
 
     def create_user(self, email: str, full_name: str, hashed_password: str,
                     organization_id: uuid.UUID, role_id: uuid.UUID, username: str,
                     phone: str | None = None, is_default: bool = True) -> UserOut: ...
+
+    def update_profile(self, user_id: uuid.UUID, organization_id: uuid.UUID,
+                       data: UserUpdate) -> UserOut | None: ...
 
     def set_active(self, user_id: uuid.UUID, organization_id: uuid.UUID,
                    is_active: bool) -> bool: ...

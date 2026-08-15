@@ -117,6 +117,76 @@ def test_admin_reset_password_forces_change_on_next_login(org_and_role):
     assert session.must_change_password is True
 
 
+def test_get_user_returns_profile_with_role_from_a_real_join(org_and_role):
+    org_id, role_id = org_and_role
+    users = SqlUserRepository()
+    admin_sessions = _admin_session_manager(org_id, role_id)
+    user_service = UserService(users, admin_sessions, SqlAuditLogRepository(),
+                               SqlOrganizationRepository())
+    created = user_service.create_user("staff@acme.test", "Staff Person", "s3cret!1",
+                                       org_id, role_id, username="staffer",
+                                       phone="+1 555-0100")
+
+    fetched = user_service.get_user(created.id)
+    assert fetched.email == "staff@acme.test"
+    assert fetched.username == "staffer"
+    assert fetched.phone == "+1 555-0100"
+    assert fetched.role_name == "MANAGER"
+
+
+def test_update_user_persists_and_returns_new_values(org_and_role):
+    org_id, role_id = org_and_role
+    users = SqlUserRepository()
+    admin_sessions = _admin_session_manager(org_id, role_id)
+    user_service = UserService(users, admin_sessions, SqlAuditLogRepository(),
+                               SqlOrganizationRepository())
+    created = user_service.create_user("staff@acme.test", "Staff Person", "s3cret!1",
+                                       org_id, role_id)
+
+    from app.schemas.user import UserUpdate
+    updated = user_service.update_user(created.id, UserUpdate(full_name="New Name",
+                                                              phone="+1 555-0199"))
+    assert updated.full_name == "New Name"
+    assert updated.phone == "+1 555-0199"
+    assert updated.email == "staff@acme.test"  # unset field left alone
+
+    refetched = user_service.get_user(created.id)
+    assert refetched.full_name == "New Name"
+
+
+def test_update_user_rejects_duplicate_email_against_real_db(org_and_role):
+    from app.core.exceptions import DuplicateEmailError
+    from app.schemas.user import UserUpdate
+
+    org_id, role_id = org_and_role
+    users = SqlUserRepository()
+    admin_sessions = _admin_session_manager(org_id, role_id)
+    user_service = UserService(users, admin_sessions, SqlAuditLogRepository(),
+                               SqlOrganizationRepository())
+    user_service.create_user("first@acme.test", "First Person", "s3cret!1", org_id, role_id)
+    second = user_service.create_user("second@acme.test", "Second Person", "s3cret!1",
+                                      org_id, role_id)
+
+    with pytest.raises(DuplicateEmailError):
+        user_service.update_user(second.id, UserUpdate(email="first@acme.test"))
+
+
+def test_create_user_rejects_unknown_role_against_real_db(org_and_role):
+    import uuid as uuid_module
+
+    from app.core.exceptions import RoleNotFoundError
+
+    org_id, role_id = org_and_role
+    users = SqlUserRepository()
+    admin_sessions = _admin_session_manager(org_id, role_id)
+    user_service = UserService(users, admin_sessions, SqlAuditLogRepository(),
+                               SqlOrganizationRepository())
+
+    with pytest.raises(RoleNotFoundError):
+        user_service.create_user("staff@acme.test", "Staff Person", "s3cret!1", org_id,
+                                 uuid_module.uuid4())
+
+
 # -- audit logging --------------------------------------------------------#
 
 def test_create_user_records_audit_log_entry(org_and_role):

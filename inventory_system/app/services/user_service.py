@@ -1,19 +1,26 @@
-"""User administration: create, list, activate/deactivate, admin-initiated
-password reset, role/permission assignment. Every method here is a
-protected operation, gated by the specific users.* permission that matches
-what it does (see app.security.permissions) — not one umbrella
-"users.manage" catch-all, so a role can be given e.g. users.view without
-also getting users.deactivate.
+"""User administration: create/get/list/update, activate/deactivate,
+admin-initiated password reset, role/permission assignment. Every method
+here is a protected operation, gated by the specific users.* permission
+that matches what it does (see app.security.permissions) — not one
+umbrella "users.manage" catch-all, so a role can be given e.g. users.view
+without also getting users.deactivate.
 
-Every method that targets an existing user (activate/deactivate/
-reset_password/change_user_role) verifies the target is a member of the
-*calling admin's own organization* before touching them (via
+Field validation (app.domain.user.validate_user) and permission
+enforcement (@require_permission) are both fully server-side — the same
+checks run whether the caller is the real PySide6 UI or a test calling
+this service directly. Repository methods pre-check for duplicates/
+existence and this module raises UserValidationError/DuplicateEmailError/
+DuplicateUsernameError/RoleNotFoundError/UserNotFoundError instead — a
+raw IntegrityError/sqlalchemy exception should never reach a caller of
+this service.
+
+Every method that targets an existing user (get/update/activate/
+deactivate/reset_password/change_user_role) verifies the target is a
+member of the *calling admin's own organization* before touching them (via
 UserRepository.get_membership / the membership check baked into
-set_active/update_password_hash) — without that check, a users.manage-
-equivalent holder in one organization could reach into a different
-organization's users purely by guessing/enumerating a UUID. This is the
-same reasoning change_user_role already followed; the other three methods
-now follow it too.
+get_user/update_profile/set_active/update_password_hash) — without that
+check, a users.*-equivalent holder in one organization could reach into a
+different organization's users purely by guessing/enumerating a UUID.
 
 An organization's Owner can't be deactivated or demoted through this
 service (OwnerProtectedError) — the one-Owner-per-organization invariant
@@ -44,11 +51,14 @@ from app.core.exceptions import (
     MembershipNotFoundError,
     OwnerProtectedError,
     PasswordPolicyViolationError,
+    RoleNotFoundError,
     UserNotFoundError,
+    UserValidationError,
 )
 from app.domain.security_policy import PasswordPolicy, validate_password
+from app.domain.user import normalize_email, normalize_username, validate_user
 from app.repositories.interfaces import AuditLogRepository, OrganizationRepository, UserRepository
-from app.schemas.user import MembershipOut, RoleOut, UserOut, UserSummaryOut
+from app.schemas.user import MembershipOut, RoleOut, UserOut, UserSummaryOut, UserUpdate
 from app.security.authorization import require_permission
 from app.security.passwords import hash_password
 from app.security.session import SessionManager
@@ -110,6 +120,9 @@ class UserService:
     def create_user(self, email: str, full_name: str, initial_password: str,
                     organization_id: uuid.UUID, role_id: uuid.UUID,
                     username: str | None = None, phone: str | None = None) -> UserOut:
+        if not self._users.role_exists(role_id):
+            raise RoleNotFoundError(role_id)
+
         org = self._organizations.get_by_id(organization_id)
         if org is not None:
             policy = PasswordPolicy(
@@ -121,12 +134,23 @@ class UserService:
             if errors:
                 raise PasswordPolicyViolationError(errors)
 
+        email = normalize_email(email)
+        # An explicit username is validated/checked as typed; an omitted
+        # one is derived (and therefore already valid/unique by
+        # construction) below, after the shared field validation — see
+        # _derive_username's docstring for why it isn't re-validated here.
+        explicit_username = normalize_username(username) if username is not None else None
+        errors = validate_user(full_name=full_name, email=email,
+                               username=explicit_username, phone=phone)
+        if errors:
+            raise UserValidationError(errors)
+
         if self._users.email_exists(email):
             raise DuplicateEmailError(email)
-        if username is not None:
-            username = username.strip().lower()
-            if self._users.username_exists(username):
-                raise DuplicateUsernameError(username)
+        if explicit_username is not None:
+            if self._users.username_exists(explicit_username):
+                raise DuplicateUsernameError(explicit_username)
+            username = explicit_username
         else:
             username = self._derive_username(email)
 
@@ -145,8 +169,64 @@ class UserService:
         return self._users.list_users(self._organization_id())
 
     @require_permission("users.view")
+    def get_user(self, target_user_id: uuid.UUID) -> UserSummaryOut:
+        organization_id = self._organization_id()
+        summary = self._users.get_user(target_user_id, organization_id)
+        if summary is None:
+            raise MembershipNotFoundError(target_user_id, organization_id)
+        return summary
+
+    @require_permission("users.view")
     def list_roles(self) -> list[RoleOut]:
         return self._users.list_roles()
+
+    @require_permission("users.update")
+    def update_user(self, target_user_id: uuid.UUID, data: UserUpdate) -> UserOut:
+        organization_id = self._organization_id()
+        self._require_membership(target_user_id, organization_id)
+        current = self._users.get_user(target_user_id, organization_id)
+        if current is None:  # membership existed a moment ago but the user row is gone
+            raise UserNotFoundError(target_user_id)
+
+        updates = data.model_dump(exclude_unset=True)
+        email = normalize_email(updates["email"]) if "email" in updates else current.email
+        username = (normalize_username(updates["username"]) if "username" in updates
+                   else current.username)
+        full_name = updates.get("full_name", current.full_name)
+        phone = updates.get("phone", current.phone)
+
+        errors = validate_user(full_name=full_name, email=email, username=username, phone=phone)
+        if errors:
+            raise UserValidationError(errors)
+        if email != current.email and self._users.email_exists(
+                email, exclude_user_id=target_user_id):
+            raise DuplicateEmailError(email)
+        if username != current.username and self._users.username_exists(
+                username, exclude_user_id=target_user_id):
+            raise DuplicateUsernameError(username)
+
+        if "email" in updates:
+            updates["email"] = email
+        if "username" in updates:
+            updates["username"] = username
+        result = self._users.update_profile(target_user_id, organization_id,
+                                            UserUpdate(**updates))
+        if result is None:
+            raise UserNotFoundError(target_user_id)
+
+        # Only the fields that actually changed — same before/after diff
+        # shape as ProductService.update_product's audit entry.
+        before, after = {}, {}
+        for field in updates:
+            old_value = getattr(current, field)
+            new_value = getattr(result, field)
+            if old_value != new_value:
+                before[field] = str(old_value)
+                after[field] = str(new_value)
+        if before:
+            self._audit(action="user.update", entity_id=target_user_id,
+                       changes={"before": before, "after": after})
+        return result
 
     @require_permission("users.update")
     def activate_user(self, target_user_id: uuid.UUID) -> None:
@@ -199,6 +279,8 @@ class UserService:
         existing = self._require_membership(target_user_id, organization_id)
         if existing.role_name == _OWNER_ROLE_NAME:
             raise OwnerProtectedError(target_user_id)
+        if not self._users.role_exists(new_role_id):
+            raise RoleNotFoundError(new_role_id)
 
         updated = self._users.update_membership_role(target_user_id, organization_id,
                                                       new_role_id)

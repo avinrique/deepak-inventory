@@ -273,3 +273,15 @@ class OwnerProtectedError(AppError):
         self.user_id = user_id
         super().__init__(f"User {user_id!r} is this organization's Owner and cannot be "
                          "deactivated or demoted")
+
+
+class UserValidationError(AppError):
+    def __init__(self, errors: list[str]):
+        self.errors = errors
+        super().__init__("; ".join(errors))
+
+
+class RoleNotFoundError(AppError):
+    def __init__(self, role_id):
+        self.role_id = role_id
+        super().__init__(f"Role {role_id!r} not found")

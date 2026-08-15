@@ -10,7 +10,23 @@ from datetime import datetime
 
 from app.database.session import get_session
 from app.models import Role, User, UserOrganization
-from app.schemas.user import MembershipOut, RoleOut, UserCredentials, UserOut, UserSummaryOut
+from app.schemas.user import (
+    MembershipOut,
+    RoleOut,
+    UserCredentials,
+    UserOut,
+    UserSummaryOut,
+    UserUpdate,
+)
+
+
+def _to_user_summary(m: UserOrganization) -> UserSummaryOut:
+    return UserSummaryOut(id=m.user.id, email=m.user.email, username=m.user.username,
+                          full_name=m.user.full_name, phone=m.user.phone,
+                          is_active=m.user.is_active, is_superuser=m.user.is_superuser,
+                          must_change_password=m.user.must_change_password,
+                          role_id=m.role_id, role_name=m.role.name,
+                          created_at=m.user.created_at, last_login_at=m.user.last_login_at)
 
 
 def _to_user_out(user: User) -> UserOut:
@@ -74,21 +90,22 @@ class SqlUserRepository:
                    .join(User, User.id == UserOrganization.user_id)
                    .order_by(User.full_name)
                    .all())
-            return [
-                UserSummaryOut(id=m.user.id, email=m.user.email, username=m.user.username,
-                              full_name=m.user.full_name, phone=m.user.phone,
-                              is_active=m.user.is_active, is_superuser=m.user.is_superuser,
-                              must_change_password=m.user.must_change_password,
-                              role_id=m.role_id, role_name=m.role.name,
-                              created_at=m.user.created_at,
-                              last_login_at=m.user.last_login_at)
-                for m in rows
-            ]
+            return [_to_user_summary(m) for m in rows]
+
+    def get_user(self, user_id: uuid.UUID,
+                organization_id: uuid.UUID) -> UserSummaryOut | None:
+        with get_session() as db:
+            m = db.get(UserOrganization, (user_id, organization_id))
+            return _to_user_summary(m) if m is not None else None
 
     def list_roles(self) -> list[RoleOut]:
         with get_session() as db:
             roles = db.query(Role).order_by(Role.name).all()
             return [_to_role_out(r) for r in roles]
+
+    def role_exists(self, role_id: uuid.UUID) -> bool:
+        with get_session() as db:
+            return db.get(Role, role_id) is not None
 
     def update_membership_role(self, user_id: uuid.UUID, organization_id: uuid.UUID,
                               role_id: uuid.UUID) -> MembershipOut | None:
@@ -107,14 +124,19 @@ class SqlUserRepository:
                 return frozenset()
             return frozenset(rp.permission.code for rp in role.permissions)
 
-    def email_exists(self, email: str) -> bool:
+    def email_exists(self, email: str, exclude_user_id: uuid.UUID | None = None) -> bool:
         with get_session() as db:
-            return db.query(User).filter_by(email=email.strip().lower()).first() is not None
+            query = db.query(User).filter_by(email=email.strip().lower())
+            if exclude_user_id is not None:
+                query = query.filter(User.id != exclude_user_id)
+            return query.first() is not None
 
-    def username_exists(self, username: str) -> bool:
+    def username_exists(self, username: str, exclude_user_id: uuid.UUID | None = None) -> bool:
         with get_session() as db:
-            return (db.query(User).filter_by(username=username.strip().lower()).first()
-                   is not None)
+            query = db.query(User).filter_by(username=username.strip().lower())
+            if exclude_user_id is not None:
+                query = query.filter(User.id != exclude_user_id)
+            return query.first() is not None
 
     def create_user(self, email: str, full_name: str, hashed_password: str,
                     organization_id: uuid.UUID, role_id: uuid.UUID, username: str,
@@ -128,6 +150,32 @@ class SqlUserRepository:
                         # here rather than on some later, harder-to-attribute flush
             db.add(UserOrganization(user_id=user.id, organization_id=organization_id,
                                     role_id=role_id, is_default=is_default))
+            db.flush()
+            return _to_user_out(user)
+
+    def update_profile(self, user_id: uuid.UUID, organization_id: uuid.UUID,
+                       data: UserUpdate) -> UserOut | None:
+        """Same organization-membership guard as set_active/
+        update_password_hash — see set_active's docstring. Only the fields
+        the caller actually set (UserService already resolved
+        model_dump(exclude_unset=True) into a full UserUpdate before this
+        is called) are written.
+        """
+        with get_session() as db:
+            membership = db.get(UserOrganization, (user_id, organization_id))
+            if membership is None:
+                return None
+            user = db.get(User, user_id)
+            if user is None:
+                return None
+            if data.email is not None:
+                user.email = data.email
+            if data.username is not None:
+                user.username = data.username
+            if data.full_name is not None:
+                user.full_name = data.full_name
+            if data.phone is not None:
+                user.phone = data.phone
             db.flush()
             return _to_user_out(user)
 

@@ -72,3 +72,17 @@ class UserCreate(BaseModel):
     role_id: uuid.UUID
     username: str | None = None
     phone: str | None = None
+
+
+class UserUpdate(BaseModel):
+    """Partial update — only fields the caller actually set are applied
+    (see UserService.update_user's use of model_dump(exclude_unset=True),
+    same pattern as ProductUpdate/ProductService.update_product). Never
+    carries hashed_password, is_active, or role_id — those go through
+    change_password/reset_password, activate_user/deactivate_user, and
+    change_user_role respectively, each with their own permission gate.
+    """
+    email: str | None = None
+    username: str | None = None
+    full_name: str | None = None
+    phone: str | None = None

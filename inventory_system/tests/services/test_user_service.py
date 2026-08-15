@@ -17,9 +17,11 @@ from app.core.exceptions import (
     DuplicateUsernameError,
     MembershipNotFoundError,
     OwnerProtectedError,
+    RoleNotFoundError,
     UserNotFoundError,
+    UserValidationError,
 )
-from app.schemas.user import MembershipOut, RoleOut, UserOut, UserSummaryOut
+from app.schemas.user import MembershipOut, RoleOut, UserOut, UserSummaryOut, UserUpdate
 from app.security.authorization import PermissionDeniedError
 from app.security.session import NotAuthenticatedError, SessionManager
 from app.services.user_service import UserService
@@ -40,12 +42,12 @@ ALL_USERS_PERMISSIONS = frozenset({
 
 
 class FakeUserRepository:
+    _KNOWN_ROLE_IDS = {ROLE_ID, OTHER_ROLE_ID, OWNER_ROLE_ID}
+
     def __init__(self):
         self.created = []
         self.active_state: dict[uuid.UUID, bool] = {TARGET_USER_ID: True, OWNER_USER_ID: True}
         self.password_updates = []
-        self.emails: set[str] = set()
-        self.usernames: set[str] = set()
         # Simulates "membership row exists but the user row itself is
         # gone" — an edge case set_active/update_password_hash's False
         # return covers even though it can't happen in the real schema
@@ -64,35 +66,93 @@ class FakeUserRepository:
                 user_id=OUTSIDER_USER_ID, organization_id=OTHER_ORG_ID, role_id=ROLE_ID,
                 role_name="SALES_STAFF", is_default=True),
         }
+        # The actual profile store — list_users/get_user/update_profile all
+        # read/write through this, exactly like the real repository reads/
+        # writes through the users table.
+        now = datetime.now(timezone.utc)
+        self.profiles: dict[uuid.UUID, dict] = {
+            TARGET_USER_ID: {"email": "target@acme.test", "username": "target",
+                            "full_name": "Target Person", "phone": None,
+                            "is_superuser": False, "must_change_password": False,
+                            "created_at": now, "last_login_at": None},
+            OWNER_USER_ID: {"email": "owner@acme.test", "username": "owner",
+                           "full_name": "Owner Person", "phone": None,
+                           "is_superuser": False, "must_change_password": False,
+                           "created_at": now, "last_login_at": None},
+            OUTSIDER_USER_ID: {"email": "outsider@other.test", "username": "outsider",
+                              "full_name": "Outsider Person", "phone": None,
+                              "is_superuser": False, "must_change_password": False,
+                              "created_at": now, "last_login_at": None},
+        }
+
+    def _summary(self, user_id, organization_id):
+        membership = self.memberships.get((user_id, organization_id))
+        profile = self.profiles.get(user_id)
+        if membership is None or profile is None:
+            return None
+        return UserSummaryOut(id=user_id, email=profile["email"], username=profile["username"],
+                              full_name=profile["full_name"], phone=profile["phone"],
+                              is_active=self.active_state.get(user_id, True),
+                              is_superuser=profile["is_superuser"],
+                              must_change_password=profile["must_change_password"],
+                              role_id=membership.role_id, role_name=membership.role_name,
+                              created_at=profile["created_at"],
+                              last_login_at=profile["last_login_at"])
 
     def create_user(self, email, full_name, hashed_password, organization_id, role_id,
                     username, phone=None):
         self.created.append((email, full_name, hashed_password, username, phone))
-        self.emails.add(email)
-        self.usernames.add(username)
+        user_id = uuid.uuid4()
         now = datetime.now(timezone.utc)
-        return UserOut(id=uuid.uuid4(), email=email, username=username, full_name=full_name,
+        self.profiles[user_id] = {"email": email, "username": username,
+                                  "full_name": full_name, "phone": phone,
+                                  "is_superuser": False, "must_change_password": False,
+                                  "created_at": now, "last_login_at": None}
+        self.active_state[user_id] = True
+        self.memberships[(user_id, organization_id)] = MembershipOut(
+            user_id=user_id, organization_id=organization_id, role_id=role_id,
+            role_name="SALES_STAFF", is_default=True)
+        return UserOut(id=user_id, email=email, username=username, full_name=full_name,
                       phone=phone, is_active=True, is_superuser=False,
                       must_change_password=False, created_at=now, last_login_at=None)
 
-    def email_exists(self, email):
-        return email in self.emails
+    def email_exists(self, email, exclude_user_id=None):
+        return any(p["email"] == email for uid, p in self.profiles.items()
+                  if uid != exclude_user_id)
 
-    def username_exists(self, username):
-        return username in self.usernames
+    def username_exists(self, username, exclude_user_id=None):
+        return any(p["username"] == username for uid, p in self.profiles.items()
+                  if uid != exclude_user_id)
 
     def list_users(self, organization_id):
-        return [
-            UserSummaryOut(id=m.user_id, email="x@acme.test", username="x",
-                          full_name="X", phone=None, is_active=True, is_superuser=False,
-                          must_change_password=False, role_id=m.role_id,
-                          role_name=m.role_name, created_at=datetime.now(timezone.utc),
-                          last_login_at=None)
-            for (uid, org), m in self.memberships.items() if org == organization_id
-        ]
+        return [self._summary(uid, org) for (uid, org) in self.memberships
+               if org == organization_id]
+
+    def get_user(self, user_id, organization_id):
+        return self._summary(user_id, organization_id)
+
+    def update_profile(self, user_id, organization_id, data):
+        if (user_id, organization_id) not in self.memberships:
+            return None
+        if user_id in self.missing_user_rows:
+            return None
+        profile = self.profiles[user_id]
+        for field in ("email", "username", "full_name", "phone"):
+            value = getattr(data, field)
+            if value is not None:
+                profile[field] = value
+        return UserOut(id=user_id, email=profile["email"], username=profile["username"],
+                      full_name=profile["full_name"], phone=profile["phone"],
+                      is_active=self.active_state.get(user_id, True),
+                      is_superuser=profile["is_superuser"],
+                      must_change_password=profile["must_change_password"],
+                      created_at=profile["created_at"], last_login_at=profile["last_login_at"])
 
     def list_roles(self):
         return [RoleOut(id=ROLE_ID, name="SALES_STAFF", description=None, is_system=True)]
+
+    def role_exists(self, role_id):
+        return role_id in self._KNOWN_ROLE_IDS
 
     def set_active(self, user_id, organization_id, is_active):
         if (user_id, organization_id) not in self.memberships:
@@ -202,17 +262,31 @@ def test_create_user_without_a_username_derives_one_from_the_email():
 
 def test_create_user_rejects_duplicate_email():
     service, repo, _, _ = _service_as({"users.create"})
-    repo.emails.add("dup@acme.test")
     with pytest.raises(DuplicateEmailError):
-        service.create_user("dup@acme.test", "New Person", "pass1234", ORG_ID, ROLE_ID)
+        # target@acme.test is already seeded on TARGET_USER_ID
+        service.create_user("target@acme.test", "New Person", "pass1234", ORG_ID, ROLE_ID)
 
 
 def test_create_user_rejects_an_explicitly_chosen_duplicate_username():
     service, repo, _, _ = _service_as({"users.create"})
-    repo.usernames.add("takenname")
     with pytest.raises(DuplicateUsernameError):
+        # "target" is already seeded as TARGET_USER_ID's username
         service.create_user("new@acme.test", "New Person", "pass1234", ORG_ID, ROLE_ID,
-                            username="takenname")
+                            username="target")
+
+
+def test_create_user_rejects_invalid_email():
+    service, repo, _, _ = _service_as({"users.create"})
+    with pytest.raises(UserValidationError):
+        service.create_user("not-an-email", "New Person", "pass1234", ORG_ID, ROLE_ID)
+
+
+def test_create_user_rejects_unknown_role():
+    service, repo, _, _ = _service_as({"users.create"})
+    with pytest.raises(RoleNotFoundError):
+        service.create_user("new@acme.test", "New Person", "pass1234", ORG_ID,
+                            uuid.uuid4())
+    assert repo.created == []
 
 
 # -- list_users / list_roles -------------------------------------------------#
@@ -233,6 +307,69 @@ def test_list_roles_requires_users_view():
     service, _, _, _ = _service_as(set())
     with pytest.raises(PermissionDeniedError):
         service.list_roles()
+
+
+# -- get_user ------------------------------------------------------------#
+
+def test_get_user_requires_users_view():
+    service, _, _, _ = _service_as(set())
+    with pytest.raises(PermissionDeniedError):
+        service.get_user(TARGET_USER_ID)
+
+
+def test_get_user_returns_the_full_profile():
+    service, _, _, _ = _service_as({"users.view"})
+    result = service.get_user(TARGET_USER_ID)
+    assert result.email == "target@acme.test"
+    assert result.role_name == "SALES_STAFF"
+
+
+def test_get_user_outside_the_callers_org_raises_membership_not_found():
+    service, _, _, _ = _service_as({"users.view"})
+    with pytest.raises(MembershipNotFoundError):
+        service.get_user(OUTSIDER_USER_ID)
+
+
+# -- update_user -----------------------------------------------------------#
+
+def test_update_user_requires_users_update():
+    service, _, _, _ = _service_as(set())
+    with pytest.raises(PermissionDeniedError):
+        service.update_user(TARGET_USER_ID, UserUpdate(full_name="New Name"))
+
+
+def test_update_user_applies_only_the_fields_that_were_set():
+    service, repo, _, audit_log = _service_as({"users.update"})
+    result = service.update_user(TARGET_USER_ID, UserUpdate(full_name="New Name"))
+    assert result.full_name == "New Name"
+    assert result.email == "target@acme.test"  # untouched
+    assert any(e["action"] == "user.update" for e in audit_log.entries)
+
+
+def test_update_user_rejects_duplicate_email():
+    service, repo, _, _ = _service_as({"users.update"})
+    with pytest.raises(DuplicateEmailError):
+        # owner@acme.test belongs to a different user (OWNER_USER_ID)
+        service.update_user(TARGET_USER_ID, UserUpdate(email="owner@acme.test"))
+
+
+def test_update_user_allows_keeping_its_own_current_email():
+    service, repo, _, _ = _service_as({"users.update"})
+    result = service.update_user(TARGET_USER_ID, UserUpdate(email="target@acme.test"))
+    assert result.email == "target@acme.test"
+
+
+def test_update_user_rejects_invalid_phone():
+    service, repo, _, _ = _service_as({"users.update"})
+    with pytest.raises(UserValidationError):
+        service.update_user(TARGET_USER_ID, UserUpdate(phone="not a phone number!!"))
+
+
+def test_update_user_outside_the_callers_org_raises_membership_not_found():
+    service, repo, _, _ = _service_as({"users.update"})
+    with pytest.raises(MembershipNotFoundError):
+        service.update_user(OUTSIDER_USER_ID, UserUpdate(full_name="Hacked"))
+    assert repo.profiles[OUTSIDER_USER_ID]["full_name"] == "Outsider Person"  # unchanged
 
 
 # -- activate/deactivate -----------------------------------------------------#
@@ -342,6 +479,14 @@ def test_authorized_change_user_role_updates_and_audits():
     updated = service.change_user_role(TARGET_USER_ID, OTHER_ROLE_ID)
     assert updated.role_name == "MANAGER"
     assert any(e["action"] == "user.role_changed" for e in audit_log.entries)
+
+
+def test_change_user_role_rejects_an_unknown_role_id():
+    service, repo, _, _ = _service_as({"users.manage_roles"})
+    with pytest.raises(RoleNotFoundError):
+        service.change_user_role(TARGET_USER_ID, uuid.uuid4())
+    # unchanged
+    assert repo.memberships[(TARGET_USER_ID, ORG_ID)].role_name == "SALES_STAFF"
 
 
 # -- unauthenticated -----------------------------------------------------------#
