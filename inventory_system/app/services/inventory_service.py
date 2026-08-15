@@ -196,6 +196,10 @@ class InventoryService:
         return self._inventory.list_levels_for_product(self._organization_id(), product_id)
 
     @require_permission("inventory.view")
+    def list_all_levels(self) -> list[InventoryLevel]:
+        return self._inventory.list_all_levels(self._organization_id())
+
+    @require_permission("inventory.view")
     def get_available_stock(self, product_id: uuid.UUID, warehouse_id: uuid.UUID) -> Decimal:
         level = self.get_inventory_level(product_id, warehouse_id)
         return level.quantity_available

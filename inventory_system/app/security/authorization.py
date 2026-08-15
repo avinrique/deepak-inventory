@@ -13,6 +13,7 @@ Service in this codebase uses) — it looks up the current session there,
 so call sites stay plain (``user_service.deactivate_user(id)``) rather than
 threading a session through every call.
 """
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from functools import wraps
 
@@ -56,6 +57,16 @@ def has_permission(session: Session, code: str) -> bool:
     except (PasswordChangeRequiredError, PermissionDeniedError):
         return False
     return True
+
+
+def has_any_permission(session: Session, codes: Iterable[str]) -> bool:
+    """True if the session holds at least one of ``codes`` — for a UI
+    element (e.g. a whole sidebar section) that's satisfied by any of
+    several alternative permissions. Delegates to has_permission per code
+    rather than re-deriving the superuser/must_change_password rules a
+    second time, so those stay defined in exactly one place.
+    """
+    return any(has_permission(session, code) for code in codes)
 
 
 def require_permission(code: str):

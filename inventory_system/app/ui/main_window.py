@@ -10,6 +10,16 @@ The same idle-check timer also polls AuthService.is_current_user_still_active
 so a deactivation applied by another admin while this session is open takes
 effect promptly (see _check_still_active) rather than only on the next
 login/idle-timeout.
+
+Sidebar entries are filtered by permission (see _MODULE_PERMISSIONS/
+_visible_modules) — a role with none of a module's relevant .view codes
+never sees that entry at all, rather than clicking in and hitting a bare
+"couldn't load" error. This is a UX convenience computed once at
+construction from the session's permission snapshot, same caveat as every
+other UI-side check: app.ui.permission_hints, which this delegates to,
+is not the enforcement boundary — @require_permission on the Service
+methods those pages call is what actually stops an unauthorized read,
+independent of whether the sidebar entry was ever shown.
 """
 import logging
 from datetime import datetime, timezone
@@ -25,6 +35,8 @@ from PySide6.QtWidgets import (
 )
 
 from app.core.container import Container
+from app.security.session import SessionManager
+from app.ui import permission_hints
 from app.ui.theme import STYLESHEET
 from app.ui.widgets.change_password_dialog import ChangePasswordDialog
 from app.ui.widgets.confirm_dialog import confirm
@@ -49,7 +61,28 @@ MODULES = [
     SidebarModule("settings", "Settings", "⚙️"),
 ]
 
+# Module key -> the permission code(s) that make it relevant; having any
+# ONE is enough (e.g. products.view). A module with no entry here (Home,
+# Warehouses/Suppliers/Customers — currently placeholders with nothing to
+# gate, and Settings — whose own read side has no permission requirement,
+# only editing does, via SettingsPage._can_edit) is visible to everyone
+# who's logged in.
+_MODULE_PERMISSIONS: dict[str, frozenset[str]] = {
+    "products": frozenset({"products.view"}),
+    "inventory": frozenset({"inventory.view"}),
+    "purchases": frozenset({"purchases.view"}),
+    "sales": frozenset({"sales.view"}),
+    "reports": frozenset({"reports.view"}),
+    "users": frozenset({"users.view"}),
+}
+
 IDLE_CHECK_INTERVAL_MS = 15_000
+
+
+def _visible_modules(sessions: SessionManager) -> list[SidebarModule]:
+    return [module for module in MODULES
+           if module.key not in _MODULE_PERMISSIONS
+           or permission_hints.can_any(sessions, _MODULE_PERMISSIONS[module.key])]
 
 
 class MainWindow(QMainWindow):
@@ -76,12 +109,14 @@ class MainWindow(QMainWindow):
         role_label = (membership.role_name if membership else
                      ("Superuser" if session and session.is_superuser else "Member"))
 
+        visible_modules = _visible_modules(container.sessions)
+
         central = QWidget()
         root = QHBoxLayout(central)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        self._sidebar = Sidebar(MODULES)
+        self._sidebar = Sidebar(visible_modules)
         root.addWidget(self._sidebar)
 
         right = QWidget()
@@ -97,7 +132,7 @@ class MainWindow(QMainWindow):
         self._content = QStackedWidget()
         self._content.setObjectName("contentArea")
         self._pages: dict[str, QWidget] = {}
-        for module in MODULES:
+        for module in visible_modules:
             page = _build_page(module.key, container)
             self._pages[module.key] = page
             self._content.addWidget(page)
@@ -114,7 +149,7 @@ class MainWindow(QMainWindow):
         self._notifications = NotificationCenter(central)
 
         self._sidebar.module_selected.connect(self._on_module_selected)
-        self._on_module_selected(MODULES[0].key)
+        self._on_module_selected(visible_modules[0].key)
 
         self._idle_timer = QTimer(self)
         self._idle_timer.timeout.connect(self._check_idle)
@@ -224,10 +259,12 @@ def _build_page(key: str, container: Container) -> QWidget:
                              container.product_service(), container.sessions)
     if key == "sales":
         from app.ui.pages.sales_orders_page import SalesOrdersPage
-        return SalesOrdersPage(container.sales_service(), container.inventory_service())
+        return SalesOrdersPage(container.sales_service(), container.inventory_service(),
+                               container.product_service(), container.sessions)
     if key == "purchases":
         from app.ui.pages.purchases_page import PurchasesPage
-        return PurchasesPage(container.billing_service())
+        return PurchasesPage(container.purchase_service(), container.inventory_service(),
+                             container.product_service(), container.sessions)
     if key == "products":
         from app.ui.pages.products_page import ProductsPage
         return ProductsPage(container.product_service(), container.catalog_service(),
@@ -249,7 +286,7 @@ def _build_page(key: str, container: Container) -> QWidget:
     if key == "users":
         from app.ui.pages.users_page import UsersPage
         return UsersPage(container.user_service(), container.sessions,
-                         container.organization_service())
+                         container.organization_service(), container.auth_service())
     if key == "settings":
         from app.ui.pages.settings_page import SettingsPage
         return SettingsPage(container.organization_service(), container.backup_service(),

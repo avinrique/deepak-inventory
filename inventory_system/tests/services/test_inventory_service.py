@@ -193,6 +193,10 @@ class FakeInventoryRepository:
         return [self.get_level(organization_id, product_id, wh_id)
                for (p_id, wh_id) in self.levels if p_id == product_id]
 
+    def list_all_levels(self, organization_id):
+        return [self.get_level(organization_id, p_id, wh_id)
+               for (p_id, wh_id) in self.levels]
+
     def list_transactions(self, organization_id, filter: TransactionFilter):
         raise NotImplementedError  # not exercised by these tests
 

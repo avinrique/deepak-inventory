@@ -312,6 +312,15 @@ class SqlInventoryRepository:
                                    quantity_reserved=r.quantity_reserved)
                    for r in rows]
 
+    def list_all_levels(self, organization_id: uuid.UUID) -> list[InventoryLevel]:
+        with get_session() as db:
+            rows = db.query(Inventory).filter_by(organization_id=organization_id).all()
+            return [InventoryLevel(product_id=r.product_id, warehouse_id=r.warehouse_id,
+                                   warehouse_code=r.warehouse.code,
+                                   quantity_on_hand=r.quantity_on_hand,
+                                   quantity_reserved=r.quantity_reserved)
+                   for r in rows]
+
     def list_transactions(self, organization_id: uuid.UUID,
                           filter: TransactionFilter) -> InventoryTransactionPage:
         with get_session() as db:

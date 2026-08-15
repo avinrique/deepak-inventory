@@ -7,6 +7,8 @@ from app.security.authorization import (
     PasswordChangeRequiredError,
     PermissionDeniedError,
     check_permission,
+    has_any_permission,
+    has_permission,
     require_permission,
 )
 from app.security.session import NotAuthenticatedError, SessionExpiredError, SessionManager
@@ -94,6 +96,58 @@ def test_require_permission_rejects_when_not_logged_in():
     service = _ServiceUnderTest(manager)
     with pytest.raises(NotAuthenticatedError):
         service.protected_operation()
+
+
+def test_has_permission_true_for_granted_code():
+    manager = SessionManager(idle_timeout=timedelta(minutes=30))
+    session = _session(manager, permissions={"sales.create"})
+    assert has_permission(session, "sales.create") is True
+
+
+def test_has_permission_false_for_ungranted_code():
+    manager = SessionManager(idle_timeout=timedelta(minutes=30))
+    session = _session(manager, permissions={"sales.read"})
+    assert has_permission(session, "sales.create") is False
+
+
+def test_has_permission_true_for_superuser_regardless_of_code():
+    manager = SessionManager(idle_timeout=timedelta(minutes=30))
+    session = _session(manager, permissions=frozenset(), is_superuser=True)
+    assert has_permission(session, "users.manage_roles") is True
+
+
+def test_has_permission_false_when_password_change_required_even_if_granted():
+    manager = SessionManager(idle_timeout=timedelta(minutes=30))
+    session = _session(manager, permissions={"sales.create"}, must_change_password=True)
+    assert has_permission(session, "sales.create") is False
+
+
+def test_has_permission_never_raises():
+    # The whole point of has_permission over check_permission: a UI hint
+    # asking "should I show this button" must get a bool back, never an
+    # exception, even for a superuser mid-mandatory-password-change.
+    manager = SessionManager(idle_timeout=timedelta(minutes=30))
+    session = _session(manager, is_superuser=True, must_change_password=True)
+    assert has_permission(session, "users.manage_roles") is False
+
+
+def test_has_any_permission_true_if_any_code_is_granted():
+    manager = SessionManager(idle_timeout=timedelta(minutes=30))
+    session = _session(manager, permissions={"inventory.view"})
+    assert has_any_permission(session, ["products.view", "inventory.view"]) is True
+
+
+def test_has_any_permission_false_if_none_are_granted():
+    manager = SessionManager(idle_timeout=timedelta(minutes=30))
+    session = _session(manager, permissions={"sales.view"})
+    assert has_any_permission(session, ["products.view", "inventory.view"]) is False
+
+
+def test_has_any_permission_true_for_superuser_with_empty_codes_list_false():
+    manager = SessionManager(idle_timeout=timedelta(minutes=30))
+    session = _session(manager, permissions=frozenset(), is_superuser=True)
+    assert has_any_permission(session, ["products.view"]) is True
+    assert has_any_permission(session, []) is False  # nothing to satisfy
 
 
 def test_require_permission_rejects_expired_session():

@@ -17,7 +17,6 @@ the same rule independently via @require_permission, so a hidden menu item
 is not what's stopping an unauthorized write.
 """
 import logging
-from datetime import datetime, timezone
 from typing import NamedTuple
 
 from PySide6.QtCore import QThreadPool, Qt, QTimer
@@ -48,6 +47,7 @@ from app.domain.security_policy import PasswordPolicy
 from app.schemas.user import RoleOut, UserSummaryOut
 from app.security.session import SessionManager
 from app.services.user_service import UserService
+from app.ui import permission_hints
 from app.ui.theme import ACCENT, GREEN, MUTED, RED
 from app.ui.widgets.async_content import AsyncContentArea
 from app.ui.widgets.change_user_role_dialog import ChangeUserRoleDialog
@@ -90,15 +90,21 @@ def _initials(full_name: str) -> str:
 
 class UsersPage(QWidget):
     def __init__(self, user_service: UserService, sessions: SessionManager,
-                organization_service=None):
+                organization_service=None, auth_service=None):
         super().__init__()
         self._user_service = user_service
         self._sessions = sessions
         self._organization_service = organization_service
+        self._auth_service = auth_service
 
         self._all_users: list[UserSummaryOut] = []
         self._roles: list[RoleOut] = []
         self._password_policy: PasswordPolicy = DEFAULT_PASSWORD_POLICY
+        # Used only to disable "Deactivate" on the logged-in admin's own
+        # row — a convenience against an accidental self-lockout, not a
+        # security boundary (nothing server-side stops self-deactivation
+        # today; a determined caller bypassing the UI still could).
+        self._current_user_id = None
         self._page = 1
         self._sort_by = "full_name"
         self._sort_desc = False
@@ -108,6 +114,14 @@ class UsersPage(QWidget):
             worker.signals.finished.connect(self._on_organization_loaded)
             worker.signals.error.connect(
                 lambda exc: _logger.exception("Failed to load organization password policy",
+                                              exc_info=exc))
+            QThreadPool.globalInstance().start(worker)
+
+        if auth_service is not None:
+            worker = Worker(auth_service.get_current_user)
+            worker.signals.finished.connect(self._on_current_user_loaded)
+            worker.signals.error.connect(
+                lambda exc: _logger.exception("Failed to load the current user",
                                               exc_info=exc))
             QThreadPool.globalInstance().start(worker)
 
@@ -137,14 +151,8 @@ class UsersPage(QWidget):
         self._load_roles()
 
     # -- permissions ------------------------------------------------- #
-    def _permissions(self) -> frozenset[str]:
-        if self._sessions.is_idle_expired(datetime.now(timezone.utc)):
-            return frozenset()
-        session = self._sessions.peek()
-        return session.permissions if session is not None else frozenset()
-
     def _can(self, code: str) -> bool:
-        return code in self._permissions()
+        return permission_hints.can(self._sessions, code)
 
     # -- toolbar ------------------------------------------------------#
     def _build_toolbar(self) -> QHBoxLayout:
@@ -202,6 +210,9 @@ class UsersPage(QWidget):
         for role in roles:
             self._role_filter.addItem(role.name, role.id)
         select_by_data(self._role_filter, previous)
+
+    def _on_current_user_loaded(self, user) -> None:
+        self._current_user_id = user.id
 
     def _on_organization_loaded(self, organization) -> None:
         self._password_policy = PasswordPolicy(
@@ -337,6 +348,7 @@ class UsersPage(QWidget):
         button.setStyleSheet(f"border: none; color: {MUTED}; font-size: 12px; padding: 4px 6px;")
 
         menu = QMenu(button)
+        menu.setToolTipsVisible(True)
         if self._can("users.view"):
             menu.addAction("View").triggered.connect(
                 lambda checked=False, u=user: self._open_view(u))
@@ -355,8 +367,13 @@ class UsersPage(QWidget):
             menu.addAction("Activate").triggered.connect(
                 lambda checked=False, u=user: self._activate(u))
         if self._can("users.deactivate") and user.is_active:
-            menu.addAction("Deactivate").triggered.connect(
-                lambda checked=False, u=user: self._deactivate(u))
+            deactivate_action = menu.addAction("Deactivate")
+            if user.id == self._current_user_id:
+                deactivate_action.setEnabled(False)
+                deactivate_action.setToolTip("You can't deactivate your own account.")
+            else:
+                deactivate_action.triggered.connect(
+                    lambda checked=False, u=user: self._deactivate(u))
 
         if menu.isEmpty():
             button.setEnabled(False)

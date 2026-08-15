@@ -22,7 +22,6 @@ top of settings.manage for the location/frequency/retention fields.
 """
 import logging
 from collections.abc import Callable
-from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 
 from PySide6.QtCore import QThreadPool, Qt
@@ -55,6 +54,7 @@ from app.security.session import SessionManager
 from app.services.backup_service import BackupService
 from app.services.inventory_service import InventoryService
 from app.services.organization_service import OrganizationService
+from app.ui import permission_hints
 from app.ui.theme import MUTED, RED
 from app.ui.widgets.async_content import AsyncContentArea
 from app.ui.widgets.combo_utils import select_by_data as _select_by_data
@@ -122,8 +122,7 @@ class SettingsPage(QWidget):
         self._async_area.reload()
 
     def _can_edit(self) -> bool:
-        session = self._sessions.current(now=datetime.now(timezone.utc))
-        return session.is_superuser or "settings.manage" in session.permissions
+        return permission_hints.can(self._sessions, "settings.manage")
 
     # -- shared tab scaffold ------------------------------------------- #
     def _build_tab(self, *, rows: list[tuple[str, QWidget]], can_edit: bool,
@@ -621,12 +620,10 @@ class _BackupPanel(QWidget):
         self._async_area.reload()
 
     def _can_backup(self) -> bool:
-        session = self._sessions.current(now=datetime.now(timezone.utc))
-        return session.is_superuser or "backup.create" in session.permissions
+        return permission_hints.can(self._sessions, "backup.create")
 
     def _can_restore(self) -> bool:
-        session = self._sessions.current(now=datetime.now(timezone.utc))
-        return session.is_superuser or "backup.restore" in session.permissions
+        return permission_hints.can(self._sessions, "backup.restore")
 
     # -- table ------------------------------------------------------------#
     def _render_table(self, items: list[BackupOut]) -> QTableWidget:

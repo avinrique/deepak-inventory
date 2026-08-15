@@ -1,15 +1,17 @@
-"""Sales orders page — search/filter/paginate SalesOrder records, with a
-"View Invoice" action per selected row. Replaces the "Sales" sidebar
-entry's previous content (a read-only legacy Excel Bill list — still at
-app.ui.pages.sales_page.SalesPage, untouched, just no longer wired into
-the sidebar) now that the real sales workflow (Customer/SalesOrder/
-Invoice/Payment, see app.services.sales_service) is what actually tracks
-sales.
+"""Sales orders page — search/filter/paginate SalesOrder records, with
+Create/Confirm/Fulfill/Cancel actions and a "View Invoice" action per
+selected row. Replaces the "Sales" sidebar entry's previous content (a
+read-only legacy Excel Bill list — still at app.ui.pages.sales_page.
+SalesPage, untouched, just no longer wired into the sidebar) now that the
+real sales workflow (Customer/SalesOrder/Invoice/Payment, see
+app.services.sales_service) is what actually tracks sales and moves
+inventory (via fulfill_sale).
 
 No business logic here: every action calls SalesService on a background
-Worker. Only browsing + invoice viewing are wired up — creating/confirming/
-fulfilling a sale from this UI isn't built yet (sales.create/confirm/
-fulfill/etc. permissions already exist in the catalog for when that lands).
+Worker. Confirm/Fulfill/Cancel are the create-through-fulfillment
+lifecycle; invoice generation/payment recording aren't wired up yet
+(sales.invoice/sales.payment permissions already exist in the catalog for
+when that lands) — "View Invoice" only looks up one if it already exists.
 """
 import logging
 
@@ -26,14 +28,21 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.domain.product import ProductStatus
 from app.domain.sales import SalesOrderStatus
+from app.schemas.product import ProductFilter
 from app.schemas.sales import SalesOrderFilter, SalesOrderOut, SalesOrderPage
+from app.security.session import SessionManager
 from app.services.inventory_service import InventoryService
+from app.services.product_service import ProductService
 from app.services.sales_service import SalesService
+from app.ui import permission_hints
 from app.ui.widgets.async_content import AsyncContentArea
+from app.ui.widgets.confirm_dialog import confirm
 from app.ui.widgets.invoice_preview_dialog import InvoicePreviewDialog
 from app.ui.widgets.page_header import PageHeader
 from app.ui.widgets.pagination_bar import PaginationBar
+from app.ui.widgets.sales_order_form_dialog import SalesOrderFormDialog
 from app.ui.widgets.states import EmptyStateWidget
 from app.workers.base_worker import Worker
 
@@ -48,13 +57,19 @@ def _money(value) -> str:
 
 
 class SalesOrdersPage(QWidget):
-    def __init__(self, sales_service: SalesService, inventory_service: InventoryService):
+    def __init__(self, sales_service: SalesService, inventory_service: InventoryService,
+                product_service: ProductService, sessions: SessionManager):
         super().__init__()
         self._sales_service = sales_service
         self._inventory_service = inventory_service
+        self._product_service = product_service
+        self._sessions = sessions
 
         self._page = 1
         self._current_items: list[SalesOrderOut] = []
+        self._customers: list = []
+        self._warehouses: list = []
+        self._products: list = []
         self._customer_names: dict = {}
         self._warehouse_codes: dict = {}
 
@@ -84,6 +99,10 @@ class SalesOrdersPage(QWidget):
     def refresh(self) -> None:
         self._async_area.reload()
 
+    # -- permissions ------------------------------------------------- #
+    def _can(self, code: str) -> bool:
+        return permission_hints.can(self._sessions, code)
+
     # -- toolbar ---------------------------------------------------------#
     def _build_toolbar(self) -> QHBoxLayout:
         bar = QHBoxLayout()
@@ -103,11 +122,22 @@ class SalesOrdersPage(QWidget):
         bar.addWidget(self._customer_filter)
 
         bar.addStretch()
+
+        if self._can("sales.create"):
+            create_button = QPushButton("+ Create Sales Order")
+            create_button.setObjectName("primary")
+            create_button.setCursor(Qt.CursorShape.PointingHandCursor)
+            create_button.clicked.connect(self._open_create_dialog)
+            bar.addWidget(create_button)
         return bar
 
     def _load_filter_options(self) -> None:
         def load():
-            return self._sales_service.list_customers(), self._inventory_service.list_warehouses()
+            customers = self._sales_service.list_customers()
+            warehouses = self._inventory_service.list_warehouses()
+            products = self._product_service.search_products(
+                ProductFilter(status=ProductStatus.ACTIVE, page_size=500)).items
+            return customers, warehouses, products
 
         worker = Worker(load)
         worker.signals.finished.connect(self._on_filter_options_loaded)
@@ -115,7 +145,8 @@ class SalesOrdersPage(QWidget):
         QThreadPool.globalInstance().start(worker)
 
     def _on_filter_options_loaded(self, result) -> None:
-        customers, warehouses = result
+        customers, warehouses, products = result
+        self._customers, self._warehouses, self._products = customers, warehouses, products
         for customer in customers:
             self._customer_filter.addItem(customer.name, customer.id)
             self._customer_names[customer.id] = customer.name
@@ -131,11 +162,39 @@ class SalesOrdersPage(QWidget):
     def _on_filter_options_error(self, exc: Exception) -> None:
         _logger.exception("Failed to load sales page filter options", exc_info=exc)
 
+    # -- create ----------------------------------------------------------- #
+    def _open_create_dialog(self) -> None:
+        dialog = SalesOrderFormDialog(self._sales_service, self._customers, self._warehouses,
+                                      self._products, parent=self)
+        if dialog.exec():
+            self.refresh()
+
     # -- row actions ------------------------------------------------------#
     def _build_row_actions(self) -> QHBoxLayout:
         bar = QHBoxLayout()
         bar.setContentsMargins(28, 0, 28, 16)
         bar.setSpacing(10)
+
+        self._confirm_button = QPushButton("Confirm")
+        self._confirm_button.setObjectName("ghost")
+        self._confirm_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._confirm_button.clicked.connect(self._confirm_selected)
+        self._confirm_button.setEnabled(False)
+        bar.addWidget(self._confirm_button)
+
+        self._fulfill_button = QPushButton("Fulfill")
+        self._fulfill_button.setObjectName("ghost")
+        self._fulfill_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._fulfill_button.clicked.connect(self._fulfill_selected)
+        self._fulfill_button.setEnabled(False)
+        bar.addWidget(self._fulfill_button)
+
+        self._cancel_button = QPushButton("Cancel Order")
+        self._cancel_button.setObjectName("danger")
+        self._cancel_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._cancel_button.clicked.connect(self._cancel_selected)
+        self._cancel_button.setEnabled(False)
+        bar.addWidget(self._cancel_button)
 
         self._view_invoice_button = QPushButton("View Invoice")
         self._view_invoice_button.setObjectName("ghost")
@@ -195,8 +254,18 @@ class SalesOrdersPage(QWidget):
 
     def _on_selection_changed(self) -> None:
         so = self._selected_order()
+        status = so.status if so is not None else None
+        self._confirm_button.setEnabled(
+            so is not None and self._can("sales.confirm")
+            and status == SalesOrderStatus.DRAFT)
+        self._fulfill_button.setEnabled(
+            so is not None and self._can("sales.fulfill")
+            and status == SalesOrderStatus.CONFIRMED)
+        self._cancel_button.setEnabled(
+            so is not None and self._can("sales.cancel")
+            and status in (SalesOrderStatus.DRAFT, SalesOrderStatus.CONFIRMED))
         self._view_invoice_button.setEnabled(
-            so is not None and so.status in _INVOICEABLE_STATUSES)
+            so is not None and status in _INVOICEABLE_STATUSES)
 
     def _selected_order(self) -> SalesOrderOut | None:
         table = self._async_area.currentWidget()
@@ -209,6 +278,37 @@ class SalesOrdersPage(QWidget):
         if row >= len(self._current_items):
             return None
         return self._current_items[row]
+
+    # -- lifecycle actions ------------------------------------------------ #
+    def _confirm_selected(self) -> None:
+        so = self._selected_order()
+        if so is None:
+            return
+        self._run_action(self._sales_service.confirm_sales_order, so.id)
+
+    def _fulfill_selected(self) -> None:
+        so = self._selected_order()
+        if so is None:
+            return
+        self._run_action(self._sales_service.fulfill_sale, so.id)
+
+    def _cancel_selected(self) -> None:
+        so = self._selected_order()
+        if so is None:
+            return
+        if confirm(self, "Cancel Sales Order", "Cancel this sales order?",
+                  confirm_label="Cancel Order", danger=True):
+            self._run_action(self._sales_service.cancel_sales_order, so.id)
+
+    def _run_action(self, fn, sales_order_id) -> None:
+        worker = Worker(fn, sales_order_id)
+        worker.signals.finished.connect(lambda _: self.refresh())
+        worker.signals.error.connect(self._on_action_error)
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_action_error(self, exc: Exception) -> None:
+        _logger.exception("Sales order action failed", exc_info=exc)
+        QMessageBox.critical(self, "Action failed", str(exc))
 
     # -- view invoice --------------------------------------------------- #
     def _view_invoice_for_selected(self) -> None:

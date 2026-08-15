@@ -11,7 +11,6 @@ independently via @require_permission, so a hidden button is not what's
 stopping an unauthorized write.
 """
 import logging
-from datetime import datetime, timezone
 from decimal import Decimal
 
 from PySide6.QtCore import Qt, QThreadPool, QTimer
@@ -32,6 +31,7 @@ from app.schemas.product import ProductFilter, ProductOut, ProductPage
 from app.security.session import SessionManager
 from app.services.catalog_service import CatalogService
 from app.services.product_service import ProductService
+from app.ui import permission_hints
 from app.ui.widgets.async_content import AsyncContentArea
 from app.ui.widgets.catalog_manager_dialog import CatalogManagerDialog
 from app.ui.widgets.combo_utils import select_by_data
@@ -110,14 +110,8 @@ class ProductsPage(QWidget):
         self._search_debounce.timeout.connect(self.refresh)
 
     # -- permissions ------------------------------------------------- #
-    def _permissions(self) -> frozenset[str]:
-        if self._sessions.is_idle_expired(datetime.now(timezone.utc)):
-            return frozenset()
-        session = self._sessions.peek()
-        return session.permissions if session is not None else frozenset()
-
     def _can(self, code: str) -> bool:
-        return code in self._permissions()
+        return permission_hints.can(self._sessions, code)
 
     # -- toolbar ------------------------------------------------------#
     def _build_toolbar(self) -> QHBoxLayout:
