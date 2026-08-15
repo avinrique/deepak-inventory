@@ -100,7 +100,7 @@ class FakeUserRepository:
                               last_login_at=profile["last_login_at"])
 
     def create_user(self, email, full_name, hashed_password, organization_id, role_id,
-                    username, phone=None):
+                    username, phone=None, is_active=True):
         self.created.append((email, full_name, hashed_password, username, phone))
         user_id = uuid.uuid4()
         now = datetime.now(timezone.utc)
@@ -108,12 +108,12 @@ class FakeUserRepository:
                                   "full_name": full_name, "phone": phone,
                                   "is_superuser": False, "must_change_password": False,
                                   "created_at": now, "last_login_at": None}
-        self.active_state[user_id] = True
+        self.active_state[user_id] = is_active
         self.memberships[(user_id, organization_id)] = MembershipOut(
             user_id=user_id, organization_id=organization_id, role_id=role_id,
             role_name="SALES_STAFF", is_default=True)
         return UserOut(id=user_id, email=email, username=username, full_name=full_name,
-                      phone=phone, is_active=True, is_superuser=False,
+                      phone=phone, is_active=is_active, is_superuser=False,
                       must_change_password=False, created_at=now, last_login_at=None)
 
     def email_exists(self, email, exclude_user_id=None):

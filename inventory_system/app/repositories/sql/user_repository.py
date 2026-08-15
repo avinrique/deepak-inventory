@@ -140,10 +140,12 @@ class SqlUserRepository:
 
     def create_user(self, email: str, full_name: str, hashed_password: str,
                     organization_id: uuid.UUID, role_id: uuid.UUID, username: str,
-                    phone: str | None = None, is_default: bool = True) -> UserOut:
+                    phone: str | None = None, is_default: bool = True,
+                    is_active: bool = True) -> UserOut:
         with get_session() as db:
             user = User(email=email.strip().lower(), username=username.strip().lower(),
-                       full_name=full_name, phone=phone, hashed_password=hashed_password)
+                       full_name=full_name, phone=phone, hashed_password=hashed_password,
+                       is_active=is_active)
             db.add(user)
             db.flush()  # user.id is populated client-side already, but this
                         # also surfaces a duplicate-email/-username IntegrityError

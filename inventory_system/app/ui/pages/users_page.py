@@ -44,6 +44,7 @@ from app.core.exceptions import (
     RoleNotFoundError,
     UserNotFoundError,
 )
+from app.domain.security_policy import PasswordPolicy
 from app.schemas.user import RoleOut, UserSummaryOut
 from app.security.session import SessionManager
 from app.services.user_service import UserService
@@ -54,7 +55,7 @@ from app.ui.widgets.confirm_dialog import confirm
 from app.ui.widgets.page_header import PageHeader
 from app.ui.widgets.pagination_bar import PaginationBar
 from app.ui.widgets.states import EmptyStateWidget
-from app.ui.widgets.user_form_dialog import UserFormDialog
+from app.ui.widgets.user_form_dialog import DEFAULT_PASSWORD_POLICY, UserFormDialog
 from app.workers.base_worker import Worker
 
 _COLUMNS = [
@@ -87,16 +88,27 @@ def _initials(full_name: str) -> str:
 
 
 class UsersPage(QWidget):
-    def __init__(self, user_service: UserService, sessions: SessionManager):
+    def __init__(self, user_service: UserService, sessions: SessionManager,
+                organization_service=None):
         super().__init__()
         self._user_service = user_service
         self._sessions = sessions
+        self._organization_service = organization_service
 
         self._all_users: list[UserSummaryOut] = []
         self._roles: list[RoleOut] = []
+        self._password_policy: PasswordPolicy = DEFAULT_PASSWORD_POLICY
         self._page = 1
         self._sort_by = "full_name"
         self._sort_desc = False
+
+        if organization_service is not None:
+            worker = Worker(organization_service.get_current_organization)
+            worker.signals.finished.connect(self._on_organization_loaded)
+            worker.signals.error.connect(
+                lambda exc: _logger.exception("Failed to load organization password policy",
+                                              exc_info=exc))
+            QThreadPool.globalInstance().start(worker)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -191,6 +203,13 @@ class UsersPage(QWidget):
         index = self._role_filter.findData(previous)
         if index >= 0:
             self._role_filter.setCurrentIndex(index)
+
+    def _on_organization_loaded(self, organization) -> None:
+        self._password_policy = PasswordPolicy(
+            min_length=organization.password_min_length,
+            require_uppercase=organization.password_require_uppercase,
+            require_number=organization.password_require_number,
+            require_special_char=organization.password_require_special_char)
 
     # -- data flow ------------------------------------------------------#
     def refresh(self) -> None:
@@ -351,7 +370,8 @@ class UsersPage(QWidget):
     def _open_add_dialog(self) -> None:
         session = self._sessions.peek()
         organization_id = session.organization_id if session else None
-        dialog = UserFormDialog(self._user_service, self._roles, organization_id, parent=self)
+        dialog = UserFormDialog(self._user_service, self._roles, organization_id, parent=self,
+                                password_policy=self._password_policy)
         if dialog.exec():
             self.refresh()
 

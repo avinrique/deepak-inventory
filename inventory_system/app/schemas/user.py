@@ -72,6 +72,7 @@ class UserCreate(BaseModel):
     role_id: uuid.UUID
     username: str | None = None
     phone: str | None = None
+    is_active: bool = True
 
 
 class UserUpdate(BaseModel):

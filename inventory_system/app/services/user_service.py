@@ -119,7 +119,8 @@ class UserService:
     @require_permission("users.create")
     def create_user(self, email: str, full_name: str, initial_password: str,
                     organization_id: uuid.UUID, role_id: uuid.UUID,
-                    username: str | None = None, phone: str | None = None) -> UserOut:
+                    username: str | None = None, phone: str | None = None,
+                    is_active: bool = True) -> UserOut:
         if not self._users.role_exists(role_id):
             raise RoleNotFoundError(role_id)
 
@@ -157,11 +158,13 @@ class UserService:
         created = self._users.create_user(email=email, full_name=full_name,
                                           hashed_password=hash_password(initial_password),
                                           organization_id=organization_id, role_id=role_id,
-                                          username=username, phone=phone)
+                                          username=username, phone=phone,
+                                          is_active=is_active)
         self._audit(action="user.create", entity_id=created.id,
                    changes={"email": created.email, "username": created.username,
                            "full_name": created.full_name,
-                           "organization_id": str(organization_id), "role_id": str(role_id)})
+                           "organization_id": str(organization_id), "role_id": str(role_id),
+                           "is_active": str(is_active)})
         return created
 
     @require_permission("users.view")

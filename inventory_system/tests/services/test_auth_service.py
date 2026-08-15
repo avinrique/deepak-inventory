@@ -25,7 +25,7 @@ class FakeUserRepository:
         self.memberships: dict[uuid.UUID, list[MembershipOut]] = {}
         self.role_permissions: dict[uuid.UUID, frozenset[str]] = {}
         self.logins: list[tuple[uuid.UUID, object]] = []
-        self.password_updates: list[tuple[uuid.UUID, str, bool]] = []
+        self.password_updates: list[tuple[uuid.UUID, uuid.UUID | None, str, bool]] = []
 
     def seed_user(self, email, password, *, is_active=True, is_superuser=False,
                  must_change_password=False, memberships=()):
@@ -67,8 +67,9 @@ class FakeUserRepository:
     def set_active(self, user_id, is_active):
         raise NotImplementedError
 
-    def update_password_hash(self, user_id, new_hash, must_change_password=False):
-        self.password_updates.append((user_id, new_hash, must_change_password))
+    def update_password_hash(self, user_id, organization_id, new_hash,
+                             must_change_password=False):
+        self.password_updates.append((user_id, organization_id, new_hash, must_change_password))
         old = self.users[user_id]
         self.users[user_id] = old.model_copy(
             update={"hashed_password": new_hash,
@@ -247,7 +248,7 @@ def test_change_password_with_correct_old_password_succeeds():
     service.change_password("old-pass", "new-pass")
 
     assert repo.password_updates[-1][0] == user_id
-    assert repo.password_updates[-1][2] is False  # must_change_password cleared
+    assert repo.password_updates[-1][3] is False  # must_change_password cleared
     # new password now works for a fresh login
     sessions.end()
     service.login("owner@acme.test", "new-pass")

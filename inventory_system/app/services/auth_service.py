@@ -72,11 +72,6 @@ class AuthService:
                        changes={"reason": "wrong_password"})
             raise InvalidCredentialsError()
 
-        if needs_rehash(credentials.hashed_password):
-            self._users.update_password_hash(
-                credentials.id, hash_password(password),
-                must_change_password=credentials.must_change_password)
-
         role_id: uuid.UUID | None = None
         org_id: uuid.UUID | None = organization_id
         permissions: frozenset[str] = frozenset()
@@ -107,6 +102,11 @@ class AuthService:
             if org is not None:
                 self._sessions.set_idle_timeout(
                     timedelta(minutes=org.session_timeout_minutes))
+
+        if org_id is not None and needs_rehash(credentials.hashed_password):
+            self._users.update_password_hash(
+                credentials.id, org_id, hash_password(password),
+                must_change_password=credentials.must_change_password)
 
         session = self._sessions.start(
             user_id=credentials.id, organization_id=org_id, role_id=role_id,
@@ -145,6 +145,7 @@ class AuthService:
                 if errors:
                     raise PasswordPolicyViolationError(errors)
 
-        self._users.update_password_hash(session.user_id, hash_password(new_password),
+        self._users.update_password_hash(session.user_id, session.organization_id,
+                                         hash_password(new_password),
                                          must_change_password=False)
         self._sessions.mark_password_changed()

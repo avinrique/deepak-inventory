@@ -138,7 +138,8 @@ class UserRepository(Protocol):
 
     def create_user(self, email: str, full_name: str, hashed_password: str,
                     organization_id: uuid.UUID, role_id: uuid.UUID, username: str,
-                    phone: str | None = None, is_default: bool = True) -> UserOut: ...
+                    phone: str | None = None, is_default: bool = True,
+                    is_active: bool = True) -> UserOut: ...
 
     def update_profile(self, user_id: uuid.UUID, organization_id: uuid.UUID,
                        data: UserUpdate) -> UserOut | None: ...
