@@ -309,6 +309,14 @@ def test_create_user_rejects_unknown_role():
     assert repo.created == []
 
 
+def test_create_user_assigns_the_given_role():
+    service, repo, _, _ = _service_as({"users.create"})
+    created = service.create_user("new@acme.test", "New Person", "pass1234", ORG_ID,
+                                  OTHER_ROLE_ID)
+    membership = repo.memberships[(created.id, ORG_ID)]
+    assert membership.role_id == OTHER_ROLE_ID
+
+
 # -- list_users / list_roles -------------------------------------------------#
 
 def test_list_users_requires_users_view():
@@ -589,3 +597,74 @@ def test_unauthenticated_call_raises_not_authenticated_not_permission_denied():
                           FakeOrganizationRepository())  # never logged in
     with pytest.raises(NotAuthenticatedError):
         service.deactivate_user(TARGET_USER_ID)
+
+
+# -- audit logging --------------------------------------------------------- #
+# Not just "was an entry recorded" — every one of these also asserts the
+# secret involved (initial password, temporary password, its hash) never
+# appears anywhere in the audit trail, per the hard requirement that audit
+# metadata must never carry a credential.
+
+def test_create_user_records_audit_entry_without_password_or_hash():
+    service, repo, _, audit_log = _service_as({"users.create"})
+    created = service.create_user("new@acme.test", "New Person", "Sup3rSecret!1",
+                                  ORG_ID, ROLE_ID)
+
+    entries = [e for e in audit_log.entries if e["action"] == "user.create"]
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry["entity_type"] == "user"
+    assert entry["entity_id"] == created.id
+
+    serialized = str(audit_log.entries)
+    assert "Sup3rSecret!1" not in serialized
+    stored_hash = repo.created[0][2]
+    assert stored_hash.startswith("$argon2id$")
+    assert stored_hash not in serialized
+    assert "hashed_password" not in serialized
+
+
+def test_deactivate_and_activate_user_record_audit_entries():
+    service, repo, _, audit_log = _service_as({"users.deactivate", "users.update"})
+
+    service.deactivate_user(TARGET_USER_ID)
+    service.activate_user(TARGET_USER_ID)
+
+    deactivate_entries = [e for e in audit_log.entries if e["action"] == "user.deactivate"]
+    activate_entries = [e for e in audit_log.entries if e["action"] == "user.activate"]
+    assert len(deactivate_entries) == 1
+    assert len(activate_entries) == 1
+    assert deactivate_entries[0]["entity_id"] == TARGET_USER_ID
+    assert deactivate_entries[0]["entity_type"] == "user"
+    assert activate_entries[0]["entity_id"] == TARGET_USER_ID
+
+
+def test_reset_password_records_audit_entry_without_the_temporary_password():
+    service, repo, _, audit_log = _service_as({"users.reset_password"})
+
+    temporary_password = service.reset_password(TARGET_USER_ID)
+
+    entries = [e for e in audit_log.entries if e["action"] == "user.password_reset"]
+    assert len(entries) == 1
+    assert entries[0]["entity_id"] == TARGET_USER_ID
+    assert entries[0]["entity_type"] == "user"
+
+    # The whole point of a one-time temporary password: it must never be
+    # persisted anywhere outside the value handed back to the admin caller.
+    serialized = str(audit_log.entries)
+    assert temporary_password not in serialized
+    stored_hash = repo.password_updates[0][1]
+    assert stored_hash not in serialized
+
+
+def test_role_change_audit_entry_never_carries_credentials():
+    # Belt-and-suspenders on the already-tested role_changed entry
+    # (test_authorized_change_user_role_updates_and_audits): confirms the
+    # "no secrets in audit metadata" rule holds here too, not just for the
+    # obviously password-shaped operations.
+    service, repo, _, audit_log = _service_as({"users.manage_roles"})
+    service.change_user_role(TARGET_USER_ID, OTHER_ROLE_ID)
+
+    serialized = str(audit_log.entries)
+    assert "password" not in serialized.lower()
+    assert "hash" not in serialized.lower()

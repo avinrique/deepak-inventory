@@ -117,7 +117,12 @@ class Container:
 
     def auth_service(self) -> AuthService:
         return AuthService(self.user_repo, self.sessions, self.audit_log_repo,
-                           self.organization_repo)
+                           self.organization_repo,
+                           lockout_threshold=settings.login_lockout_threshold,
+                           lockout_window=timedelta(
+                               minutes=settings.login_lockout_window_minutes),
+                           lockout_duration=timedelta(
+                               minutes=settings.login_lockout_duration_minutes))
 
     def user_service(self) -> UserService:
         return UserService(self.user_repo, self.sessions, self.audit_log_repo,

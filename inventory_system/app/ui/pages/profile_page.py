@@ -42,7 +42,7 @@ from app.domain.user import validate_user
 from app.schemas.user import MembershipOut, UserOut, UserUpdate
 from app.services.auth_service import AuthService
 from app.services.user_service import UserService
-from app.ui.theme import GREEN, MUTED, RED
+from app.ui.theme import GREEN_DARK, MUTED, RED
 from app.ui.widgets.async_content import AsyncContentArea
 from app.ui.widgets.avatar import AvatarLabel
 from app.ui.widgets.change_password_dialog import ChangePasswordDialog
@@ -122,7 +122,7 @@ class ProfilePage(QWidget):
         meta.setSpacing(10)
         meta.addWidget(self._pill(role_name))
         status_text = "Active" if user.is_active else "Inactive"
-        status_pill = self._pill(status_text, color=GREEN if user.is_active else RED)
+        status_pill = self._pill(status_text, color=GREEN_DARK if user.is_active else RED)
         meta.addWidget(status_pill)
         meta.addStretch()
         text_box.addLayout(meta)

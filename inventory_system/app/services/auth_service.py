@@ -19,16 +19,25 @@ password policy (app.domain.security_policy) before being accepted.
 UserService.create_user enforces the same policy for admin-created
 accounts — see that module.
 
-Failed-login lockout: after _LOCKOUT_THRESHOLD failed attempts for the same
-(normalized) email within _LOCKOUT_WINDOW, further attempts for that email
-are rejected with AccountLockedError for _LOCKOUT_DURATION — tracked
-in-memory on this instance rather than a User column, consistent with
-SessionManager's own "one process, in-memory" state for this desktop app
-(see security/session.py's docstring). Tracked by email regardless of
+Failed-login lockout: after ``lockout_threshold`` failed attempts for the
+same (normalized) email within ``lockout_window``, further attempts for
+that email are rejected with AccountLockedError for ``lockout_duration`` —
+tracked in-memory on this instance rather than a User column, consistent
+with SessionManager's own "one process, in-memory" state for this desktop
+app (see security/session.py's docstring). Tracked by email regardless of
 whether it belongs to a real account, so an attacker can't distinguish
 "unknown email" from "real email, now locked" any faster than they could
 already tell "unknown email" from "wrong password" — both already raise
 the same generic InvalidCredentialsError before lockout kicks in.
+
+The three lockout parameters are deployment-wide config (see
+app.config.settings.Settings.login_lockout_*), not hardcoded here and not
+per-organization like session timeout/password policy — lockout has to
+apply before login even resolves which organization is involved, so there
+is no organization row to read a policy from yet at the point it's
+checked. Container.auth_service() is what actually reads Settings and
+passes the values in; defaults on this constructor exist only so tests and
+other direct callers aren't forced to specify them.
 """
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -47,18 +56,24 @@ from app.schemas.user import MembershipOut, UserOut
 from app.security.passwords import hash_password, needs_rehash, verify_password
 from app.security.session import Session, SessionManager
 
-_LOCKOUT_THRESHOLD = 5
-_LOCKOUT_WINDOW = timedelta(minutes=15)
-_LOCKOUT_DURATION = timedelta(minutes=15)
+DEFAULT_LOCKOUT_THRESHOLD = 5
+DEFAULT_LOCKOUT_WINDOW = timedelta(minutes=15)
+DEFAULT_LOCKOUT_DURATION = timedelta(minutes=15)
 
 
 class AuthService:
     def __init__(self, users: UserRepository, sessions: SessionManager,
-                audit_log: AuditLogRepository, organizations: OrganizationRepository):
+                audit_log: AuditLogRepository, organizations: OrganizationRepository,
+                lockout_threshold: int = DEFAULT_LOCKOUT_THRESHOLD,
+                lockout_window: timedelta = DEFAULT_LOCKOUT_WINDOW,
+                lockout_duration: timedelta = DEFAULT_LOCKOUT_DURATION):
         self._users = users
         self._sessions = sessions
         self._audit_log = audit_log
         self._organizations = organizations
+        self._lockout_threshold = lockout_threshold
+        self._lockout_window = lockout_window
+        self._lockout_duration = lockout_duration
         self._failed_attempts: dict[str, list[datetime]] = {}
 
     def _audit(self, *, action: str, user_id: uuid.UUID | None,
@@ -70,16 +85,16 @@ class AuthService:
                                changes=changes)
 
     def _recent_failures(self, key: str, now: datetime) -> list[datetime]:
-        cutoff = now - _LOCKOUT_WINDOW
+        cutoff = now - self._lockout_window
         recent = [t for t in self._failed_attempts.get(key, []) if t > cutoff]
         self._failed_attempts[key] = recent
         return recent
 
     def _seconds_locked(self, key: str, now: datetime) -> int | None:
         recent = self._recent_failures(key, now)
-        if len(recent) < _LOCKOUT_THRESHOLD:
+        if len(recent) < self._lockout_threshold:
             return None
-        locked_until = recent[-1] + _LOCKOUT_DURATION
+        locked_until = recent[-1] + self._lockout_duration
         if now >= locked_until:
             return None
         return int((locked_until - now).total_seconds())

@@ -19,6 +19,16 @@ class Settings(BaseSettings):
     default_vat_percent: str = "13"
     log_dir: str = "logs"
     session_idle_timeout_minutes: int = 30
+
+    # Failed-login lockout (see AuthService's module docstring): after this
+    # many failed attempts for the same email within login_lockout_window_
+    # minutes, further attempts are refused for login_lockout_duration_
+    # minutes. Deployment-wide (not per-organization, unlike session
+    # timeout/password policy) because lockout has to apply *before* which
+    # organization a login even belongs to is known.
+    login_lockout_threshold: int = 5
+    login_lockout_window_minutes: int = 15
+    login_lockout_duration_minutes: int = 15
     # Where pg_dump backup files are written/read from — a local directory,
     # never a path derived from user input at call time (see
     # app.backup.postgres_backup).

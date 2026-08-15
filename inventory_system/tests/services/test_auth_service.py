@@ -17,7 +17,7 @@ from app.schemas.user import MembershipOut, UserCredentials, UserOut
 from app.security.authorization import require_permission
 from app.security.passwords import hash_password
 from app.security.session import NotAuthenticatedError, SessionExpiredError, SessionManager
-from app.services.auth_service import AuthService
+from app.services.auth_service import AuthService, DEFAULT_LOCKOUT_THRESHOLD
 
 ORG_ID = uuid.uuid4()
 OTHER_ORG_ID = uuid.uuid4()
@@ -138,12 +138,13 @@ class FakeAuditLogRepository:
                             "entity_id": entity_id, "changes": changes})
 
 
-def _service(repo=None, sessions=None, audit_log=None, organizations=None):
+def _service(repo=None, sessions=None, audit_log=None, organizations=None, **lockout_kwargs):
     repo = repo or FakeUserRepository()
     sessions = sessions or SessionManager(idle_timeout=timedelta(minutes=30))
     audit_log = audit_log or FakeAuditLogRepository()
     organizations = organizations or FakeOrganizationRepository()
-    return AuthService(repo, sessions, audit_log, organizations), repo, sessions, audit_log
+    return (AuthService(repo, sessions, audit_log, organizations, **lockout_kwargs),
+           repo, sessions, audit_log)
 
 
 def test_login_with_correct_password_succeeds():
@@ -346,6 +347,31 @@ def test_login_after_idle_timeout_requires_relogin_for_protected_calls():
 
 # -- failed-login lockout ----------------------------------------------#
 
+def test_lockout_parameters_are_configurable_not_hardcoded():
+    # Proves the threshold/window/duration are real constructor
+    # parameters (wired from Settings by Container.auth_service in
+    # production), not module-level constants a caller can't override —
+    # a threshold of 2 must lock out after the 2nd failure, not the
+    # module's own default of DEFAULT_LOCKOUT_THRESHOLD (5).
+    repo = FakeUserRepository()
+    repo.seed_user("owner@acme.test", "s3cret!")
+    service, _, _, _ = _service(repo, lockout_threshold=2,
+                                lockout_window=timedelta(minutes=1),
+                                lockout_duration=timedelta(minutes=1))
+
+    with pytest.raises(InvalidCredentialsError):
+        service.login("owner@acme.test", "wrong")
+    with pytest.raises(InvalidCredentialsError):
+        service.login("owner@acme.test", "wrong")
+
+    with pytest.raises(AccountLockedError):
+        service.login("owner@acme.test", "s3cret!")
+
+
+def test_default_lockout_threshold_matches_documented_default():
+    assert DEFAULT_LOCKOUT_THRESHOLD == 5
+
+
 def test_repeated_wrong_password_locks_out_further_attempts():
     repo = FakeUserRepository()
     repo.seed_user("owner@acme.test", "s3cret!")
@@ -502,3 +528,70 @@ def test_is_current_user_still_active_false_after_admin_deactivates_them():
 def test_is_current_user_still_active_true_when_nobody_is_logged_in():
     service, _, _, _ = _service()
     assert service.is_current_user_still_active() is True
+
+
+# -- audit logging --------------------------------------------------------- #
+# Beyond "was an entry recorded": every one of these also asserts the
+# password involved in the attempt never appears anywhere in the audit
+# trail, per the hard requirement that audit metadata must never carry a
+# credential — the same rule test_change_password_records_an_audit_entry_
+# without_the_password_itself already proves for change_password.
+
+def test_login_success_records_audit_entry_without_the_password():
+    repo = FakeUserRepository()
+    user_id = repo.seed_user("owner@acme.test", "s3cret!")
+    repo.memberships[user_id] = [_membership(user_id)]
+    service, repo, sessions, audit_log = _service(repo)
+
+    service.login("owner@acme.test", "s3cret!")
+
+    entries = [e for e in audit_log.entries if e["action"] == "auth.login_succeeded"]
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry["user_id"] == user_id
+    assert entry["entity_type"] == "user"
+    assert entry["entity_id"] == user_id
+    assert entry["actor_email"] == "owner@acme.test"
+    assert "s3cret!" not in str(audit_log.entries)
+
+
+def test_login_failure_records_audit_entry_without_the_attempted_password():
+    repo = FakeUserRepository()
+    user_id = repo.seed_user("owner@acme.test", "s3cret!")
+    service, repo, sessions, audit_log = _service(repo)
+
+    with pytest.raises(InvalidCredentialsError):
+        service.login("owner@acme.test", "totally-wrong-password")
+
+    entries = [e for e in audit_log.entries if e["action"] == "auth.login_failed"]
+    assert len(entries) == 1
+    assert entries[0]["user_id"] == user_id
+    assert entries[0]["changes"] == {"reason": "wrong_password"}
+    assert "totally-wrong-password" not in str(audit_log.entries)
+
+
+def test_login_failure_for_unknown_email_records_audit_entry():
+    service, _, _, audit_log = _service()
+
+    with pytest.raises(InvalidCredentialsError):
+        service.login("nobody@acme.test", "whatever-password")
+
+    entries = [e for e in audit_log.entries if e["action"] == "auth.login_failed"]
+    assert len(entries) == 1
+    assert entries[0]["user_id"] is None
+    assert entries[0]["changes"] == {"reason": "unknown_email"}
+    assert "whatever-password" not in str(audit_log.entries)
+
+
+def test_logout_records_audit_entry():
+    repo = FakeUserRepository()
+    user_id = repo.seed_user("owner@acme.test", "s3cret!")
+    service, repo, sessions, audit_log = _service(repo)
+    service.login("owner@acme.test", "s3cret!")
+    audit_log.entries.clear()  # isolate from the login entry
+
+    service.logout()
+
+    entries = [e for e in audit_log.entries if e["action"] == "auth.logout"]
+    assert len(entries) == 1
+    assert entries[0]["user_id"] == user_id

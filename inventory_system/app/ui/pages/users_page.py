@@ -47,7 +47,7 @@ from app.schemas.user import RoleOut, UserSummaryOut
 from app.security.session import SessionManager
 from app.services.user_service import UserService
 from app.ui import permission_hints
-from app.ui.theme import GREEN, MUTED, RED
+from app.ui.theme import GREEN_DARK, MUTED, RED
 from app.ui.widgets.async_content import AsyncContentArea
 from app.ui.widgets.avatar import AvatarLabel
 from app.ui.widgets.change_user_role_dialog import ChangeUserRoleDialog
@@ -301,7 +301,7 @@ class UsersPage(QWidget):
             table.setItem(row, 4, QTableWidgetItem(user.role_name))
 
             status_item = QTableWidgetItem("Active" if user.is_active else "Inactive")
-            status_item.setForeground(QColor(GREEN if user.is_active else RED))
+            status_item.setForeground(QColor(GREEN_DARK if user.is_active else RED))
             table.setItem(row, 5, status_item)
 
             last_login = (user.last_login_at.strftime("%Y-%m-%d %H:%M")
