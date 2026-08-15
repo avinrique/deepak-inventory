@@ -149,7 +149,7 @@ class Container:
 
     def sales_service(self) -> SalesService:
         return SalesService(self.customer_repo, self.sales_order_repo, self.product_repo,
-                            self.warehouse_repo, self.sessions)
+                            self.warehouse_repo, self.sessions, self.audit_log_repo)
 
     def reporting_service(self) -> ReportingService:
         return ReportingService(self.reporting_repo, self.sessions)

@@ -112,6 +112,9 @@ def _build_header(data: InvoiceDocumentData) -> Table:
             Paragraph(f"<b>Invoice #:</b> {data.invoice_number}", _invoice_meta_style),
             Paragraph(f"<b>Date:</b> {data.invoice_date.strftime('%Y-%m-%d')}",
                      _invoice_meta_style)]
+    if data.due_date:
+        right.append(Paragraph(f"<b>Due:</b> {data.due_date.strftime('%Y-%m-%d')}",
+                               _invoice_meta_style))
 
     table = Table([[left, right]], colWidths=[10 * cm, 7 * cm])
     table.setStyle(TableStyle([
@@ -173,7 +176,17 @@ def _build_totals(data: InvoiceDocumentData) -> Table:
     rows = [["Subtotal", _money(data.subtotal)]]
     if data.discount_total:
         rows.append(["Discount", f"-{_money(data.discount_total)}"])
+    if data.overall_discount:
+        rows.append(["Overall Discount", f"-{_money(data.overall_discount)}"])
     rows.append(["Tax", _money(data.tax_total)])
+    if data.other_charges:
+        rows.append(["Other Charges", _money(data.other_charges)])
+    # "Total" is always the third-from-last row — everything above is
+    # itemized components, everything below (paid/due) is payment status
+    # against that fixed total. Locating it by offset from the end (rather
+    # than a hardcoded index) is what keeps this correct regardless of how
+    # many of the optional rows above were actually included.
+    total_row_index = len(rows)
     rows.append(["Total", _money(data.total)])
     rows.append(["Amount Paid", _money(data.amount_paid)])
     rows.append(["Amount Due", _money(data.amount_due)])
@@ -185,10 +198,10 @@ def _build_totals(data: InvoiceDocumentData) -> Table:
         ("TEXTCOLOR", (0, 0), (0, -1), MUTED_COLOR),
         ("TOPPADDING", (0, 0), (-1, -1), 3),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-        ("LINEABOVE", (0, len(rows) - 3), (-1, len(rows) - 3), 0.75, BORDER_COLOR),
-        ("FONTNAME", (0, len(rows) - 3), (-1, len(rows) - 3), "Helvetica-Bold"),
-        ("FONTSIZE", (0, len(rows) - 3), (-1, len(rows) - 3), 12),
-        ("TEXTCOLOR", (0, len(rows) - 3), (0, len(rows) - 3), colors.HexColor("#111827")),
+        ("LINEABOVE", (0, total_row_index), (-1, total_row_index), 0.75, BORDER_COLOR),
+        ("FONTNAME", (0, total_row_index), (-1, total_row_index), "Helvetica-Bold"),
+        ("FONTSIZE", (0, total_row_index), (-1, total_row_index), 12),
+        ("TEXTCOLOR", (0, total_row_index), (0, total_row_index), colors.HexColor("#111827")),
         ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
     ]
     table.setStyle(TableStyle(style))

@@ -715,6 +715,139 @@ def test_record_return_records_audit_log_entry(world):
         assert entries[0].changes["reason"] == "damaged"
 
 
+# -- finalize_new_bill (New Bill: confirm+fulfill+invoice[+payment] atomically) --#
+
+def test_finalize_new_bill_confirms_fulfills_and_invoices(world):
+    from app.schemas.sales import FinalizeSaleRequest
+
+    _stock_in(world, Decimal("50"))
+    repo = _repo()
+    so = _create_so(world, quantity=Decimal("10"), unit_price=Decimal("100"),
+                    tax_percent=Decimal("10"))
+
+    result = repo.finalize_new_bill(world["org_id"], so.id, world["user_id"],
+                                    FinalizeSaleRequest())
+
+    assert result.sales_order.status == SalesOrderStatus.FULFILLED
+    assert result.sales_order.items[0].quantity_fulfilled == Decimal("10")
+    assert result.invoice.subtotal == Decimal("1000")
+    assert result.invoice.tax_amount == Decimal("100.00")
+    assert result.invoice.total_amount == Decimal("1100.00")
+    assert result.invoice.invoice_number.startswith("INV-")
+    assert result.payment is None
+    assert _inventory_on_hand(world) == Decimal("40")
+
+
+def test_finalize_new_bill_records_payment_and_completes_order_when_fully_paid(world):
+    from app.schemas.sales import FinalizeSaleRequest
+
+    _stock_in(world, Decimal("50"))
+    repo = _repo()
+    so = _create_so(world, quantity=Decimal("10"), unit_price=Decimal("100"),
+                    tax_percent=Decimal("0"))
+
+    result = repo.finalize_new_bill(
+        world["org_id"], so.id, world["user_id"],
+        FinalizeSaleRequest(payment_amount=Decimal("1000"), payment_method=PaymentMethod.CASH))
+
+    assert result.payment is not None
+    assert result.payment.amount == Decimal("1000")
+    assert result.payment.method == PaymentMethod.CASH
+    assert result.sales_order.status == SalesOrderStatus.COMPLETED
+
+
+def test_finalize_new_bill_persists_due_date_overall_discount_and_other_charges(world):
+    import datetime as dt
+
+    from app.schemas.sales import FinalizeSaleRequest
+
+    _stock_in(world, Decimal("50"))
+    repo = _repo()
+    so = _create_so(world, quantity=Decimal("10"), unit_price=Decimal("100"),
+                    tax_percent=Decimal("10"))
+    due = dt.date(2026, 9, 1)
+
+    result = repo.finalize_new_bill(
+        world["org_id"], so.id, world["user_id"],
+        FinalizeSaleRequest(due_date=due, overall_discount_amount=Decimal("50"),
+                            other_charges=Decimal("20")))
+
+    invoice = result.invoice
+    assert invoice.due_date == due
+    assert invoice.overall_discount_amount == Decimal("50")
+    assert invoice.other_charges == Decimal("20")
+    # subtotal 1000 - item_discount 0 - overall_discount 50 + tax 100 + other_charges 20 = 1070
+    assert invoice.total_amount == Decimal("1070.00")
+
+
+def test_finalize_new_bill_rolls_back_everything_on_insufficient_stock(world):
+    from app.schemas.sales import FinalizeSaleRequest
+
+    _stock_in(world, Decimal("5"))  # not enough for the order below
+    repo = _repo()
+    so = _create_so(world, quantity=Decimal("10"))
+
+    with pytest.raises(Exception):  # InsufficientStockError, from _fulfill's _apply
+        repo.finalize_new_bill(world["org_id"], so.id, world["user_id"], FinalizeSaleRequest())
+
+    unchanged = repo.get_by_id(world["org_id"], so.id)
+    assert unchanged.status == SalesOrderStatus.DRAFT
+    assert unchanged.items[0].quantity_fulfilled == Decimal("0")
+    assert _inventory_on_hand(world) == Decimal("5")
+    assert repo.get_invoice_by_sales_order(world["org_id"], so.id) is None
+
+    with get_session() as session:
+        entries = (session.query(AuditLog)
+                  .filter_by(action="sales_order.new_bill_finalized", entity_id=so.id).all())
+        assert entries == []
+
+
+def test_finalize_new_bill_rejects_non_draft_sales_order(world):
+    from app.schemas.sales import FinalizeSaleRequest
+
+    _stock_in(world, Decimal("50"))
+    repo = _repo()
+    so = _confirmed_so(world)  # already CONFIRMED, not DRAFT
+
+    with pytest.raises(Exception):  # InvalidSalesOrderTransitionError
+        repo.finalize_new_bill(world["org_id"], so.id, world["user_id"], FinalizeSaleRequest())
+
+
+def test_finalize_new_bill_records_audit_log_entry(world):
+    from app.schemas.sales import FinalizeSaleRequest
+
+    _stock_in(world, Decimal("50"))
+    repo = _repo()
+    so = _create_so(world, quantity=Decimal("10"), unit_price=Decimal("100"),
+                    tax_percent=Decimal("0"))
+
+    result = repo.finalize_new_bill(
+        world["org_id"], so.id, world["user_id"],
+        FinalizeSaleRequest(payment_amount=Decimal("400"), payment_method=PaymentMethod.CASH))
+
+    with get_session() as session:
+        entries = (session.query(AuditLog)
+                  .filter_by(action="sales_order.new_bill_finalized", entity_id=so.id).all())
+        assert len(entries) == 1
+        assert entries[0].actor_email == "clerk@example.com"
+        assert entries[0].changes["invoice_number"] == result.invoice.invoice_number
+        assert entries[0].changes["payment_amount"] == "400"
+
+
+def test_finalize_new_bill_invoice_numbers_stay_unique_across_bills(world):
+    from app.schemas.sales import FinalizeSaleRequest
+
+    _stock_in(world, Decimal("50"))
+    repo = _repo()
+    numbers = []
+    for _ in range(3):
+        so = _create_so(world, quantity=Decimal("1"))
+        result = repo.finalize_new_bill(world["org_id"], so.id, world["user_id"],
+                                        FinalizeSaleRequest())
+        numbers.append(result.invoice.invoice_number)
+    assert len(set(numbers)) == 3
+
+
 # -- customer repository -----------------------------------------------------#
 
 def test_customer_repository_scopes_by_organization(world):

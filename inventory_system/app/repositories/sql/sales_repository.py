@@ -23,6 +23,19 @@ Invoice row it numbers, so two concurrent invoice generations for the same
 organization can't collide, and a failed generation doesn't burn a number
 (a native Postgres SEQUENCE would, since its counter doesn't roll back
 with the transaction — see app.models.sales_order.InvoiceSequence).
+
+confirm/fulfill_sale/generate_invoice/record_payment are each also
+available pre-extracted as private, session-scoped helpers (``_confirm``,
+``_fulfill``, ``_generate_invoice``, ``_record_payment_on_invoice``) that
+take an already-open ``db`` rather than opening their own — the public
+methods below are thin wrappers around them. finalize_new_bill (the "New
+Bill: Save as Sale" action) is what actually needs this: it calls all four
+helpers back-to-back inside ONE ``with get_session()`` block, so
+confirm+fulfill+invoice(+payment) either land together or roll back
+together — a partial finalize (e.g. stock deducted but invoice generation
+failing) is not a state this method can produce. The public methods' own
+behavior/signatures are unchanged by this — each still opens exactly one
+transaction per call, exactly as before.
 """
 import uuid
 from datetime import datetime, timezone
@@ -67,6 +80,8 @@ from app.models import (
 from app.repositories.sql.audit_log_repository import record_audit_log
 from app.repositories.sql.inventory_repository import _apply
 from app.schemas.sales import (
+    FinalizeSaleRequest,
+    FinalizeSaleResult,
     InvoiceDocumentData,
     InvoiceDocumentLine,
     InvoiceOut,
@@ -101,9 +116,11 @@ def _to_out(so: SalesOrder) -> SalesOrderOut:
 def _invoice_to_out(invoice: Invoice) -> InvoiceOut:
     return InvoiceOut(id=invoice.id, sales_order_id=invoice.sales_order_id,
                       invoice_number=invoice.invoice_number, subtotal=invoice.subtotal,
-                      discount_amount=invoice.discount_amount, tax_amount=invoice.tax_amount,
-                      total_amount=invoice.total_amount, generated_by=invoice.generated_by,
-                      generated_at=invoice.generated_at)
+                      discount_amount=invoice.discount_amount,
+                      overall_discount_amount=invoice.overall_discount_amount,
+                      tax_amount=invoice.tax_amount, other_charges=invoice.other_charges,
+                      total_amount=invoice.total_amount, due_date=invoice.due_date,
+                      generated_by=invoice.generated_by, generated_at=invoice.generated_at)
 
 
 def _payment_to_out(payment: Payment) -> PaymentOut:
@@ -145,6 +162,144 @@ def _lock_or_create_invoice_sequence(db, organization_id: uuid.UUID) -> InvoiceS
         if seq is None:
             raise
         return seq
+
+
+def _audit_actor(db, organization_id: uuid.UUID, actor_id: uuid.UUID) -> tuple:
+    user = db.get(User, actor_id)
+    org = db.get(Organization, organization_id)
+    return (user.email if user else None), (org.name if org else None)
+
+
+def _confirm(db, so: SalesOrder, confirmed_by: uuid.UUID) -> None:
+    so.status = SalesOrderStatus.CONFIRMED
+    so.confirmed_by = confirmed_by
+    so.confirmed_at = datetime.now(timezone.utc)
+    db.flush()
+
+
+def _fulfill(db, organization_id: uuid.UUID, so: SalesOrder, fulfilled_by: uuid.UUID, *,
+            write_audit: bool = True) -> list[SalesOrderItem]:
+    if so.status != SalesOrderStatus.CONFIRMED:
+        raise InvalidSalesOrderTransitionError(so.status, SalesOrderStatus.FULFILLED)
+
+    items = (db.query(SalesOrderItem)
+            .filter_by(sales_order_id=so.id)
+            .with_for_update()
+            .all())
+    for item in items:
+        _apply(db, organization_id=organization_id, product_id=item.product_id,
+              warehouse_id=so.warehouse_id, transaction_type=InventoryTransactionType.SALE,
+              quantity_change=-item.quantity_ordered, performed_by=fulfilled_by,
+              reference_type="sales_order_item", reference_id=item.id,
+              enforce_low_stock_policy=True)
+        item.quantity_fulfilled = item.quantity_ordered
+
+    so.status = SalesOrderStatus.FULFILLED
+    db.flush()
+
+    if write_audit:
+        actor_email, org_name = _audit_actor(db, organization_id, fulfilled_by)
+        record_audit_log(
+            db, organization_id=organization_id, user_id=fulfilled_by,
+            actor_email=actor_email, organization_name=org_name,
+            action="sales_order.fulfill", entity_type="sales_order", entity_id=so.id,
+            changes={"items": [{"product_id": str(i.product_id),
+                                "quantity": str(i.quantity_ordered)} for i in items]})
+        db.flush()
+    return items
+
+
+def _generate_invoice(db, organization_id: uuid.UUID, so: SalesOrder, generated_by: uuid.UUID, *,
+                      due_date=None, overall_discount_amount: Decimal = Decimal("0"),
+                      other_charges: Decimal = Decimal("0"),
+                      write_audit: bool = True) -> Invoice:
+    if so.status != SalesOrderStatus.FULFILLED:
+        raise SalesOrderValidationError(
+            ["An invoice can only be generated for a fulfilled sales order."])
+    if db.query(Invoice).filter_by(sales_order_id=so.id).first() is not None:
+        raise DuplicateInvoiceError(so.id)
+
+    subtotal = sum((line_subtotal(i.quantity_ordered, i.unit_price) for i in so.items),
+                  Decimal("0"))
+    discount_amount = sum((line_discount(i.quantity_ordered, i.unit_price,
+                                         i.discount_percent) for i in so.items),
+                          Decimal("0"))
+    tax_amount = sum((line_tax_after_discount(i.quantity_ordered, i.unit_price,
+                                               i.discount_percent, i.tax_percent)
+                     for i in so.items), Decimal("0"))
+    line_totals = sum((line_total_after_discount(i.quantity_ordered, i.unit_price,
+                                                  i.discount_percent, i.tax_percent)
+                      for i in so.items), Decimal("0"))
+    total_amount = line_totals - overall_discount_amount + other_charges
+
+    org = db.get(Organization, organization_id)
+    seq = _lock_or_create_invoice_sequence(db, organization_id)
+    number = format_invoice_number(org.invoice_number_prefix, seq.next_value)
+    seq.next_value += 1
+
+    invoice = Invoice(organization_id=organization_id, sales_order_id=so.id,
+                     invoice_number=number, subtotal=subtotal,
+                     discount_amount=discount_amount,
+                     overall_discount_amount=overall_discount_amount, tax_amount=tax_amount,
+                     other_charges=other_charges, total_amount=total_amount,
+                     due_date=due_date, generated_by=generated_by)
+    db.add(invoice)
+    db.flush()
+
+    if write_audit:
+        actor_email, org_name = _audit_actor(db, organization_id, generated_by)
+        record_audit_log(
+            db, organization_id=organization_id, user_id=generated_by,
+            actor_email=actor_email, organization_name=org_name,
+            action="sales_order.generate_invoice", entity_type="invoice",
+            entity_id=invoice.id,
+            changes={"sales_order_id": str(so.id), "invoice_number": number,
+                    "total_amount": str(total_amount)})
+        db.flush()
+    return invoice
+
+
+def _record_payment_on_invoice(db, organization_id: uuid.UUID, invoice: Invoice,
+                               data: PaymentRequest, recorded_by: uuid.UUID, *,
+                               write_audit: bool = True) -> Payment:
+    """Assumes ``invoice`` is already the right row to charge against —
+    either freshly locked by the caller via a query with
+    ``.with_for_update()`` (the standalone record_payment below) or
+    freshly inserted earlier in the SAME transaction (finalize_new_bill —
+    nothing outside this transaction can see it yet, so no separate lock
+    is needed there).
+    """
+    already_paid = sum(
+        (p.amount for p in db.query(Payment).filter_by(invoice_id=invoice.id).all()),
+        Decimal("0"))
+    outstanding = invoice.total_amount - already_paid
+    if data.amount > outstanding:
+        raise OverpaymentError(data.amount, outstanding)
+
+    payment = Payment(organization_id=organization_id, invoice_id=invoice.id,
+                     amount=data.amount, method=data.method,
+                     recorded_by=recorded_by, notes=data.notes)
+    db.add(payment)
+    db.flush()
+
+    paid_sum = already_paid + data.amount
+    if paid_sum >= invoice.total_amount:
+        so = (db.query(SalesOrder).filter_by(id=invoice.sales_order_id)
+             .with_for_update().first())
+        if so is not None and can_transition(so.status, SalesOrderStatus.COMPLETED):
+            so.status = SalesOrderStatus.COMPLETED
+
+    if write_audit:
+        actor_email, org_name = _audit_actor(db, organization_id, recorded_by)
+        record_audit_log(
+            db, organization_id=organization_id, user_id=recorded_by,
+            actor_email=actor_email, organization_name=org_name,
+            action="sales_order.record_payment", entity_type="invoice",
+            entity_id=invoice.id,
+            changes={"amount": str(data.amount), "method": data.method.value,
+                    "total_paid": str(paid_sum)})
+        db.flush()
+    return payment
 
 
 class SqlSalesOrderRepository:
@@ -233,10 +388,7 @@ class SqlSalesOrderRepository:
             so = db.get(SalesOrder, sales_order_id)
             if so is None or so.organization_id != organization_id:
                 return None
-            so.status = SalesOrderStatus.CONFIRMED
-            so.confirmed_by = confirmed_by
-            so.confirmed_at = datetime.now(timezone.utc)
-            db.flush()
+            _confirm(db, so, confirmed_by)
             return _to_out(so)
 
     def cancel(self, organization_id: uuid.UUID, sales_order_id: uuid.UUID,
@@ -249,12 +401,10 @@ class SqlSalesOrderRepository:
             so.status = SalesOrderStatus.CANCELLED
             db.flush()
 
-            user = db.get(User, cancelled_by)
-            org = db.get(Organization, organization_id)
+            actor_email, org_name = _audit_actor(db, organization_id, cancelled_by)
             record_audit_log(
                 db, organization_id=organization_id, user_id=cancelled_by,
-                actor_email=user.email if user else None,
-                organization_name=org.name if org else None,
+                actor_email=actor_email, organization_name=org_name,
                 action="sales_order.cancel", entity_type="sales_order", entity_id=so.id,
                 changes={"before": {"status": previous_status.value},
                         "after": {"status": SalesOrderStatus.CANCELLED.value}})
@@ -268,35 +418,7 @@ class SqlSalesOrderRepository:
             so = db.get(SalesOrder, sales_order_id)
             if so is None or so.organization_id != organization_id:
                 raise SalesOrderNotFoundError(sales_order_id)
-            if so.status != SalesOrderStatus.CONFIRMED:
-                raise InvalidSalesOrderTransitionError(so.status, SalesOrderStatus.FULFILLED)
-
-            items = (db.query(SalesOrderItem)
-                    .filter_by(sales_order_id=so.id)
-                    .with_for_update()
-                    .all())
-            for item in items:
-                _apply(db, organization_id=organization_id, product_id=item.product_id,
-                      warehouse_id=so.warehouse_id, transaction_type=InventoryTransactionType.SALE,
-                      quantity_change=-item.quantity_ordered, performed_by=fulfilled_by,
-                      reference_type="sales_order_item", reference_id=item.id,
-                      enforce_low_stock_policy=True)
-                item.quantity_fulfilled = item.quantity_ordered
-
-            so.status = SalesOrderStatus.FULFILLED
-            db.flush()
-
-            user = db.get(User, fulfilled_by)
-            org = db.get(Organization, organization_id)
-            record_audit_log(
-                db, organization_id=organization_id, user_id=fulfilled_by,
-                actor_email=user.email if user else None,
-                organization_name=org.name if org else None,
-                action="sales_order.fulfill", entity_type="sales_order", entity_id=so.id,
-                changes={"items": [{"product_id": str(i.product_id),
-                                    "quantity": str(i.quantity_ordered)} for i in items]})
-
-            db.flush()
+            _fulfill(db, organization_id, so, fulfilled_by)
             return _to_out(so)
 
     def generate_invoice(self, organization_id: uuid.UUID, sales_order_id: uuid.UUID,
@@ -305,47 +427,7 @@ class SqlSalesOrderRepository:
             so = db.get(SalesOrder, sales_order_id)
             if so is None or so.organization_id != organization_id:
                 raise SalesOrderNotFoundError(sales_order_id)
-            if so.status != SalesOrderStatus.FULFILLED:
-                raise SalesOrderValidationError(
-                    ["An invoice can only be generated for a fulfilled sales order."])
-            if db.query(Invoice).filter_by(sales_order_id=so.id).first() is not None:
-                raise DuplicateInvoiceError(so.id)
-
-            subtotal = sum((line_subtotal(i.quantity_ordered, i.unit_price) for i in so.items),
-                          Decimal("0"))
-            discount_amount = sum((line_discount(i.quantity_ordered, i.unit_price,
-                                                 i.discount_percent) for i in so.items),
-                                  Decimal("0"))
-            tax_amount = sum((line_tax_after_discount(i.quantity_ordered, i.unit_price,
-                                                       i.discount_percent, i.tax_percent)
-                             for i in so.items), Decimal("0"))
-            total_amount = sum((line_total_after_discount(i.quantity_ordered, i.unit_price,
-                                                           i.discount_percent, i.tax_percent)
-                               for i in so.items), Decimal("0"))
-
-            org = db.get(Organization, organization_id)
-            seq = _lock_or_create_invoice_sequence(db, organization_id)
-            number = format_invoice_number(org.invoice_number_prefix, seq.next_value)
-            seq.next_value += 1
-
-            invoice = Invoice(organization_id=organization_id, sales_order_id=so.id,
-                             invoice_number=number, subtotal=subtotal,
-                             discount_amount=discount_amount, tax_amount=tax_amount,
-                             total_amount=total_amount, generated_by=generated_by)
-            db.add(invoice)
-            db.flush()
-
-            user = db.get(User, generated_by)
-            record_audit_log(
-                db, organization_id=organization_id, user_id=generated_by,
-                actor_email=user.email if user else None,
-                organization_name=org.name if org else None,
-                action="sales_order.generate_invoice", entity_type="invoice",
-                entity_id=invoice.id,
-                changes={"sales_order_id": str(so.id), "invoice_number": number,
-                        "total_amount": str(total_amount)})
-
-            db.flush()
+            invoice = _generate_invoice(db, organization_id, so, generated_by)
             return _invoice_to_out(invoice)
 
     def get_invoice(self, organization_id: uuid.UUID,
@@ -407,13 +489,15 @@ class SqlSalesOrderRepository:
                 company_email=org.email, company_website=org.website,
                 company_tax_id=org.tax_id,
                 invoice_id=invoice.id, invoice_number=invoice.invoice_number,
-                invoice_date=invoice.generated_at, sales_order_id=so.id,
+                invoice_date=invoice.generated_at, due_date=invoice.due_date,
+                sales_order_id=so.id,
                 customer_name=customer.name, customer_address=customer.address,
                 customer_phone=customer.phone, customer_email=customer.email,
                 customer_tax_id=customer.tax_id,
                 items=lines, subtotal=invoice.subtotal, discount_total=invoice.discount_amount,
-                tax_total=invoice.tax_amount, total=invoice.total_amount, amount_paid=paid,
-                amount_due=amount_due, payment_status=status, notes=so.notes)
+                overall_discount=invoice.overall_discount_amount, tax_total=invoice.tax_amount,
+                other_charges=invoice.other_charges, total=invoice.total_amount,
+                amount_paid=paid, amount_due=amount_due, payment_status=status, notes=so.notes)
 
     def record_payment(self, organization_id: uuid.UUID, data: PaymentRequest,
                       recorded_by: uuid.UUID) -> PaymentOut:
@@ -432,40 +516,57 @@ class SqlSalesOrderRepository:
                       .with_for_update().first())
             if invoice is None or invoice.organization_id != organization_id:
                 raise InvoiceNotFoundError(data.invoice_id)
-
-            already_paid = sum(
-                (p.amount for p in db.query(Payment).filter_by(invoice_id=invoice.id).all()),
-                Decimal("0"))
-            outstanding = invoice.total_amount - already_paid
-            if data.amount > outstanding:
-                raise OverpaymentError(data.amount, outstanding)
-
-            payment = Payment(organization_id=organization_id, invoice_id=invoice.id,
-                             amount=data.amount, method=data.method,
-                             recorded_by=recorded_by, notes=data.notes)
-            db.add(payment)
-            db.flush()
-
-            paid_sum = already_paid + data.amount
-            if paid_sum >= invoice.total_amount:
-                so = (db.query(SalesOrder).filter_by(id=invoice.sales_order_id)
-                     .with_for_update().first())
-                if so is not None and can_transition(so.status, SalesOrderStatus.COMPLETED):
-                    so.status = SalesOrderStatus.COMPLETED
-
-            user = db.get(User, recorded_by)
-            org = db.get(Organization, organization_id)
-            record_audit_log(
-                db, organization_id=organization_id, user_id=recorded_by,
-                actor_email=user.email if user else None,
-                organization_name=org.name if org else None,
-                action="sales_order.record_payment", entity_type="invoice",
-                entity_id=invoice.id,
-                changes={"amount": str(data.amount), "method": data.method.value,
-                        "total_paid": str(paid_sum)})
-
-            db.flush()
+            payment = _record_payment_on_invoice(db, organization_id, invoice, data, recorded_by)
             return _payment_to_out(payment)
+
+    def finalize_new_bill(self, organization_id: uuid.UUID, sales_order_id: uuid.UUID,
+                         actor_id: uuid.UUID, data: FinalizeSaleRequest) -> FinalizeSaleResult:
+        """The "New Bill: Save as Sale" action — confirm + fulfill + generate
+        the invoice, and optionally record a payment, as ONE database
+        transaction. If any step fails (insufficient stock, a concurrent
+        duplicate invoice, an over-large payment), everything rolls back:
+        the sales order is left exactly as it was before this call, no
+        stock is deducted, no invoice/payment row exists. Only a DRAFT
+        order can be finalized this way — the same rule
+        SalesService.finalize_new_bill already checks before calling
+        here, re-checked here as defense in depth, same convention as
+        fulfill_sale/generate_invoice re-checking their own preconditions.
+        """
+        with get_session() as db:
+            so = db.get(SalesOrder, sales_order_id)
+            if so is None or so.organization_id != organization_id:
+                raise SalesOrderNotFoundError(sales_order_id)
+            if so.status != SalesOrderStatus.DRAFT:
+                raise InvalidSalesOrderTransitionError(so.status, SalesOrderStatus.CONFIRMED)
+
+            _confirm(db, so, actor_id)
+            _fulfill(db, organization_id, so, actor_id, write_audit=False)
+            invoice = _generate_invoice(
+                db, organization_id, so, actor_id, due_date=data.due_date,
+                overall_discount_amount=data.overall_discount_amount,
+                other_charges=data.other_charges, write_audit=False)
+
+            payment = None
+            if data.payment_amount is not None:
+                payment_request = PaymentRequest(
+                    invoice_id=invoice.id, amount=data.payment_amount,
+                    method=data.payment_method, notes=data.payment_notes)
+                payment = _record_payment_on_invoice(
+                    db, organization_id, invoice, payment_request, actor_id, write_audit=False)
+
+            actor_email, org_name = _audit_actor(db, organization_id, actor_id)
+            record_audit_log(
+                db, organization_id=organization_id, user_id=actor_id,
+                actor_email=actor_email, organization_name=org_name,
+                action="sales_order.new_bill_finalized", entity_type="sales_order",
+                entity_id=so.id,
+                changes={"invoice_number": invoice.invoice_number,
+                        "total_amount": str(invoice.total_amount),
+                        "payment_amount": str(payment.amount) if payment else None})
+            db.flush()
+
+            return FinalizeSaleResult(sales_order=_to_out(so), invoice=_invoice_to_out(invoice),
+                                      payment=_payment_to_out(payment) if payment else None)
 
     def record_return(self, organization_id: uuid.UUID, sales_order_id: uuid.UUID,
                       sales_order_item_id: uuid.UUID, quantity: Decimal, reason: str,
@@ -504,12 +605,10 @@ class SqlSalesOrderRepository:
             db.add(sales_return)
             db.flush()
 
-            user = db.get(User, returned_by)
-            org = db.get(Organization, organization_id)
+            actor_email, org_name = _audit_actor(db, organization_id, returned_by)
             record_audit_log(
                 db, organization_id=organization_id, user_id=returned_by,
-                actor_email=user.email if user else None,
-                organization_name=org.name if org else None,
+                actor_email=actor_email, organization_name=org_name,
                 action="sales_order.record_return", entity_type="sales_order",
                 entity_id=so.id,
                 changes={"sales_order_item_id": str(item.id), "quantity": str(quantity),

@@ -36,6 +36,15 @@ Role design notes:
   can be given users.view without also being able to deactivate someone or
   reset their password. Only OWNER/ADMIN (_ALL) get the full set today;
   nothing in _OPERATIONAL grants any of them.
+- customers.* used to be folded into sales.update/sales.view ("manage
+  customers" was part of sales.update's description) — split out into its
+  own granular set for the same reason users.* is granular: SALES_STAFF
+  gets customers.view/create/update (they need customers to write a sales
+  order against) but not customers.deactivate, the same separation-of-
+  duties line drawn for cancel/refund/approve above. Every role that had
+  implicit customer access via sales.update/sales.view before the split
+  keeps the equivalent customers.* access here, so this is additive, not a
+  narrowing, for any role that already existed.
 """
 from dataclasses import dataclass
 
@@ -57,13 +66,18 @@ PERMISSIONS: list[PermissionDef] = [
     PermissionDef("inventory.transfer", "Transfer stock between locations"),
     PermissionDef("sales.create", "Create a sales order"),
     PermissionDef("sales.view", "View sales orders"),
-    PermissionDef("sales.update", "Edit a draft sales order; manage customers"),
+    PermissionDef("sales.update", "Edit a draft sales order"),
     PermissionDef("sales.confirm", "Confirm a sales order"),
     PermissionDef("sales.fulfill", "Fulfill a sales order (deduct inventory)"),
     PermissionDef("sales.cancel", "Cancel a sales order"),
     PermissionDef("sales.invoice", "Generate an invoice for a sales order"),
     PermissionDef("sales.payment", "Record a payment against an invoice"),
     PermissionDef("sales.refund", "Refund/return a sale"),
+    PermissionDef("customers.view", "View customer records and balances"),
+    PermissionDef("customers.create", "Create a customer record"),
+    PermissionDef("customers.update", "Edit a customer record"),
+    PermissionDef("customers.deactivate", "Activate/deactivate a customer record"),
+    PermissionDef("customers.export", "Export the customer list"),
     PermissionDef("purchases.create", "Create a purchase order"),
     PermissionDef("purchases.view", "View purchase orders"),
     PermissionDef("purchases.update", "Edit a draft purchase order; manage suppliers"),
@@ -94,6 +108,8 @@ _OPERATIONAL = [
     "warehouse.manage", "inventory.view", "inventory.adjust", "inventory.transfer",
     "sales.create", "sales.view", "sales.update", "sales.confirm", "sales.fulfill",
     "sales.cancel", "sales.invoice", "sales.payment", "sales.refund",
+    "customers.view", "customers.create", "customers.update", "customers.deactivate",
+    "customers.export",
     "purchases.create", "purchases.view", "purchases.update", "purchases.approve",
     "purchases.receive", "purchases.cancel", "purchases.return",
     "reports.view", "reports.export",
@@ -113,17 +129,19 @@ ROLE_PERMISSIONS: dict[str, list[str]] = {
         "reports.view",
     ],
     "SALES_STAFF": [*_PRODUCT_VIEW_ONLY, "sales.create", "sales.update", "sales.view",
-                   "sales.fulfill", "sales.invoice", "sales.payment"],
+                   "sales.fulfill", "sales.invoice", "sales.payment",
+                   "customers.view", "customers.create", "customers.update"],
     "PURCHASE_STAFF": [*_PRODUCT_VIEW_ONLY, "purchases.create", "purchases.update",
                        "purchases.view", "purchases.receive"],
     "ACCOUNTANT": [
         "products.view", "inventory.view",
         "sales.view", "sales.payment", "sales.refund",
+        "customers.view", "customers.export",
         "purchases.view", "purchases.approve", "purchases.return",
         "reports.view", "reports.export", "audit_logs.view",
     ],
     "VIEWER": ["products.view", "inventory.view", "sales.view", "purchases.view",
-              "reports.view"],
+              "customers.view", "reports.view"],
 }
 ROLE_NAMES: tuple[str, ...] = tuple(ROLE_PERMISSIONS)
 

@@ -46,9 +46,10 @@ def _data(items=None, payment_status=InvoicePaymentStatus.UNPAID, amount_paid=De
         customer_name="Jane Buyer", customer_address="45 Storage Lane",
         customer_phone="+1-555-0200", customer_email="jane@buyer.example",
         customer_tax_id="TAX-999",
-        items=items, subtotal=subtotal, discount_total=discount_total, tax_total=tax_total,
+        items=items, subtotal=subtotal, discount_total=discount_total,
+        overall_discount=Decimal("0"), tax_total=tax_total, other_charges=Decimal("0"),
         total=total, amount_paid=amount_paid, amount_due=total - amount_paid,
-        payment_status=payment_status, notes=notes)
+        payment_status=payment_status, notes=notes, due_date=None)
     kwargs.update(overrides)
     return InvoiceDocumentData(**kwargs)
 
@@ -136,6 +137,43 @@ def test_invoice_pdf_omits_discount_row_when_zero(tmp_path):
     # contain a discount total row when there's nothing to show.
     assert "Subtotal" in text
     assert "Total" in text
+
+
+def test_invoice_pdf_shows_due_date_when_present(tmp_path):
+    path = str(tmp_path / "invoice.pdf")
+    from datetime import date
+    render_invoice_pdf(_data(due_date=date(2026, 4, 1)), path)
+
+    text = _extract_text(path)
+    assert "2026-04-01" in text
+
+
+def test_invoice_pdf_omits_due_date_when_absent(tmp_path):
+    path = str(tmp_path / "invoice.pdf")
+    render_invoice_pdf(_data(due_date=None), path)
+
+    text = _extract_text(path)
+    assert "Due:" not in text
+
+
+def test_invoice_pdf_shows_overall_discount_and_other_charges_when_present(tmp_path):
+    path = str(tmp_path / "invoice.pdf")
+    render_invoice_pdf(_data(overall_discount=Decimal("25.00"),
+                            other_charges=Decimal("10.00")), path)
+
+    text = _extract_text(path)
+    assert "Overall Discount" in text
+    assert "Other Charges" in text
+    assert "Total" in text  # the "Total" row still renders correctly alongside the new ones
+
+
+def test_invoice_pdf_omits_overall_discount_and_other_charges_when_zero(tmp_path):
+    path = str(tmp_path / "invoice.pdf")
+    render_invoice_pdf(_data(overall_discount=Decimal("0"), other_charges=Decimal("0")), path)
+
+    text = _extract_text(path)
+    assert "Overall Discount" not in text
+    assert "Other Charges" not in text
 
 
 def test_invoice_pdf_includes_notes_when_present(tmp_path):

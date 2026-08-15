@@ -1,11 +1,12 @@
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 
 from pydantic import BaseModel
 
 from app.domain.pricing import line_subtotal
 from app.domain.sales import (
+    CustomerType,
     InvoicePaymentStatus,
     PaymentMethod,
     SalesOrderStatus,
@@ -18,38 +19,106 @@ from app.domain.sales import (
 
 class CustomerCreate(BaseModel):
     name: str
+    customer_code: str | None = None  # None -> auto-derived from name, see SalesService
+    customer_type: CustomerType = CustomerType.INDIVIDUAL
     contact_person: str | None = None
     phone: str | None = None
     email: str | None = None
     address: str | None = None
+    city: str | None = None
+    state: str | None = None
+    country: str | None = None
     tax_id: str | None = None
+    credit_limit: Decimal | None = None
+    opening_balance: Decimal = Decimal("0")
     notes: str | None = None
 
 
 class CustomerUpdate(BaseModel):
     """All fields optional — a partial update only touches what's set."""
     name: str | None = None
+    customer_code: str | None = None
+    customer_type: CustomerType | None = None
     contact_person: str | None = None
     phone: str | None = None
     email: str | None = None
     address: str | None = None
+    city: str | None = None
+    state: str | None = None
+    country: str | None = None
     tax_id: str | None = None
+    credit_limit: Decimal | None = None
+    opening_balance: Decimal | None = None
     notes: str | None = None
     is_active: bool | None = None
 
 
 class CustomerOut(BaseModel):
     id: uuid.UUID
+    customer_code: str | None
     name: str
+    customer_type: CustomerType
     contact_person: str | None
     phone: str | None
     email: str | None
     address: str | None
+    city: str | None
+    state: str | None
+    country: str | None
     tax_id: str | None
+    credit_limit: Decimal | None
+    opening_balance: Decimal
     notes: str | None
     is_active: bool
+    created_by: uuid.UUID | None
     created_at: datetime
     updated_at: datetime
+
+
+class CustomerBalance(BaseModel):
+    """Read-only, derived — never stored.
+
+    outstanding_balance = opening_balance + invoiced_total +
+    pending_orders_total - paid_total. Two different kinds of exposure are
+    tracked separately on purpose: invoiced_total is what's on generated
+    Invoices (frozen financial documents); pending_orders_total is every
+    non-CANCELLED SalesOrder that hasn't been invoiced yet (DRAFT/
+    CONFIRMED, or FULFILLED-but-not-yet-invoiced) — a customer's credit
+    exposure the moment they commit to an order, not only once Billing
+    gets around to invoicing it. Without pending_orders_total, credit
+    control could be walked around entirely by stacking multiple
+    uninvoiced draft orders. Every figure here is summed from what
+    SalesOrder/Invoice/Payment already recorded (via the same
+    app.domain.sales line-total formula every order/invoice line already
+    uses) — see SqlCustomerRepository.get_balance, which never computes a
+    price or tax amount from scratch, only totals what Billing recorded.
+    """
+    customer_id: uuid.UUID
+    opening_balance: Decimal
+    invoiced_total: Decimal
+    pending_orders_total: Decimal
+    paid_total: Decimal
+    outstanding_balance: Decimal
+    credit_limit: Decimal | None
+
+    @property
+    def available_credit(self) -> Decimal | None:
+        if self.credit_limit is None:
+            return None
+        return self.credit_limit - self.outstanding_balance
+
+
+class CustomerTransaction(BaseModel):
+    """One row in a customer's transaction history — sales orders,
+    invoices, payments, and returns all normalized into one shape so the
+    UI has a single timeline to render instead of four separate lists.
+    """
+    kind: str  # "sales_order" | "invoice" | "payment" | "return"
+    id: uuid.UUID
+    reference: str  # order number / invoice number / payment method / return reason
+    amount: Decimal | None
+    status: str | None
+    occurred_at: datetime
 
 
 class SalesOrderItemInput(BaseModel):
@@ -169,8 +238,11 @@ class InvoiceOut(BaseModel):
     invoice_number: str
     subtotal: Decimal
     discount_amount: Decimal
+    overall_discount_amount: Decimal
     tax_amount: Decimal
+    other_charges: Decimal
     total_amount: Decimal
+    due_date: date | None
     generated_by: uuid.UUID
     generated_at: datetime
 
@@ -215,6 +287,7 @@ class InvoiceDocumentData(BaseModel):
     invoice_id: uuid.UUID
     invoice_number: str
     invoice_date: datetime
+    due_date: date | None
     sales_order_id: uuid.UUID
     # customer
     customer_name: str
@@ -226,7 +299,9 @@ class InvoiceDocumentData(BaseModel):
     items: list[InvoiceDocumentLine]
     subtotal: Decimal
     discount_total: Decimal
+    overall_discount: Decimal
     tax_total: Decimal
+    other_charges: Decimal
     total: Decimal
     amount_paid: Decimal
     amount_due: Decimal
@@ -249,6 +324,29 @@ class PaymentOut(BaseModel):
     recorded_by: uuid.UUID
     notes: str | None
     received_at: datetime
+
+
+class FinalizeSaleRequest(BaseModel):
+    """The "New Bill: Save as Sale" request — confirm + fulfill + generate
+    the invoice as one atomic step (see SalesOrderRepository.
+    finalize_new_bill). Recording a payment in the same step is optional:
+    leave payment_amount unset to finalize an unpaid/on-credit bill and
+    record payment later via the existing record_payment (e.g. from the
+    Sales Orders page's Record Payment action, or the New Bill screen's
+    own Record Payment button once the invoice exists).
+    """
+    due_date: date | None = None
+    overall_discount_amount: Decimal = Decimal("0")
+    other_charges: Decimal = Decimal("0")
+    payment_amount: Decimal | None = None
+    payment_method: PaymentMethod | None = None
+    payment_notes: str | None = None
+
+
+class FinalizeSaleResult(BaseModel):
+    sales_order: SalesOrderOut
+    invoice: InvoiceOut
+    payment: PaymentOut | None
 
 
 class SalesReturnRequest(BaseModel):

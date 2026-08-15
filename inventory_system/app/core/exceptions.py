@@ -191,6 +191,26 @@ class CustomerNotFoundError(AppError):
         super().__init__(f"Customer {customer_id!r} not found")
 
 
+class DuplicateCustomerCodeError(AppError):
+    def __init__(self, code: str):
+        self.code = code
+        super().__init__(f"Customer code {code!r} already exists")
+
+
+class CreditLimitExceededError(AppError):
+    """Raised when a new sales order would push a customer's outstanding
+    balance past their credit_limit — see SalesService.create_sales_order.
+    Not raised at all for a customer with credit_limit=None (no limit
+    enforced).
+    """
+    def __init__(self, available_credit, order_total):
+        self.available_credit = available_credit
+        self.order_total = order_total
+        super().__init__(
+            f"This order ({order_total}) exceeds the customer's available "
+            f"credit ({available_credit}).")
+
+
 class SalesOrderNotFoundError(AppError):
     def __init__(self, sales_order_id):
         self.sales_order_id = sales_order_id

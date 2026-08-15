@@ -13,7 +13,9 @@ from decimal import Decimal
 import pytest
 
 from app.core.exceptions import (
+    CreditLimitExceededError,
     CustomerNotFoundError,
+    DuplicateCustomerCodeError,
     InvalidSalesOrderTransitionError,
     ProductNotFoundError,
     SalesOrderItemNotFoundError,
@@ -28,6 +30,7 @@ from app.schemas.sales import (
     CustomerCreate,
     CustomerOut,
     CustomerUpdate,
+    FinalizeSaleRequest,
     InvoiceOut,
     PaymentOut,
     PaymentRequest,
@@ -47,21 +50,41 @@ UNIT = UnitOut(id=uuid.uuid4(), name="Piece", abbreviation="pc")
 
 ALL_PERMISSIONS = frozenset({"sales.create", "sales.view", "sales.update", "sales.confirm",
                              "sales.fulfill", "sales.cancel", "sales.invoice", "sales.payment",
-                             "sales.refund"})
+                             "sales.refund", "customers.view", "customers.create",
+                             "customers.update", "customers.deactivate", "customers.export"})
 WAREHOUSE_ID = uuid.uuid4()
+
+
+class FakeAuditLogRepository:
+    def __init__(self):
+        self.entries: list[dict] = []
+
+    def record(self, *, organization_id, user_id, actor_email, organization_name, action,
+              entity_type=None, entity_id=None, changes=None):
+        self.entries.append({"organization_id": organization_id, "user_id": user_id,
+                            "actor_email": actor_email, "organization_name": organization_name,
+                            "action": action, "entity_type": entity_type,
+                            "entity_id": entity_id, "changes": changes})
 
 
 class FakeCustomerRepository:
     def __init__(self):
         self.customers: dict[uuid.UUID, CustomerOut] = {}
+        # Lets a test hand back a specific invoiced/paid/outstanding shape
+        # without wiring cross-repository awareness into this fake — set
+        # balance_overrides[customer_id] = CustomerBalance(...) directly.
+        self.balance_overrides: dict[uuid.UUID, object] = {}
 
-    def create(self, organization_id, data: CustomerCreate) -> CustomerOut:
+    def create(self, organization_id, data: CustomerCreate, created_by=None) -> CustomerOut:
         now = datetime.now(timezone.utc)
-        customer = CustomerOut(id=uuid.uuid4(), name=data.name,
-                               contact_person=data.contact_person, phone=data.phone,
-                               email=data.email, address=data.address, tax_id=data.tax_id,
-                               notes=data.notes, is_active=True, created_at=now,
-                               updated_at=now)
+        customer = CustomerOut(
+            id=uuid.uuid4(), customer_code=data.customer_code, name=data.name,
+            customer_type=data.customer_type, contact_person=data.contact_person,
+            phone=data.phone, email=data.email, address=data.address, city=data.city,
+            state=data.state, country=data.country, tax_id=data.tax_id,
+            credit_limit=data.credit_limit, opening_balance=data.opening_balance,
+            notes=data.notes, is_active=True, created_by=created_by, created_at=now,
+            updated_at=now)
         self.customers[customer.id] = customer
         return customer
 
@@ -78,6 +101,27 @@ class FakeCustomerRepository:
 
     def list_all(self, organization_id):
         return list(self.customers.values())
+
+    def code_exists(self, organization_id, code, exclude_id=None):
+        return any(c.customer_code == code for c in self.customers.values()
+                  if c.id != exclude_id)
+
+    def get_balance(self, organization_id, customer_id):
+        from app.schemas.sales import CustomerBalance
+        if customer_id in self.balance_overrides:
+            return self.balance_overrides[customer_id]
+        customer = self.customers.get(customer_id)
+        if customer is None:
+            return None
+        return CustomerBalance(customer_id=customer_id,
+                               opening_balance=customer.opening_balance,
+                               invoiced_total=Decimal("0"), pending_orders_total=Decimal("0"),
+                               paid_total=Decimal("0"),
+                               outstanding_balance=customer.opening_balance,
+                               credit_limit=customer.credit_limit)
+
+    def get_history(self, organization_id, customer_id, limit=100):
+        return []
 
 
 class FakeWarehouseRepository:
@@ -191,8 +235,9 @@ class FakeSalesOrderRepository:
         invoice = InvoiceOut(id=uuid.uuid4(), sales_order_id=so.id,
                              invoice_number=f"INV-{self._next_invoice_seq:06d}",
                              subtotal=subtotal, discount_amount=Decimal("0"),
-                             tax_amount=Decimal("0"),
-                             total_amount=subtotal, generated_by=generated_by,
+                             overall_discount_amount=Decimal("0"),
+                             tax_amount=Decimal("0"), other_charges=Decimal("0"),
+                             total_amount=subtotal, due_date=None, generated_by=generated_by,
                              generated_at=datetime.now(timezone.utc))
         self._next_invoice_seq += 1
         self.invoices[invoice.id] = invoice
@@ -213,6 +258,32 @@ class FakeSalesOrderRepository:
         return PaymentOut(id=uuid.uuid4(), invoice_id=invoice.id, amount=data.amount,
                           method=data.method, recorded_by=recorded_by, notes=data.notes,
                           received_at=datetime.now(timezone.utc))
+
+    def finalize_new_bill(self, organization_id, sales_order_id, actor_id, data):
+        so = self.orders[sales_order_id]
+        if so.status != SalesOrderStatus.DRAFT:
+            raise InvalidSalesOrderTransitionError(so.status, SalesOrderStatus.CONFIRMED)
+        self.confirm(organization_id, sales_order_id, actor_id)
+        self.fulfill_sale(organization_id, sales_order_id, actor_id)
+        invoice = self.generate_invoice(organization_id, sales_order_id, actor_id)
+        if data.due_date is not None or data.overall_discount_amount or data.other_charges:
+            invoice = invoice.model_copy(update={
+                "due_date": data.due_date,
+                "overall_discount_amount": data.overall_discount_amount,
+                "other_charges": data.other_charges,
+                "total_amount": (invoice.total_amount - data.overall_discount_amount
+                                + data.other_charges)})
+            self.invoices[invoice.id] = invoice
+        payment = None
+        if data.payment_amount is not None:
+            payment = self.record_payment(
+                organization_id,
+                PaymentRequest(invoice_id=invoice.id, amount=data.payment_amount,
+                              method=data.payment_method, notes=data.payment_notes),
+                actor_id)
+        from app.schemas.sales import FinalizeSaleResult
+        return FinalizeSaleResult(sales_order=self.orders[sales_order_id], invoice=invoice,
+                                  payment=payment)
 
     def record_return(self, organization_id, sales_order_id, sales_order_item_id, quantity,
                       reason, returned_by) -> SalesReturnOut:
@@ -251,8 +322,9 @@ def _service(permissions=ALL_PERMISSIONS, customers=None, sales_orders=None, pro
     sessions.start(user_id=uuid.uuid4(), organization_id=ORG_ID, role_id=uuid.uuid4(),
                    permissions=frozenset(permissions), is_superuser=False,
                    must_change_password=False, now=datetime.now(timezone.utc))
-    return (SalesService(customers, sales_orders, products, warehouses, sessions),
-           customers, sales_orders, products)
+    audit_log = FakeAuditLogRepository()
+    return (SalesService(customers, sales_orders, products, warehouses, sessions, audit_log),
+           customers, sales_orders, products, audit_log)
 
 
 def _so_data(customer_id, product_id, **overrides):
@@ -267,7 +339,7 @@ def _so_data(customer_id, product_id, **overrides):
 
 def _setup():
     product = _product()
-    service, customers, sales_orders, products = _service(
+    service, customers, sales_orders, products, _audit_log = _service(
         products=FakeProductRepository({product.id: product}))
     customer = service.create_customer(CustomerCreate(name="Jane"))
     return service, customer, product
@@ -282,7 +354,7 @@ def test_create_customer_requires_name():
 
 
 def test_create_customer_requires_permission():
-    service, _, _, _ = _service(permissions=frozenset())
+    service, _, _, _, _ = _service(permissions=frozenset())
     with pytest.raises(PermissionDeniedError):
         service.create_customer(CustomerCreate(name="Jane"))
 
@@ -291,6 +363,217 @@ def test_get_customer_missing_raises_not_found():
     service, _, _ = _setup()
     with pytest.raises(CustomerNotFoundError):
         service.get_customer(uuid.uuid4())
+
+
+def test_create_customer_derives_code_from_name_when_none_given():
+    service, _, _ = _setup()
+    customer = service.create_customer(CustomerCreate(name="Acme Retail Co"))
+    assert customer.customer_code == "ACME-RETAIL-CO"
+
+
+def test_create_customer_normalizes_an_explicit_code():
+    service, _, _ = _setup()
+    customer = service.create_customer(CustomerCreate(name="Jane", customer_code="  jane-01  "))
+    assert customer.customer_code == "JANE-01"
+
+
+def test_create_customer_rejects_duplicate_explicit_code():
+    service, _, _ = _setup()
+    service.create_customer(CustomerCreate(name="First", customer_code="DUP"))
+    with pytest.raises(DuplicateCustomerCodeError):
+        service.create_customer(CustomerCreate(name="Second", customer_code="DUP"))
+
+
+def test_create_customer_rejects_negative_credit_limit():
+    service, _, _ = _setup()
+    with pytest.raises(SalesOrderValidationError):
+        service.create_customer(CustomerCreate(name="Jane", credit_limit=Decimal("-1")))
+
+
+def test_create_customer_rejects_negative_opening_balance():
+    service, _, _ = _setup()
+    with pytest.raises(SalesOrderValidationError):
+        service.create_customer(CustomerCreate(name="Jane", opening_balance=Decimal("-1")))
+
+
+def test_create_customer_rejects_invalid_email():
+    service, _, _ = _setup()
+    with pytest.raises(SalesOrderValidationError):
+        service.create_customer(CustomerCreate(name="Jane", email="not-an-email"))
+
+
+def test_create_customer_rejects_invalid_phone():
+    service, _, _ = _setup()
+    with pytest.raises(SalesOrderValidationError):
+        service.create_customer(CustomerCreate(name="Jane", phone="abc"))
+
+
+def test_create_customer_sets_created_by_from_session():
+    service, customers, sales_orders, products, _audit_log = _service()
+    session = service._sessions.peek()
+    customer = service.create_customer(CustomerCreate(name="Jane"))
+    assert customer.created_by == session.user_id
+
+
+def test_create_customer_records_audit_entry():
+    service, customers, sales_orders, products, audit_log = _service()
+    customer = service.create_customer(CustomerCreate(name="Jane", customer_code="JANE-01"))
+    entries = [e for e in audit_log.entries if e["action"] == "customer.create"]
+    assert len(entries) == 1
+    assert entries[0]["entity_id"] == customer.id
+    assert entries[0]["entity_type"] == "customer"
+
+
+def test_update_customer_rejects_duplicate_code():
+    service, _, _ = _setup()
+    service.create_customer(CustomerCreate(name="Other", customer_code="TAKEN"))
+    mine = service.create_customer(CustomerCreate(name="Mine", customer_code="MINE"))
+    with pytest.raises(DuplicateCustomerCodeError):
+        service.update_customer(mine.id, CustomerUpdate(customer_code="TAKEN"))
+
+
+def test_update_customer_keeping_its_own_code_is_not_a_duplicate():
+    service, _, _ = _setup()
+    mine = service.create_customer(CustomerCreate(name="Mine", customer_code="MINE"))
+    updated = service.update_customer(mine.id, CustomerUpdate(customer_code="mine",
+                                                              city="Pokhara"))
+    assert updated.customer_code == "MINE"
+    assert updated.city == "Pokhara"
+
+
+def test_update_customer_requires_permission():
+    service, _, _, _, _ = _service(permissions=frozenset({"customers.view"}))
+    with pytest.raises(PermissionDeniedError):
+        service.update_customer(uuid.uuid4(), CustomerUpdate(name="X"))
+
+
+def test_update_customer_records_generic_diff_and_credit_limit_changed_event():
+    service, customers, sales_orders, products, audit_log = _service()
+    customer = service.create_customer(CustomerCreate(name="Jane", credit_limit=Decimal("100")))
+    audit_log.entries.clear()
+
+    service.update_customer(customer.id, CustomerUpdate(credit_limit=Decimal("500")))
+
+    generic = [e for e in audit_log.entries if e["action"] == "customer.update"]
+    specific = [e for e in audit_log.entries if e["action"] == "customer.credit_limit_changed"]
+    assert len(generic) == 1
+    assert len(specific) == 1
+    assert specific[0]["changes"] == {"before": "100", "after": "500"}
+
+
+def test_deactivate_and_activate_customer_record_audit_entries():
+    service, customers, sales_orders, products, audit_log = _service()
+    customer = service.create_customer(CustomerCreate(name="Jane"))
+
+    deactivated = service.deactivate_customer(customer.id)
+    assert deactivated.is_active is False
+    activated = service.activate_customer(customer.id)
+    assert activated.is_active is True
+
+    actions = [e["action"] for e in audit_log.entries]
+    assert "customer.deactivate" in actions
+    assert "customer.activate" in actions
+
+
+def test_deactivate_customer_requires_permission():
+    service, _, _, _, _ = _service(permissions=frozenset({"customers.view"}))
+    with pytest.raises(PermissionDeniedError):
+        service.deactivate_customer(uuid.uuid4())
+
+
+def test_deactivate_missing_customer_raises_not_found():
+    service, _, _ = _setup()
+    with pytest.raises(CustomerNotFoundError):
+        service.deactivate_customer(uuid.uuid4())
+
+
+def test_get_customer_balance_requires_permission():
+    service, _, _, _, _ = _service(permissions=frozenset())
+    with pytest.raises(PermissionDeniedError):
+        service.get_customer_balance(uuid.uuid4())
+
+
+def test_get_customer_history_requires_permission():
+    service, _, _, _, _ = _service(permissions=frozenset())
+    with pytest.raises(PermissionDeniedError):
+        service.get_customer_history(uuid.uuid4())
+
+
+def test_get_customer_history_missing_customer_raises_not_found():
+    service, _, _ = _setup()
+    with pytest.raises(CustomerNotFoundError):
+        service.get_customer_history(uuid.uuid4())
+
+
+def test_export_customers_requires_customers_export_permission():
+    service, _, _, _, _ = _service(permissions=frozenset({"customers.view"}))
+    with pytest.raises(PermissionDeniedError):
+        service.export_customers()
+
+
+def test_export_customers_returns_the_full_list():
+    service, customers, sales_orders, products, _audit_log = _service()
+    service.create_customer(CustomerCreate(name="Jane"))
+    service.create_customer(CustomerCreate(name="John"))
+    exported = service.export_customers()
+    assert {c.name for c in exported} == {"Jane", "John"}
+
+
+# -- credit control ---------------------------------------------------------#
+
+def test_create_sales_order_blocked_when_it_would_exceed_credit_limit():
+    from app.schemas.sales import CustomerBalance
+    product = _product()
+    service, customers, sales_orders, products = _service(
+        products=FakeProductRepository({product.id: product}))[:4]
+    customer = service.create_customer(CustomerCreate(name="Jane", credit_limit=Decimal("100")))
+    customers.balance_overrides[customer.id] = CustomerBalance(
+        customer_id=customer.id, opening_balance=Decimal("0"), invoiced_total=Decimal("80"),
+        pending_orders_total=Decimal("0"), paid_total=Decimal("0"),
+        outstanding_balance=Decimal("80"), credit_limit=Decimal("100"))
+
+    data = _so_data(customer.id, product.id, items=[
+        SalesOrderItemInput(product_id=product.id, quantity_ordered=Decimal("1"),
+                            unit_price=Decimal("30"), tax_percent=Decimal("0"))])
+    with pytest.raises(CreditLimitExceededError):
+        service.create_sales_order(data)
+    assert sales_orders.orders == {}  # nothing was created
+
+
+def test_create_sales_order_allowed_within_credit_limit():
+    from app.schemas.sales import CustomerBalance
+    product = _product()
+    service, customers, sales_orders, products = _service(
+        products=FakeProductRepository({product.id: product}))[:4]
+    customer = service.create_customer(CustomerCreate(name="Jane", credit_limit=Decimal("100")))
+    customers.balance_overrides[customer.id] = CustomerBalance(
+        customer_id=customer.id, opening_balance=Decimal("0"), invoiced_total=Decimal("50"),
+        pending_orders_total=Decimal("0"), paid_total=Decimal("0"),
+        outstanding_balance=Decimal("50"), credit_limit=Decimal("100"))
+
+    data = _so_data(customer.id, product.id, items=[
+        SalesOrderItemInput(product_id=product.id, quantity_ordered=Decimal("1"),
+                            unit_price=Decimal("30"), tax_percent=Decimal("0"))])
+    so = service.create_sales_order(data)
+    assert so.id in sales_orders.orders
+
+
+def test_create_sales_order_never_blocked_when_customer_has_no_credit_limit():
+    from app.schemas.sales import CustomerBalance
+    product = _product()
+    service, customers, sales_orders, products = _service(
+        products=FakeProductRepository({product.id: product}))[:4]
+    customer = service.create_customer(CustomerCreate(name="Jane"))  # credit_limit=None
+    customers.balance_overrides[customer.id] = CustomerBalance(
+        customer_id=customer.id, opening_balance=Decimal("0"), invoiced_total=Decimal("999999"),
+        pending_orders_total=Decimal("0"), paid_total=Decimal("0"),
+        outstanding_balance=Decimal("999999"), credit_limit=None)
+
+    data = _so_data(customer.id, product.id, items=[
+        SalesOrderItemInput(product_id=product.id, quantity_ordered=Decimal("1"),
+                            unit_price=Decimal("30"), tax_percent=Decimal("0"))])
+    so = service.create_sales_order(data)  # does not raise
+    assert so.id in sales_orders.orders
 
 
 # -- create / edit sales orders -------------------------------------------#
@@ -342,7 +625,7 @@ def test_create_sales_order_rejects_invalid_item():
 
 def test_create_sales_order_requires_permission():
     service, customer, product = _setup()
-    limited, _, _, _ = _service(permissions=frozenset())
+    limited, _, _, _, _ = _service(permissions=frozenset())
     with pytest.raises(PermissionDeniedError):
         limited.create_sales_order(_so_data(customer.id, product.id))
 
@@ -413,7 +696,7 @@ def test_cannot_cancel_a_fulfilled_order():
 def test_status_transitions_require_permission():
     service, customer, product = _setup()
     so = service.create_sales_order(_so_data(customer.id, product.id))
-    limited, _, _, _ = _service(permissions=frozenset({"sales.view"}))
+    limited, _, _, _, _ = _service(permissions=frozenset({"sales.view"}))
     with pytest.raises(PermissionDeniedError):
         limited.confirm_sales_order(so.id)
 
@@ -429,7 +712,7 @@ def _fulfilled(service, customer, product):
 def test_generate_invoice_requires_permission():
     service, customer, product = _setup()
     fulfilled = _fulfilled(service, customer, product)
-    limited, _, _, _ = _service(permissions=frozenset({"sales.view"}))
+    limited, _, _, _, _ = _service(permissions=frozenset({"sales.view"}))
     with pytest.raises(PermissionDeniedError):
         limited.generate_invoice(fulfilled.id)
 
@@ -457,10 +740,119 @@ def test_record_payment_requires_permission():
     service, customer, product = _setup()
     fulfilled = _fulfilled(service, customer, product)
     invoice = service.generate_invoice(fulfilled.id)
-    limited, _, _, _ = _service(permissions=frozenset({"sales.view"}))
+    limited, _, _, _, _ = _service(permissions=frozenset({"sales.view"}))
     with pytest.raises(PermissionDeniedError):
         limited.record_payment(PaymentRequest(invoice_id=invoice.id, amount=Decimal("1"),
                                               method=PaymentMethod.CASH))
+
+
+# -- finalize_new_bill (New Bill: Save as Sale) ----------------------------#
+
+def test_finalize_new_bill_confirms_fulfills_and_invoices_in_one_call():
+    service, customer, product = _setup()
+    so = service.create_sales_order(_so_data(customer.id, product.id))
+
+    result = service.finalize_new_bill(so.id, FinalizeSaleRequest())
+
+    assert result.sales_order.status == SalesOrderStatus.FULFILLED
+    assert result.invoice is not None
+    assert result.payment is None
+
+
+def test_finalize_new_bill_with_payment_records_payment_and_completes_order():
+    # _so_data's default line is qty=10 x unit_price=5 = 50; the fake
+    # repository's generate_invoice applies no tax, so 50 is the exact
+    # total — paying it in full must complete the order in the same call.
+    service, customer, product = _setup()
+    so = service.create_sales_order(_so_data(customer.id, product.id))
+
+    result = service.finalize_new_bill(
+        so.id, FinalizeSaleRequest(payment_amount=Decimal("50"),
+                                   payment_method=PaymentMethod.CASH))
+
+    assert result.payment is not None
+    assert result.payment.amount == Decimal("50")
+    assert result.sales_order.status == SalesOrderStatus.COMPLETED
+
+
+def test_finalize_new_bill_rejects_non_draft_order():
+    service, customer, product = _setup()
+    so = service.create_sales_order(_so_data(customer.id, product.id))
+    service.confirm_sales_order(so.id)  # no longer DRAFT
+
+    with pytest.raises(SalesOrderValidationError):
+        service.finalize_new_bill(so.id, FinalizeSaleRequest())
+
+
+def test_finalize_new_bill_rejects_negative_overall_discount():
+    service, customer, product = _setup()
+    so = service.create_sales_order(_so_data(customer.id, product.id))
+
+    with pytest.raises(SalesOrderValidationError):
+        service.finalize_new_bill(
+            so.id, FinalizeSaleRequest(overall_discount_amount=Decimal("-1")))
+
+
+def test_finalize_new_bill_rejects_negative_other_charges():
+    service, customer, product = _setup()
+    so = service.create_sales_order(_so_data(customer.id, product.id))
+
+    with pytest.raises(SalesOrderValidationError):
+        service.finalize_new_bill(so.id, FinalizeSaleRequest(other_charges=Decimal("-1")))
+
+
+def test_finalize_new_bill_rejects_non_positive_payment_amount():
+    service, customer, product = _setup()
+    so = service.create_sales_order(_so_data(customer.id, product.id))
+
+    with pytest.raises(SalesOrderValidationError):
+        service.finalize_new_bill(
+            so.id, FinalizeSaleRequest(payment_amount=Decimal("0"),
+                                       payment_method=PaymentMethod.CASH))
+
+
+def test_finalize_new_bill_rejects_payment_amount_without_method():
+    service, customer, product = _setup()
+    so = service.create_sales_order(_so_data(customer.id, product.id))
+
+    with pytest.raises(SalesOrderValidationError):
+        service.finalize_new_bill(so.id, FinalizeSaleRequest(payment_amount=Decimal("10")))
+
+
+@pytest.mark.parametrize("missing_permission", ["sales.confirm", "sales.fulfill", "sales.invoice"])
+def test_finalize_new_bill_requires_confirm_fulfill_and_invoice_permissions(missing_permission):
+    service, customer, product = _setup()
+    so = service.create_sales_order(_so_data(customer.id, product.id))
+
+    limited_permissions = (ALL_PERMISSIONS - {missing_permission})
+    limited, _, limited_orders, _, _ = _service(permissions=limited_permissions)
+    # Share the same order across services the way a shared org DB would —
+    # simplest is to just copy the fake's in-memory order into the limited
+    # service's own repository instance.
+    limited_orders.orders[so.id] = service._sales_orders.orders[so.id]
+
+    with pytest.raises(PermissionDeniedError):
+        limited.finalize_new_bill(so.id, FinalizeSaleRequest())
+
+
+def test_finalize_new_bill_requires_payment_permission_when_payment_included():
+    service, customer, product = _setup()
+    so = service.create_sales_order(_so_data(customer.id, product.id))
+
+    limited_permissions = (ALL_PERMISSIONS - {"sales.payment"})
+    limited, _, limited_orders, _, _ = _service(permissions=limited_permissions)
+    limited_orders.orders[so.id] = service._sales_orders.orders[so.id]
+
+    with pytest.raises(PermissionDeniedError):
+        limited.finalize_new_bill(
+            so.id, FinalizeSaleRequest(payment_amount=Decimal("10"),
+                                       payment_method=PaymentMethod.CASH))
+
+
+def test_finalize_new_bill_missing_sales_order_raises_not_found():
+    service, _, _ = _setup()
+    with pytest.raises(SalesOrderNotFoundError):
+        service.finalize_new_bill(uuid.uuid4(), FinalizeSaleRequest())
 
 
 # -- sales returns ----------------------------------------------------------#
@@ -475,7 +867,7 @@ def test_record_return_requires_reason():
 def test_record_return_requires_permission():
     service, customer, product = _setup()
     fulfilled = _fulfilled(service, customer, product)
-    limited, _, _, _ = _service(permissions=frozenset({"sales.view"}))
+    limited, _, _, _, _ = _service(permissions=frozenset({"sales.view"}))
     with pytest.raises(PermissionDeniedError):
         limited.record_sales_return(fulfilled.id, fulfilled.items[0].id, Decimal("1"),
                                     "damaged")
@@ -509,6 +901,6 @@ def test_get_invoice_by_sales_order_returns_the_invoice_once_generated():
 def test_get_invoice_by_sales_order_requires_permission():
     service, customer, product = _setup()
     fulfilled = _fulfilled(service, customer, product)
-    limited, _, _, _ = _service(permissions=frozenset())
+    limited, _, _, _, _ = _service(permissions=frozenset())
     with pytest.raises(PermissionDeniedError):
         limited.get_invoice_by_sales_order(fulfilled.id)

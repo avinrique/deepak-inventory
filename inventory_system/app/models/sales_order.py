@@ -20,12 +20,13 @@ directly inside their own transaction, so the inventory update, the order
 status change, and the audit log entry commit or roll back together.
 """
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 
 from sqlalchemy import (
     BigInteger,
     CheckConstraint,
+    Date,
     DateTime,
     Enum,
     ForeignKey,
@@ -139,6 +140,9 @@ class Invoice(UUIDPKMixin, Base):
         CheckConstraint("discount_amount >= 0", name="ck_invoices_discount_amount_non_negative"),
         CheckConstraint("tax_amount >= 0", name="ck_invoices_tax_amount_non_negative"),
         CheckConstraint("total_amount >= 0", name="ck_invoices_total_amount_non_negative"),
+        CheckConstraint("overall_discount_amount >= 0",
+                        name="ck_invoices_overall_discount_amount_non_negative"),
+        CheckConstraint("other_charges >= 0", name="ck_invoices_other_charges_non_negative"),
         Index("ix_invoices_org_invoice_number", "organization_id", "invoice_number",
              unique=True),
     )
@@ -150,15 +154,29 @@ class Invoice(UUIDPKMixin, Base):
         UUID(as_uuid=True), ForeignKey("sales_orders.id", ondelete="RESTRICT"),
         nullable=False, unique=True)
     invoice_number: Mapped[str] = mapped_column(String(64), nullable=False)
-    # subtotal is the pre-discount list price; discount_amount is what was
-    # taken off before tax; tax_amount is computed on the discounted price;
-    # total_amount = subtotal - discount_amount + tax_amount. All frozen at
-    # generation time, same rationale as the class docstring.
+    # subtotal is the pre-discount list price; discount_amount is the sum
+    # of each line's own discount, taken off before tax; overall_discount_
+    # amount is an *additional* whole-invoice discount applied on top of
+    # that (e.g. a negotiated bulk-order deduction — a separate concept
+    # from any single line's discount); tax_amount is computed on the
+    # discounted line prices; other_charges is a flat addition (e.g.
+    # delivery/handling) that isn't taxed itself. total_amount = subtotal
+    # - discount_amount - overall_discount_amount + tax_amount +
+    # other_charges. All frozen at generation time, same rationale as the
+    # class docstring.
     subtotal: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     discount_amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False,
                                                       default=Decimal("0"))
+    overall_discount_amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False,
+                                                              default=Decimal("0"))
     tax_amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    other_charges: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False,
+                                                    default=Decimal("0"))
     total_amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    # Optional — set from the New Bill screen; existing generate_invoice
+    # call sites that don't pass one (e.g. the Sales Orders page) leave
+    # this NULL, same as before this field existed.
+    due_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     generated_by: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
     generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True),

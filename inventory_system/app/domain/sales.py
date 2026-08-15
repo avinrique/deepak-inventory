@@ -31,6 +31,7 @@ class PaymentMethod(str, Enum):
     CASH = "CASH"
     CARD = "CARD"
     BANK_TRANSFER = "BANK_TRANSFER"
+    DIGITAL_WALLET = "DIGITAL_WALLET"
     CHEQUE = "CHEQUE"
     OTHER = "OTHER"
 

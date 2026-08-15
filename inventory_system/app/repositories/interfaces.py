@@ -24,9 +24,13 @@ from app.schemas.organization import OrganizationOut, OrganizationUpdate
 from app.schemas.party import PartyOut
 from app.schemas.reporting import DashboardMetrics, ReportFilter, ReportResult
 from app.schemas.sales import (
+    CustomerBalance,
     CustomerCreate,
     CustomerOut,
+    CustomerTransaction,
     CustomerUpdate,
+    FinalizeSaleRequest,
+    FinalizeSaleResult,
     InvoiceDocumentData,
     InvoiceOut,
     PaymentOut,
@@ -341,7 +345,8 @@ class PurchaseOrderRepository(Protocol):
 
 
 class CustomerRepository(Protocol):
-    def create(self, organization_id: uuid.UUID, data: CustomerCreate) -> CustomerOut: ...
+    def create(self, organization_id: uuid.UUID, data: CustomerCreate,
+              created_by: uuid.UUID | None = None) -> CustomerOut: ...
 
     def update(self, organization_id: uuid.UUID, customer_id: uuid.UUID,
               data: CustomerUpdate) -> CustomerOut | None: ...
@@ -350,6 +355,15 @@ class CustomerRepository(Protocol):
                  customer_id: uuid.UUID) -> CustomerOut | None: ...
 
     def list_all(self, organization_id: uuid.UUID) -> list[CustomerOut]: ...
+
+    def code_exists(self, organization_id: uuid.UUID, code: str,
+                    exclude_id: uuid.UUID | None = None) -> bool: ...
+
+    def get_balance(self, organization_id: uuid.UUID,
+                    customer_id: uuid.UUID) -> CustomerBalance | None: ...
+
+    def get_history(self, organization_id: uuid.UUID, customer_id: uuid.UUID,
+                    limit: int = 100) -> list[CustomerTransaction]: ...
 
 
 class SalesOrderRepository(Protocol):
@@ -398,6 +412,9 @@ class SalesOrderRepository(Protocol):
 
     def record_payment(self, organization_id: uuid.UUID, data: PaymentRequest,
                       recorded_by: uuid.UUID) -> PaymentOut: ...
+
+    def finalize_new_bill(self, organization_id: uuid.UUID, sales_order_id: uuid.UUID,
+                         actor_id: uuid.UUID, data: FinalizeSaleRequest) -> FinalizeSaleResult: ...
 
     def record_return(self, organization_id: uuid.UUID, sales_order_id: uuid.UUID,
                       sales_order_item_id: uuid.UUID, quantity: Decimal, reason: str,

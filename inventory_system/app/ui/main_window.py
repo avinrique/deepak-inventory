@@ -54,6 +54,7 @@ MODULES = [
     SidebarModule("inventory", "Inventory", "📊"),
     SidebarModule("warehouses", "Warehouses", "🏬"),
     SidebarModule("purchases", "Purchases", "📥"),
+    SidebarModule("new_bill", "New Bill", "🧾"),
     SidebarModule("sales", "Sales", "📤"),
     SidebarModule("suppliers", "Suppliers", "🚚"),
     SidebarModule("customers", "Customers", "👥"),
@@ -69,10 +70,12 @@ MODULES = [
 # only editing does, via SettingsPage._can_edit) is visible to everyone
 # who's logged in.
 _MODULE_PERMISSIONS: dict[str, frozenset[str]] = {
+    "new_bill": frozenset({"sales.create"}),
     "products": frozenset({"products.view"}),
     "inventory": frozenset({"inventory.view"}),
     "purchases": frozenset({"purchases.view"}),
     "sales": frozenset({"sales.view"}),
+    "customers": frozenset({"customers.view"}),
     "reports": frozenset({"reports.view"}),
     "users": frozenset({"users.view"}),
 }
@@ -273,6 +276,10 @@ def _build_page(key: str, container: Container) -> QWidget:
         from app.ui.pages.inventory_page import InventoryPage
         return InventoryPage(container.stock_service(), container.inventory_service(),
                              container.product_service(), container.sessions)
+    if key == "new_bill":
+        from app.ui.pages.new_bill_page import NewBillPage
+        return NewBillPage(container.sales_service(), container.inventory_service(),
+                           container.product_service(), container.sessions)
     if key == "sales":
         from app.ui.pages.sales_orders_page import SalesOrdersPage
         return SalesOrdersPage(container.sales_service(), container.inventory_service(),
@@ -293,7 +300,7 @@ def _build_page(key: str, container: Container) -> QWidget:
         return SuppliersPage()
     if key == "customers":
         from app.ui.pages.customers_page import CustomersPage
-        return CustomersPage()
+        return CustomersPage(container.sales_service(), container.sessions)
     if key == "reports":
         from app.ui.pages.reports_page import ReportsPage
         return ReportsPage(container.reporting_service(), container.product_service(),

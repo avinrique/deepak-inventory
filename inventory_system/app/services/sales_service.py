@@ -12,12 +12,16 @@ would call, just without a narrowing filter. There is no complete_sale()
 action: COMPLETED is only ever reached as a side effect of record_payment
 once an invoice is fully paid (see app.domain.sales.ALLOWED_TRANSITIONS).
 """
+import re
+import secrets
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 
 from app.core.exceptions import (
+    CreditLimitExceededError,
     CustomerNotFoundError,
+    DuplicateCustomerCodeError,
     InvalidSalesOrderTransitionError,
     InvoiceNotFoundError,
     ProductNotFoundError,
@@ -28,19 +32,26 @@ from app.core.exceptions import (
 from app.domain.sales import (
     SalesOrderStatus,
     can_transition,
+    line_total_after_discount,
+    normalize_customer_code,
     validate_customer,
     validate_sales_order_item,
 )
 from app.repositories.interfaces import (
+    AuditLogRepository,
     CustomerRepository,
     ProductRepository,
     SalesOrderRepository,
     WarehouseRepository,
 )
 from app.schemas.sales import (
+    CustomerBalance,
     CustomerCreate,
     CustomerOut,
+    CustomerTransaction,
     CustomerUpdate,
+    FinalizeSaleRequest,
+    FinalizeSaleResult,
     InvoiceDocumentData,
     InvoiceOut,
     PaymentOut,
@@ -52,19 +63,22 @@ from app.schemas.sales import (
     SalesOrderUpdate,
     SalesReturnOut,
 )
-from app.security.authorization import require_permission
+from app.security.authorization import check_permission, require_permission
 from app.security.session import SessionManager
+
+_MAX_CUSTOMER_CODE_SUFFIX_ATTEMPTS = 5
 
 
 class SalesService:
     def __init__(self, customers: CustomerRepository, sales_orders: SalesOrderRepository,
                 products: ProductRepository, warehouses: WarehouseRepository,
-                sessions: SessionManager):
+                sessions: SessionManager, audit_log: AuditLogRepository | None = None):
         self._customers = customers
         self._sales_orders = sales_orders
         self._products = products
         self._warehouses = warehouses
         self._sessions = sessions
+        self._audit_log = audit_log
 
     def _organization_id(self) -> uuid.UUID:
         return self._sessions.current(now=datetime.now(timezone.utc)).organization_id
@@ -78,35 +92,181 @@ class SalesService:
             raise SalesOrderNotFoundError(sales_order_id)
         return so
 
+    def _audit(self, *, action: str, entity_id: uuid.UUID,
+              changes: dict | None = None) -> None:
+        # Best-effort, separate from the write it describes — same
+        # tradeoff app.services.user_service._audit documents (no single
+        # row here to be atomic *with*, unlike fulfill_sale/receive_goods,
+        # which post their audit entry inside the same DB transaction as
+        # the inventory movement they're describing). audit_log is
+        # optional only so existing callers/tests that construct
+        # SalesService without one (nothing here needed it before customer
+        # management) don't break — every real caller (Container) supplies
+        # one.
+        if self._audit_log is None:
+            return
+        session = self._sessions.peek()
+        actor_id = session.user_id if session else None
+        org_id = session.organization_id if session else None
+        self._audit_log.record(organization_id=org_id, user_id=actor_id, actor_email=None,
+                               organization_name=None, action=action, entity_type="customer",
+                               entity_id=entity_id, changes=changes)
+
     # -- customers ------------------------------------------------------#
-    @require_permission("sales.update")
+    def _derive_customer_code(self, name: str) -> str:
+        """Mirrors UserService._derive_username: only used when the caller
+        doesn't supply an explicit code — an explicit choice that collides
+        is a DuplicateCustomerCodeError, not silently suffixed into
+        something the caller didn't type.
+        """
+        org_id = self._organization_id()
+        base = normalize_customer_code(re.sub(r"[^A-Za-z0-9]+", "-", name)).strip("-") or "CUST"
+        candidate = base
+        for _ in range(_MAX_CUSTOMER_CODE_SUFFIX_ATTEMPTS):
+            if not self._customers.code_exists(org_id, candidate):
+                return candidate
+            candidate = f"{base}-{secrets.token_hex(2).upper()}"
+        raise DuplicateCustomerCodeError(candidate)
+
+    @require_permission("customers.create")
     def create_customer(self, data: CustomerCreate) -> CustomerOut:
-        errors = validate_customer(name=data.name)
+        org_id = self._organization_id()
+        explicit_code = (normalize_customer_code(data.customer_code)
+                        if data.customer_code else None)
+        errors = validate_customer(name=data.name, customer_code=explicit_code,
+                                   email=data.email, phone=data.phone,
+                                   credit_limit=data.credit_limit,
+                                   opening_balance=data.opening_balance)
         if errors:
             raise SalesOrderValidationError(errors)
-        return self._customers.create(self._organization_id(), data)
 
-    @require_permission("sales.update")
+        if explicit_code is not None:
+            if self._customers.code_exists(org_id, explicit_code):
+                raise DuplicateCustomerCodeError(explicit_code)
+            code = explicit_code
+        else:
+            code = self._derive_customer_code(data.name)
+
+        created = self._customers.create(org_id, data.model_copy(update={"customer_code": code}),
+                                         created_by=self._current_user_id())
+        self._audit(action="customer.create", entity_id=created.id,
+                   changes={"name": created.name, "customer_code": created.customer_code,
+                           "customer_type": created.customer_type.value,
+                           "credit_limit": str(created.credit_limit)
+                           if created.credit_limit is not None else None})
+        return created
+
+    @require_permission("customers.update")
     def update_customer(self, customer_id: uuid.UUID, data: CustomerUpdate) -> CustomerOut:
-        if data.name is not None:
-            errors = validate_customer(name=data.name)
-            if errors:
-                raise SalesOrderValidationError(errors)
+        current = self._customers.get_by_id(self._organization_id(), customer_id)
+        if current is None:
+            raise CustomerNotFoundError(customer_id)
+
+        normalized_code = (normalize_customer_code(data.customer_code)
+                          if data.customer_code is not None else None)
+        errors = validate_customer(
+            name=data.name if data.name is not None else current.name,
+            customer_code=normalized_code, email=data.email, phone=data.phone,
+            credit_limit=data.credit_limit, opening_balance=data.opening_balance)
+        if errors:
+            raise SalesOrderValidationError(errors)
+
+        if normalized_code is not None:
+            if (normalized_code != current.customer_code
+                    and self._customers.code_exists(self._organization_id(), normalized_code,
+                                                    exclude_id=customer_id)):
+                raise DuplicateCustomerCodeError(normalized_code)
+            # Always persist the normalized form, even when it already
+            # matches current.customer_code — otherwise re-saving the same
+            # code in different casing (e.g. "mine" over "MINE") would
+            # silently write the un-normalized text.
+            data = data.model_copy(update={"customer_code": normalized_code})
+
         result = self._customers.update(self._organization_id(), customer_id, data)
         if result is None:
             raise CustomerNotFoundError(customer_id)
+
+        self._audit_customer_diff(customer_id, current, result,
+                                  data.model_dump(exclude_unset=True))
         return result
 
-    @require_permission("sales.view")
+    def _audit_customer_diff(self, customer_id: uuid.UUID, current: CustomerOut,
+                             result: CustomerOut, updated_fields: dict) -> None:
+        before, after = {}, {}
+        for field in updated_fields:
+            old_value = getattr(current, field)
+            new_value = getattr(result, field)
+            if old_value != new_value:
+                before[field] = str(old_value)
+                after[field] = str(new_value)
+        if before:
+            self._audit(action="customer.update", entity_id=customer_id,
+                       changes={"before": before, "after": after})
+        # Credit limit gets its own named event on top of the generic
+        # diff above — "important customer information changed" is
+        # explicitly called out as its own thing to record, not just
+        # folded silently into a generic update entry.
+        if "credit_limit" in before:
+            self._audit(action="customer.credit_limit_changed", entity_id=customer_id,
+                       changes={"before": before["credit_limit"], "after": after["credit_limit"]})
+
+    @require_permission("customers.deactivate")
+    def deactivate_customer(self, customer_id: uuid.UUID) -> CustomerOut:
+        result = self._customers.update(self._organization_id(), customer_id,
+                                        CustomerUpdate(is_active=False))
+        if result is None:
+            raise CustomerNotFoundError(customer_id)
+        self._audit(action="customer.deactivate", entity_id=customer_id)
+        return result
+
+    @require_permission("customers.deactivate")
+    def activate_customer(self, customer_id: uuid.UUID) -> CustomerOut:
+        result = self._customers.update(self._organization_id(), customer_id,
+                                        CustomerUpdate(is_active=True))
+        if result is None:
+            raise CustomerNotFoundError(customer_id)
+        self._audit(action="customer.activate", entity_id=customer_id)
+        return result
+
+    @require_permission("customers.view")
     def get_customer(self, customer_id: uuid.UUID) -> CustomerOut:
         result = self._customers.get_by_id(self._organization_id(), customer_id)
         if result is None:
             raise CustomerNotFoundError(customer_id)
         return result
 
-    @require_permission("sales.view")
+    @require_permission("customers.view")
     def list_customers(self) -> list[CustomerOut]:
         return self._customers.list_all(self._organization_id())
+
+    @require_permission("customers.view")
+    def get_customer_balance(self, customer_id: uuid.UUID) -> CustomerBalance:
+        result = self._customers.get_balance(self._organization_id(), customer_id)
+        if result is None:
+            raise CustomerNotFoundError(customer_id)
+        return result
+
+    @require_permission("customers.view")
+    def get_customer_history(self, customer_id: uuid.UUID) -> list[CustomerTransaction]:
+        if self._customers.get_by_id(self._organization_id(), customer_id) is None:
+            raise CustomerNotFoundError(customer_id)
+        return self._customers.get_history(self._organization_id(), customer_id)
+
+    @require_permission("customers.export")
+    def export_customers(self) -> list[CustomerOut]:
+        # Same permission-gated read as list_customers, just named for
+        # what the UI does with it (CSV export via app.reporting.export,
+        # not a separate query) — kept as its own method so
+        # customers.export can be denied independently of customers.view.
+        return self._customers.list_all(self._organization_id())
+
+    def _check_credit_limit(self, customer: CustomerOut, new_order_total: Decimal) -> None:
+        if customer.credit_limit is None:
+            return  # no limit configured -> no credit control enforced
+        balance = self._customers.get_balance(self._organization_id(), customer.id)
+        available = balance.credit_limit - balance.outstanding_balance
+        if new_order_total > available:
+            raise CreditLimitExceededError(available, new_order_total)
 
     # -- sales orders -----------------------------------------------------#
     def _validate_items(self, data) -> None:
@@ -126,11 +286,24 @@ class SalesService:
     @require_permission("sales.create")
     def create_sales_order(self, data: SalesOrderCreate) -> SalesOrderOut:
         org_id = self._organization_id()
-        if self._customers.get_by_id(org_id, data.customer_id) is None:
+        customer = self._customers.get_by_id(org_id, data.customer_id)
+        if customer is None:
             raise CustomerNotFoundError(data.customer_id)
         if self._warehouses.get_by_id(org_id, data.warehouse_id) is None:
             raise WarehouseNotFoundError(data.warehouse_id)
         self._validate_items(data)
+
+        # Credit control: enforced here, not just hidden in the UI — a
+        # caller going straight to the service (a script, a bug, a future
+        # second front-end) hits the same block. No-op for a customer with
+        # credit_limit=None (the "no limit configured" convention — see
+        # app.models.customer's docstring).
+        order_total = sum(
+            (line_total_after_discount(item.quantity_ordered, item.unit_price,
+                                       item.discount_percent, item.tax_percent)
+            for item in data.items), Decimal("0"))
+        self._check_credit_limit(customer, order_total)
+
         # Deliberately does not touch Inventory/InventoryTransaction at
         # all — a sales order reserves/deducts nothing until fulfillment.
         # See SalesOrderRepository.create and
@@ -233,6 +406,50 @@ class SalesService:
             raise SalesOrderValidationError(["Payment amount must be greater than zero."])
         return self._sales_orders.record_payment(self._organization_id(), data,
                                                   self._current_user_id())
+
+    def finalize_new_bill(self, sales_order_id: uuid.UUID,
+                         data: FinalizeSaleRequest) -> FinalizeSaleResult:
+        """The "New Bill: Save as Sale" action — atomically confirms,
+        fulfills, and invoices a DRAFT sales order, optionally recording a
+        payment too, all as one database transaction (see
+        SalesOrderRepository.finalize_new_bill: if any step fails, nothing
+        is applied — no stock deducted, no invoice/payment created).
+
+        Requires every individual permission each step would need on its
+        own (sales.confirm, sales.fulfill, sales.invoice — and
+        sales.payment too, only when a payment is actually included) —
+        there's no separate umbrella permission for this, deliberately
+        matching how app.security.permissions keeps sales.* granular. A
+        role missing any one of those can't finalize a bill in this single
+        step, exactly as they couldn't complete the equivalent sequence of
+        individual actions on the Sales Orders page either — this is a
+        UI-workflow shortcut, not a new grant of authority.
+        """
+        session = self._sessions.current(now=datetime.now(timezone.utc))
+        for code in ("sales.confirm", "sales.fulfill", "sales.invoice"):
+            check_permission(session, code)
+
+        existing = self._require_sales_order(sales_order_id)
+        if existing.status != SalesOrderStatus.DRAFT:
+            raise SalesOrderValidationError(
+                ["Only a draft sales order can be finalized into a sale."])
+
+        errors = []
+        if data.overall_discount_amount < 0:
+            errors.append("Overall discount cannot be negative.")
+        if data.other_charges < 0:
+            errors.append("Other charges cannot be negative.")
+        if data.payment_amount is not None:
+            check_permission(session, "sales.payment")
+            if data.payment_amount <= 0:
+                errors.append("Payment amount must be greater than zero.")
+            if data.payment_method is None:
+                errors.append("Select a payment method to record a payment.")
+        if errors:
+            raise SalesOrderValidationError(errors)
+
+        return self._sales_orders.finalize_new_bill(
+            self._organization_id(), sales_order_id, self._current_user_id(), data)
 
     @require_permission("sales.refund")
     def record_sales_return(self, sales_order_id: uuid.UUID, sales_order_item_id: uuid.UUID,
