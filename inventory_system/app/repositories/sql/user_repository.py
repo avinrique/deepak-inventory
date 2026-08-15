@@ -37,6 +37,22 @@ def _to_user_out(user: User) -> UserOut:
                    created_at=user.created_at, last_login_at=user.last_login_at)
 
 
+def _apply_profile_updates(user: User, data: UserUpdate) -> None:
+    """Shared by update_profile (admin, org-membership-gated) and
+    update_own_profile (self-service, no membership check needed — the
+    caller *is* the target) so "which fields a profile update can touch"
+    is defined once.
+    """
+    if data.email is not None:
+        user.email = data.email
+    if data.username is not None:
+        user.username = data.username
+    if data.full_name is not None:
+        user.full_name = data.full_name
+    if data.phone is not None:
+        user.phone = data.phone
+
+
 def _to_role_out(role: Role) -> RoleOut:
     return RoleOut(id=role.id, name=role.name, description=role.description,
                    is_system=role.is_system)
@@ -170,14 +186,23 @@ class SqlUserRepository:
             user = db.get(User, user_id)
             if user is None:
                 return None
-            if data.email is not None:
-                user.email = data.email
-            if data.username is not None:
-                user.username = data.username
-            if data.full_name is not None:
-                user.full_name = data.full_name
-            if data.phone is not None:
-                user.phone = data.phone
+            _apply_profile_updates(user, data)
+            db.flush()
+            return _to_user_out(user)
+
+    def update_own_profile(self, user_id: uuid.UUID, data: UserUpdate) -> UserOut | None:
+        """Self-service counterpart to update_profile — no organization-
+        membership check, since that check exists purely to scope an
+        *admin* to their own org's users, and a caller editing themselves
+        is trivially always "in scope". This also correctly covers a
+        superuser with no organization membership at all, who update_profile
+        could never reach (there's no UserOrganization row to look up).
+        """
+        with get_session() as db:
+            user = db.get(User, user_id)
+            if user is None:
+                return None
+            _apply_profile_updates(user, data)
             db.flush()
             return _to_user_out(user)
 

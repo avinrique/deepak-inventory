@@ -273,6 +273,27 @@ def test_change_password_with_correct_old_password_succeeds():
     service.login("owner@acme.test", "new-pass")
 
 
+def test_change_password_records_an_audit_entry_without_the_password_itself():
+    repo = FakeUserRepository()
+    user_id = repo.seed_user("owner@acme.test", "old-pass")
+    service, repo, sessions, audit_log = _service(repo)
+    service.login("owner@acme.test", "old-pass")
+    audit_log.entries.clear()  # drop the login-succeeded entry, isolate this call
+
+    service.change_password("old-pass", "new-pass")
+
+    entries = [e for e in audit_log.entries if e["action"] == "auth.password_changed"]
+    assert len(entries) == 1
+    assert entries[0]["user_id"] == user_id
+    # Never anything password-shaped in the audit trail — not the new
+    # password, not the old one, not either hash.
+    changes = entries[0]["changes"]
+    serialized = str(changes)
+    assert "new-pass" not in serialized
+    assert "old-pass" not in serialized
+    assert "$argon2id$" not in serialized
+
+
 def test_change_password_with_wrong_old_password_rejected():
     repo = FakeUserRepository()
     repo.seed_user("owner@acme.test", "old-pass")

@@ -184,8 +184,28 @@ class FakeUserRepository:
         self.memberships[(user_id, organization_id)] = updated
         return updated
 
+    def get_by_id(self, user_id):
+        profile = self.profiles.get(user_id)
+        if profile is None:
+            return None
+        return UserOut(id=user_id, email=profile["email"], username=profile["username"],
+                      full_name=profile["full_name"], phone=profile["phone"],
+                      is_active=self.active_state.get(user_id, True),
+                      is_superuser=profile["is_superuser"],
+                      must_change_password=profile["must_change_password"],
+                      created_at=profile["created_at"], last_login_at=profile["last_login_at"])
+
+    def update_own_profile(self, user_id, data):
+        if user_id not in self.profiles or user_id in self.missing_user_rows:
+            return None
+        profile = self.profiles[user_id]
+        for field in ("email", "username", "full_name", "phone"):
+            value = getattr(data, field)
+            if value is not None:
+                profile[field] = value
+        return self.get_by_id(user_id)
+
     # unused by UserService but required by the Protocol shape in spirit
-    def get_by_id(self, user_id): raise NotImplementedError
     def get_credentials_by_email(self, email): raise NotImplementedError
     def get_credentials_by_id(self, user_id): raise NotImplementedError
     def list_memberships(self, user_id): raise NotImplementedError
@@ -224,11 +244,11 @@ class FakeOrganizationRepository:
         raise NotImplementedError
 
 
-def _service_as(permissions, repo=None, organization_id=ORG_ID):
+def _service_as(permissions, repo=None, organization_id=ORG_ID, user_id=None):
     repo = repo or FakeUserRepository()
     sessions = SessionManager(idle_timeout=timedelta(minutes=30))
-    sessions.start(user_id=uuid.uuid4(), organization_id=organization_id, role_id=ROLE_ID,
-                   permissions=frozenset(permissions), is_superuser=False,
+    sessions.start(user_id=user_id or uuid.uuid4(), organization_id=organization_id,
+                   role_id=ROLE_ID, permissions=frozenset(permissions), is_superuser=False,
                    must_change_password=False, now=datetime.now(timezone.utc))
     audit_log = FakeAuditLogRepository()
     organizations = FakeOrganizationRepository()
@@ -370,6 +390,77 @@ def test_update_user_outside_the_callers_org_raises_membership_not_found():
     with pytest.raises(MembershipNotFoundError):
         service.update_user(OUTSIDER_USER_ID, UserUpdate(full_name="Hacked"))
     assert repo.profiles[OUTSIDER_USER_ID]["full_name"] == "Outsider Person"  # unchanged
+
+
+# -- update_own_profile ------------------------------------------------------#
+
+def test_update_own_profile_needs_no_permission_at_all():
+    # The whole point: unlike update_user, this isn't gated by users.update
+    # — an empty permission set (e.g. VIEWER/SALES_STAFF) can still edit
+    # their own profile.
+    service, repo, _, audit_log = _service_as(set(), user_id=TARGET_USER_ID)
+    result = service.update_own_profile(UserUpdate(full_name="New Name"))
+    assert result.full_name == "New Name"
+    assert repo.profiles[TARGET_USER_ID]["full_name"] == "New Name"
+    assert any(e["action"] == "user.self_update" for e in audit_log.entries)
+
+
+def test_update_own_profile_applies_only_the_fields_that_were_set():
+    service, _, _, _ = _service_as(set(), user_id=TARGET_USER_ID)
+    result = service.update_own_profile(UserUpdate(phone="9998887777"))
+    assert result.phone == "9998887777"
+    assert result.full_name == "Target Person"  # untouched
+    assert result.email == "target@acme.test"  # untouched
+
+
+def test_update_own_profile_rejects_duplicate_email():
+    service, _, _, _ = _service_as(set(), user_id=TARGET_USER_ID)
+    with pytest.raises(DuplicateEmailError):
+        # owner@acme.test belongs to a different user (OWNER_USER_ID)
+        service.update_own_profile(UserUpdate(email="owner@acme.test"))
+
+
+def test_update_own_profile_rejects_duplicate_username():
+    service, _, _, _ = _service_as(set(), user_id=TARGET_USER_ID)
+    with pytest.raises(DuplicateUsernameError):
+        service.update_own_profile(UserUpdate(username="owner"))
+
+
+def test_update_own_profile_allows_keeping_its_own_current_email():
+    service, _, _, _ = _service_as(set(), user_id=TARGET_USER_ID)
+    result = service.update_own_profile(UserUpdate(email="target@acme.test"))
+    assert result.email == "target@acme.test"
+
+
+def test_update_own_profile_rejects_invalid_phone():
+    service, _, _, _ = _service_as(set(), user_id=TARGET_USER_ID)
+    with pytest.raises(UserValidationError):
+        service.update_own_profile(UserUpdate(phone="not a phone number!!"))
+
+
+def test_update_own_profile_rejects_blank_full_name():
+    service, _, _, _ = _service_as(set(), user_id=TARGET_USER_ID)
+    with pytest.raises(UserValidationError):
+        service.update_own_profile(UserUpdate(full_name="   "))
+
+
+def test_update_own_profile_requires_a_session():
+    repo = FakeUserRepository()
+    sessions = SessionManager(idle_timeout=timedelta(minutes=30))
+    service = UserService(repo, sessions, FakeAuditLogRepository(),
+                          FakeOrganizationRepository())
+    with pytest.raises(NotAuthenticatedError):
+        service.update_own_profile(UserUpdate(full_name="New Name"))
+
+
+def test_update_own_profile_cannot_target_anyone_else():
+    # There's no target_user_id parameter at all — the only way to prove
+    # "can only edit yourself" is that the method signature doesn't accept
+    # one. If this test ever needs updating because a target_id parameter
+    # was added, that's the regression to catch.
+    import inspect
+    signature = inspect.signature(UserService.update_own_profile)
+    assert list(signature.parameters) == ["self", "data"]
 
 
 # -- activate/deactivate -----------------------------------------------------#

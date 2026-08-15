@@ -204,6 +204,11 @@ class AuthService:
                                          hash_password(new_password),
                                          must_change_password=False)
         self._sessions.mark_password_changed()
+        # Records that a change happened, never what the password is (or
+        # was) — the audit entry carries no hash, no plaintext, nothing
+        # password-shaped at all, same as reset_password's audit entry.
+        self._audit(action="auth.password_changed", user_id=session.user_id,
+                   organization_id=session.organization_id, actor_email=None)
 
     def get_current_user(self) -> UserOut:
         """The full profile of whoever is logged in — the one place the UI

@@ -183,14 +183,17 @@ class UserService:
     def list_roles(self) -> list[RoleOut]:
         return self._users.list_roles()
 
-    @require_permission("users.update")
-    def update_user(self, target_user_id: uuid.UUID, data: UserUpdate) -> UserOut:
-        organization_id = self._organization_id()
-        self._require_membership(target_user_id, organization_id)
-        current = self._users.get_user(target_user_id, organization_id)
-        if current is None:  # membership existed a moment ago but the user row is gone
-            raise UserNotFoundError(target_user_id)
-
+    def _resolve_profile_updates(self, current, data: UserUpdate, *,
+                                 exclude_user_id: uuid.UUID) -> dict:
+        """Normalizes and validates a partial UserUpdate against `current`'s
+        existing values — raises UserValidationError/DuplicateEmailError/
+        DuplicateUsernameError. Shared by update_user (admin editing someone
+        else) and update_own_profile (self-service) so what a profile
+        update is allowed to look like is defined in exactly one place
+        regardless of who's making it. `current` only needs .email/
+        .username/.full_name/.phone — a UserSummaryOut or a UserOut both
+        satisfy that structurally.
+        """
         updates = data.model_dump(exclude_unset=True)
         email = normalize_email(updates["email"]) if "email" in updates else current.email
         username = (normalize_username(updates["username"]) if "username" in updates
@@ -202,33 +205,74 @@ class UserService:
         if errors:
             raise UserValidationError(errors)
         if email != current.email and self._users.email_exists(
-                email, exclude_user_id=target_user_id):
+                email, exclude_user_id=exclude_user_id):
             raise DuplicateEmailError(email)
         if username != current.username and self._users.username_exists(
-                username, exclude_user_id=target_user_id):
+                username, exclude_user_id=exclude_user_id):
             raise DuplicateUsernameError(username)
 
         if "email" in updates:
             updates["email"] = email
         if "username" in updates:
             updates["username"] = username
-        result = self._users.update_profile(target_user_id, organization_id,
-                                            UserUpdate(**updates))
-        if result is None:
-            raise UserNotFoundError(target_user_id)
+        return updates
 
+    def _audit_profile_diff(self, *, action: str, target_user_id: uuid.UUID, current, result,
+                            fields) -> None:
         # Only the fields that actually changed — same before/after diff
         # shape as ProductService.update_product's audit entry.
         before, after = {}, {}
-        for field in updates:
+        for field in fields:
             old_value = getattr(current, field)
             new_value = getattr(result, field)
             if old_value != new_value:
                 before[field] = str(old_value)
                 after[field] = str(new_value)
         if before:
-            self._audit(action="user.update", entity_id=target_user_id,
+            self._audit(action=action, entity_id=target_user_id,
                        changes={"before": before, "after": after})
+
+    @require_permission("users.update")
+    def update_user(self, target_user_id: uuid.UUID, data: UserUpdate) -> UserOut:
+        organization_id = self._organization_id()
+        self._require_membership(target_user_id, organization_id)
+        current = self._users.get_user(target_user_id, organization_id)
+        if current is None:  # membership existed a moment ago but the user row is gone
+            raise UserNotFoundError(target_user_id)
+
+        updates = self._resolve_profile_updates(current, data, exclude_user_id=target_user_id)
+        result = self._users.update_profile(target_user_id, organization_id,
+                                            UserUpdate(**updates))
+        if result is None:
+            raise UserNotFoundError(target_user_id)
+
+        self._audit_profile_diff(action="user.update", target_user_id=target_user_id,
+                                 current=current, result=result, fields=updates)
+        return result
+
+    def update_own_profile(self, data: UserUpdate) -> UserOut:
+        """Self-service profile edit — any authenticated user may update
+        their own full_name/username/email/phone, no users.update
+        permission required (that permission gates an *admin* editing
+        someone else's account; editing your own needs nothing beyond
+        being logged in, same as change_password). Reuses
+        _resolve_profile_updates, the exact validation/duplicate-check
+        rules update_user enforces for admin edits, so a profile can't end
+        up looking different depending on who edited it.
+        """
+        session = self._sessions.current(now=datetime.now(timezone.utc))
+        target_user_id = session.user_id
+        current = self._users.get_by_id(target_user_id)
+        if current is None:
+            raise UserNotFoundError(target_user_id)
+
+        updates = self._resolve_profile_updates(current, data, exclude_user_id=target_user_id)
+        result = self._users.update_own_profile(target_user_id, UserUpdate(**updates))
+        if result is None:
+            raise UserNotFoundError(target_user_id)
+
+        self._audit_profile_diff(action="user.self_update", target_user_id=target_user_id,
+                                 current=current, result=result, fields=updates)
         return result
 
     @require_permission("users.update")

@@ -1,25 +1,18 @@
 """User profile button + dropdown menu in the header: shows who's logged in
-and their role, with Change Password / Log Out actions. The menu itself is
-a QMenu, so it's already keyboard-navigable (arrows, Enter, Escape) with no
-extra work.
+and their role, with My Profile / Change Password / Log Out actions. The
+menu itself is a QMenu, so it's already keyboard-navigable (arrows, Enter,
+Escape) with no extra work.
 """
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QMenu, QToolButton, QVBoxLayout, QWidget
 
-from app.ui.theme import ACCENT, MUTED, TEXT
-
-
-def _initials(full_name: str) -> str:
-    parts = [p for p in full_name.strip().split() if p]
-    if not parts:
-        return "?"
-    if len(parts) == 1:
-        return parts[0][:2].upper()
-    return (parts[0][0] + parts[-1][0]).upper()
+from app.ui.theme import MUTED, TEXT
+from app.ui.widgets.avatar import AvatarLabel
 
 
 class UserMenu(QWidget):
     change_password_requested = Signal()
+    profile_requested = Signal()
     logout_requested = Signal()
 
     def __init__(self, full_name: str, role_label: str):
@@ -28,14 +21,7 @@ class UserMenu(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
 
-        avatar = QLabel(_initials(full_name))
-        avatar.setFixedSize(34, 34)
-        avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        avatar.setStyleSheet(f"""
-            background: {ACCENT}; color: white; border-radius: 17px;
-            font-size: 12px; font-weight: 700;
-        """)
-        layout.addWidget(avatar)
+        layout.addWidget(AvatarLabel(full_name, size=34, font_size=12))
 
         text_box = QVBoxLayout()
         text_box.setSpacing(0)
@@ -54,6 +40,8 @@ class UserMenu(QWidget):
         self._button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
 
         menu = QMenu(self._button)
+        profile_action = menu.addAction("My Profile")
+        profile_action.triggered.connect(self.profile_requested.emit)
         change_password_action = menu.addAction("Change Password")
         change_password_action.triggered.connect(self.change_password_requested.emit)
         menu.addSeparator()

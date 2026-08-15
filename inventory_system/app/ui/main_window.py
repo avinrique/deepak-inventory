@@ -49,6 +49,7 @@ _logger = logging.getLogger(__name__)
 
 MODULES = [
     SidebarModule("dashboard", "Dashboard", "🏠"),
+    SidebarModule("profile", "My Profile", "🙍"),
     SidebarModule("products", "Products", "📦"),
     SidebarModule("inventory", "Inventory", "📊"),
     SidebarModule("warehouses", "Warehouses", "🏬"),
@@ -127,6 +128,12 @@ class MainWindow(QMainWindow):
         self._header.user_menu.logout_requested.connect(self._on_logout_requested)
         self._header.user_menu.change_password_requested.connect(
             self._on_change_password_requested)
+        # Reuses the exact same navigation path the sidebar's own "My
+        # Profile" entry uses — select() drives the sidebar's
+        # currentRowChanged, already wired to _on_module_selected below —
+        # rather than duplicating "switch to the profile page" here.
+        self._header.user_menu.profile_requested.connect(
+            lambda: self._sidebar.select("profile"))
         right_layout.addWidget(self._header)
 
         self._content = QStackedWidget()
@@ -136,6 +143,12 @@ class MainWindow(QMainWindow):
             page = _build_page(module.key, container)
             self._pages[module.key] = page
             self._content.addWidget(page)
+            if module.key == "profile":
+                # Reuses the exact same confirm+logout+session_ended
+                # sequence the header's Log Out already goes through —
+                # ProfilePage only ever emits the request, it never
+                # confirms or logs out on its own.
+                page.logout_requested.connect(self._on_logout_requested)
         right_layout.addWidget(self._content, stretch=1)
 
         self._status_bar = self.statusBar()
@@ -253,6 +266,9 @@ def _build_page(key: str, container: Container) -> QWidget:
     if key == "dashboard":
         from app.ui.pages.dashboard_page import DashboardPage
         return DashboardPage(container.reporting_service())
+    if key == "profile":
+        from app.ui.pages.profile_page import ProfilePage
+        return ProfilePage(container.auth_service(), container.user_service())
     if key == "inventory":
         from app.ui.pages.inventory_page import InventoryPage
         return InventoryPage(container.stock_service(), container.inventory_service(),

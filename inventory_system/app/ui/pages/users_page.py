@@ -25,7 +25,6 @@ from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
     QHeaderView,
-    QLabel,
     QLineEdit,
     QMenu,
     QMessageBox,
@@ -48,8 +47,9 @@ from app.schemas.user import RoleOut, UserSummaryOut
 from app.security.session import SessionManager
 from app.services.user_service import UserService
 from app.ui import permission_hints
-from app.ui.theme import ACCENT, GREEN, MUTED, RED
+from app.ui.theme import GREEN, MUTED, RED
 from app.ui.widgets.async_content import AsyncContentArea
+from app.ui.widgets.avatar import AvatarLabel
 from app.ui.widgets.change_user_role_dialog import ChangeUserRoleDialog
 from app.ui.widgets.combo_utils import select_by_data
 from app.ui.widgets.confirm_dialog import confirm
@@ -77,15 +77,6 @@ class _UsersPageResult(NamedTuple):
     page: int
     total_pages: int
     total: int
-
-
-def _initials(full_name: str) -> str:
-    parts = [p for p in full_name.strip().split() if p]
-    if not parts:
-        return "?"
-    if len(parts) == 1:
-        return parts[0][:2].upper()
-    return (parts[0][0] + parts[-1][0]).upper()
 
 
 class UsersPage(QWidget):
@@ -325,14 +316,7 @@ class UsersPage(QWidget):
         holder = QWidget()
         layout = QHBoxLayout(holder)
         layout.setContentsMargins(12, 0, 0, 0)
-        avatar = QLabel(_initials(user.full_name))
-        avatar.setFixedSize(30, 30)
-        avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        avatar.setStyleSheet(f"""
-            background: {ACCENT}; color: white; border-radius: 15px;
-            font-size: 11px; font-weight: 700;
-        """)
-        layout.addWidget(avatar)
+        layout.addWidget(AvatarLabel(user.full_name, size=30, font_size=11))
         layout.addStretch()
         return holder
 
