@@ -35,6 +35,7 @@ from app.core.exceptions import (
     DuplicateInvoiceError,
     InvalidSalesOrderTransitionError,
     InvoiceNotFoundError,
+    OverpaymentError,
     SalesOrderItemNotFoundError,
     SalesOrderNotFoundError,
     SalesOrderValidationError,
@@ -417,9 +418,27 @@ class SqlSalesOrderRepository:
     def record_payment(self, organization_id: uuid.UUID, data: PaymentRequest,
                       recorded_by: uuid.UUID) -> PaymentOut:
         with get_session() as db:
-            invoice = db.get(Invoice, data.invoice_id)
+            # Locks the Invoice row *before* reading existing payments or
+            # inserting the new one, so two concurrent record_payment calls
+            # against the same invoice are fully serialized — the second
+            # caller blocks until the first commits, and then sees the
+            # first payment's effect on the outstanding balance. Locking
+            # only the Payment rows (the previous approach) doesn't close
+            # this: with zero existing payments there's nothing yet to
+            # lock, so two concurrent *first* payments could each
+            # independently pass an outstanding-balance check that, taken
+            # together, overpays the invoice.
+            invoice = (db.query(Invoice).filter_by(id=data.invoice_id)
+                      .with_for_update().first())
             if invoice is None or invoice.organization_id != organization_id:
                 raise InvoiceNotFoundError(data.invoice_id)
+
+            already_paid = sum(
+                (p.amount for p in db.query(Payment).filter_by(invoice_id=invoice.id).all()),
+                Decimal("0"))
+            outstanding = invoice.total_amount - already_paid
+            if data.amount > outstanding:
+                raise OverpaymentError(data.amount, outstanding)
 
             payment = Payment(organization_id=organization_id, invoice_id=invoice.id,
                              amount=data.amount, method=data.method,
@@ -427,15 +446,7 @@ class SqlSalesOrderRepository:
             db.add(payment)
             db.flush()
 
-            # Locks every payment row for this invoice (including the one
-            # just inserted) so two concurrent record_payment calls against
-            # the same invoice can't both compute a stale sum and both
-            # decide independently that the invoice isn't fully paid yet.
-            payment_rows = (db.query(Payment)
-                           .filter_by(invoice_id=invoice.id)
-                           .with_for_update()
-                           .all())
-            paid_sum = sum((p.amount for p in payment_rows), Decimal("0"))
+            paid_sum = already_paid + data.amount
             if paid_sum >= invoice.total_amount:
                 so = (db.query(SalesOrder).filter_by(id=invoice.sales_order_id)
                      .with_for_update().first())

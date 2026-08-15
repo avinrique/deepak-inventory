@@ -13,6 +13,7 @@ from decimal import Decimal
 import pytest
 from sqlalchemy.exc import IntegrityError
 
+from app.core.exceptions import DuplicateBarcodeError, DuplicateSkuError
 from app.database.session import get_session
 from app.domain.product import ProductStatus
 from app.models import Organization, Unit
@@ -58,7 +59,7 @@ def test_duplicate_sku_within_same_org_rejected(org_and_unit):
     org_id, unit_id = org_and_unit
     repo = SqlProductRepository()
     repo.create(org_id, _product("SKU-1", unit_id))
-    with pytest.raises(IntegrityError):
+    with pytest.raises(DuplicateSkuError):
         repo.create(org_id, _product("SKU-1", unit_id))
 
 
@@ -85,7 +86,7 @@ def test_barcode_unique_only_when_present(org_and_unit):
     repo.create(org_id, _product("SKU-1", unit_id, barcode=None))
     repo.create(org_id, _product("SKU-2", unit_id, barcode=None))  # two NULLs: fine
     repo.create(org_id, _product("SKU-3", unit_id, barcode="111"))
-    with pytest.raises(IntegrityError):
+    with pytest.raises(DuplicateBarcodeError):
         repo.create(org_id, _product("SKU-4", unit_id, barcode="111"))
 
 

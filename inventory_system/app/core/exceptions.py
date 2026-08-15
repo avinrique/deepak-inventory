@@ -83,6 +83,30 @@ class DuplicateWarehouseCodeError(AppError):
         super().__init__(f"Warehouse code {code!r} already exists")
 
 
+class DuplicateCategoryNameError(AppError):
+    def __init__(self, name: str):
+        self.name = name
+        super().__init__(f"Category {name!r} already exists")
+
+
+class DuplicateBrandNameError(AppError):
+    def __init__(self, name: str):
+        self.name = name
+        super().__init__(f"Brand {name!r} already exists")
+
+
+class DuplicateUnitError(AppError):
+    """Raised for either a duplicate unit name or a duplicate abbreviation
+    — both are separately unique-constrained (ix_units_org_name/
+    ix_units_org_abbreviation), but the message stays generic rather than
+    parsing the DB driver's constraint-name text out of the error, which
+    is fragile across Postgres/psycopg versions.
+    """
+    def __init__(self, name: str):
+        self.name = name
+        super().__init__(f"Unit {name!r} already exists (name or abbreviation in use)")
+
+
 class InventoryValidationError(AppError):
     def __init__(self, errors: list[str]):
         self.errors = errors
@@ -202,6 +226,20 @@ class DuplicateInvoiceError(AppError):
     def __init__(self, sales_order_id):
         self.sales_order_id = sales_order_id
         super().__init__(f"Sales order {sales_order_id!r} already has an invoice")
+
+
+class OverpaymentError(AppError):
+    """Raised when a payment would exceed an invoice's outstanding balance
+    — SalesOrderRepository.record_payment locks the Invoice row and checks
+    this before inserting the Payment row, so two concurrent payments
+    against the same invoice can't jointly overpay it either (see that
+    method's docstring).
+    """
+    def __init__(self, amount: Decimal, outstanding_balance: Decimal):
+        self.amount = amount
+        self.outstanding_balance = outstanding_balance
+        super().__init__(
+            f"Payment of {amount} exceeds the outstanding balance of {outstanding_balance}")
 
 
 class OrganizationNotFoundError(AppError):

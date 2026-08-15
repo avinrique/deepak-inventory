@@ -23,6 +23,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.core.exceptions import (
+    DuplicateBrandNameError,
+    DuplicateCategoryNameError,
+    DuplicateUnitError,
+)
 from app.ui.theme import RED
 from app.ui.widgets.confirm_dialog import confirm
 from app.workers.base_worker import Worker
@@ -160,7 +165,11 @@ class CrudListPanel(QWidget):
     def _on_save_error(self, exc: Exception) -> None:
         self._save_button.setEnabled(True)
         _logger.exception("Couldn't save catalog item", exc_info=exc)
-        self._show_error("Couldn't save — that name may already be in use.")
+        if isinstance(exc, (DuplicateCategoryNameError, DuplicateBrandNameError,
+                            DuplicateUnitError)):
+            self._show_error(str(exc))
+        else:
+            self._show_error("Couldn't save — that name may already be in use.")
 
     def _delete(self) -> None:
         if self._selected_id is None:

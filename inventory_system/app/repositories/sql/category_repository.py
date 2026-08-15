@@ -3,9 +3,15 @@ equivalent (categories are a new capability the legacy app never had).
 """
 import uuid
 
+from sqlalchemy.exc import IntegrityError
+
+from app.core.exceptions import DuplicateCategoryNameError
 from app.database.session import get_session
 from app.models import Category
+from app.repositories.sql.constraint_utils import constraint_name
 from app.schemas.product import CategoryCreate, CategoryOut
+
+_UNIQUE_NAME_CONSTRAINT = "ix_categories_org_name"
 
 
 def _to_out(category: Category) -> CategoryOut:
@@ -18,7 +24,12 @@ class SqlCategoryRepository:
             category = Category(organization_id=organization_id, name=data.name,
                                description=data.description)
             db.add(category)
-            db.flush()
+            try:
+                db.flush()
+            except IntegrityError as exc:
+                if constraint_name(exc) == _UNIQUE_NAME_CONSTRAINT:
+                    raise DuplicateCategoryNameError(data.name) from exc
+                raise
             return _to_out(category)
 
     def update(self, organization_id: uuid.UUID, category_id: uuid.UUID,
@@ -29,7 +40,12 @@ class SqlCategoryRepository:
                 return None
             category.name = data.name
             category.description = data.description
-            db.flush()
+            try:
+                db.flush()
+            except IntegrityError as exc:
+                if constraint_name(exc) == _UNIQUE_NAME_CONSTRAINT:
+                    raise DuplicateCategoryNameError(data.name) from exc
+                raise
             return _to_out(category)
 
     def delete(self, organization_id: uuid.UUID, category_id: uuid.UUID) -> None:

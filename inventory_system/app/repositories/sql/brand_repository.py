@@ -1,9 +1,15 @@
 """SQLAlchemy-backed BrandRepository — mirrors category_repository.py."""
 import uuid
 
+from sqlalchemy.exc import IntegrityError
+
+from app.core.exceptions import DuplicateBrandNameError
 from app.database.session import get_session
 from app.models import Brand
+from app.repositories.sql.constraint_utils import constraint_name
 from app.schemas.product import BrandCreate, BrandOut
+
+_UNIQUE_NAME_CONSTRAINT = "ix_brands_org_name"
 
 
 def _to_out(brand: Brand) -> BrandOut:
@@ -16,7 +22,12 @@ class SqlBrandRepository:
             brand = Brand(organization_id=organization_id, name=data.name,
                          description=data.description)
             db.add(brand)
-            db.flush()
+            try:
+                db.flush()
+            except IntegrityError as exc:
+                if constraint_name(exc) == _UNIQUE_NAME_CONSTRAINT:
+                    raise DuplicateBrandNameError(data.name) from exc
+                raise
             return _to_out(brand)
 
     def update(self, organization_id: uuid.UUID, brand_id: uuid.UUID,
@@ -27,7 +38,12 @@ class SqlBrandRepository:
                 return None
             brand.name = data.name
             brand.description = data.description
-            db.flush()
+            try:
+                db.flush()
+            except IntegrityError as exc:
+                if constraint_name(exc) == _UNIQUE_NAME_CONSTRAINT:
+                    raise DuplicateBrandNameError(data.name) from exc
+                raise
             return _to_out(brand)
 
     def delete(self, organization_id: uuid.UUID, brand_id: uuid.UUID) -> None:

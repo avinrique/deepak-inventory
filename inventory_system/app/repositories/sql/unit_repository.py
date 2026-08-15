@@ -1,9 +1,15 @@
 """SQLAlchemy-backed UnitRepository — mirrors category_repository.py."""
 import uuid
 
+from sqlalchemy.exc import IntegrityError
+
+from app.core.exceptions import DuplicateUnitError
 from app.database.session import get_session
 from app.models import Unit
+from app.repositories.sql.constraint_utils import constraint_name
 from app.schemas.product import UnitCreate, UnitOut
+
+_UNIQUE_CONSTRAINTS = {"ix_units_org_name", "ix_units_org_abbreviation"}
 
 
 def _to_out(unit: Unit) -> UnitOut:
@@ -16,7 +22,12 @@ class SqlUnitRepository:
             unit = Unit(organization_id=organization_id, name=data.name,
                        abbreviation=data.abbreviation)
             db.add(unit)
-            db.flush()
+            try:
+                db.flush()
+            except IntegrityError as exc:
+                if constraint_name(exc) in _UNIQUE_CONSTRAINTS:
+                    raise DuplicateUnitError(data.name) from exc
+                raise
             return _to_out(unit)
 
     def update(self, organization_id: uuid.UUID, unit_id: uuid.UUID,
@@ -27,7 +38,12 @@ class SqlUnitRepository:
                 return None
             unit.name = data.name
             unit.abbreviation = data.abbreviation
-            db.flush()
+            try:
+                db.flush()
+            except IntegrityError as exc:
+                if constraint_name(exc) in _UNIQUE_CONSTRAINTS:
+                    raise DuplicateUnitError(data.name) from exc
+                raise
             return _to_out(unit)
 
     def delete(self, organization_id: uuid.UUID, unit_id: uuid.UUID) -> None:

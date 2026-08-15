@@ -248,6 +248,9 @@ class SettingsPage(QWidget):
         worker = Worker(self._inventory_service.list_warehouses)
         worker.signals.finished.connect(
             lambda whs: self._on_warehouses_loaded(whs, warehouse_combo, org.default_warehouse_id))
+        worker.signals.error.connect(
+            lambda exc: _logger.exception("Failed to load warehouses for Settings",
+                                          exc_info=exc))
         QThreadPool.globalInstance().start(worker)
 
         low_stock_combo = QComboBox()
@@ -419,6 +422,9 @@ class _LogoEditor(QWidget):
         if org.has_logo:
             worker = Worker(self._organization_service.get_logo)
             worker.signals.finished.connect(self._on_logo_loaded)
+            worker.signals.error.connect(
+                lambda exc: _logger.exception("Failed to load organization logo",
+                                              exc_info=exc))
             QThreadPool.globalInstance().start(worker)
 
     def _on_logo_loaded(self, result: tuple[bytes, str | None] | None) -> None:

@@ -8,8 +8,12 @@ never leak past this module — Services only ever see app.schemas types.
 import uuid
 from datetime import datetime
 
+from sqlalchemy.exc import IntegrityError
+
+from app.core.exceptions import DuplicateEmailError, DuplicateUsernameError
 from app.database.session import get_session
 from app.models import Role, User, UserOrganization
+from app.repositories.sql.constraint_utils import constraint_name
 from app.schemas.user import (
     MembershipOut,
     RoleOut,
@@ -163,9 +167,18 @@ class SqlUserRepository:
                        full_name=full_name, phone=phone, hashed_password=hashed_password,
                        is_active=is_active)
             db.add(user)
-            db.flush()  # user.id is populated client-side already, but this
-                        # also surfaces a duplicate-email/-username IntegrityError
-                        # here rather than on some later, harder-to-attribute flush
+            try:
+                # user.id is populated client-side already, but this also
+                # surfaces a duplicate-email/-username IntegrityError here
+                # rather than on some later, harder-to-attribute flush.
+                # UserService pre-checks email_exists/username_exists
+                # before calling here for the common case — this catch is
+                # the fallback for the rare concurrent-duplicate race.
+                db.flush()
+            except IntegrityError as exc:
+                if constraint_name(exc) == "ix_users_username":
+                    raise DuplicateUsernameError(username) from exc
+                raise DuplicateEmailError(email) from exc
             db.add(UserOrganization(user_id=user.id, organization_id=organization_id,
                                     role_id=role_id, is_default=is_default))
             db.flush()

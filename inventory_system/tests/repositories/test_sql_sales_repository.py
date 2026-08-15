@@ -16,6 +16,7 @@ from decimal import Decimal
 
 import pytest
 
+from app.core.exceptions import OverpaymentError
 from app.database.session import get_session
 from app.domain.sales import PaymentMethod, SalesOrderStatus
 from app.models import AuditLog, Customer, Inventory, Organization, Product, Unit, User, Warehouse
@@ -564,6 +565,94 @@ def test_payment_amount_is_decimal_not_float(world):
                                                 method=PaymentMethod.CASH),
                                   world["user_id"])
     assert isinstance(payment.amount, Decimal)
+
+
+def test_single_payment_exceeding_invoice_total_is_rejected(world):
+    repo = _repo()
+    so = _fulfilled_so(world, quantity=Decimal("10"), unit_price=Decimal("100"),
+                       tax_percent=Decimal("0"))
+    invoice = repo.generate_invoice(world["org_id"], so.id, world["user_id"])
+
+    with pytest.raises(OverpaymentError):
+        repo.record_payment(world["org_id"],
+                           PaymentRequest(invoice_id=invoice.id, amount=Decimal("1000.01"),
+                                         method=PaymentMethod.CASH), world["user_id"])
+
+    # Nothing was recorded — the invoice's outstanding balance is untouched.
+    doc = repo.get_invoice_document(world["org_id"], invoice.id)
+    assert doc.amount_paid == Decimal("0")
+
+
+def test_installment_payment_exceeding_remaining_balance_is_rejected(world):
+    repo = _repo()
+    so = _fulfilled_so(world, quantity=Decimal("10"), unit_price=Decimal("100"),
+                       tax_percent=Decimal("0"))
+    invoice = repo.generate_invoice(world["org_id"], so.id, world["user_id"])
+
+    repo.record_payment(world["org_id"],
+                        PaymentRequest(invoice_id=invoice.id, amount=Decimal("600"),
+                                      method=PaymentMethod.CASH), world["user_id"])
+
+    # Only 400 remains outstanding — 400.01 must be rejected even though
+    # it's well under the invoice's original total of 1000.
+    with pytest.raises(OverpaymentError):
+        repo.record_payment(world["org_id"],
+                           PaymentRequest(invoice_id=invoice.id, amount=Decimal("400.01"),
+                                         method=PaymentMethod.CASH), world["user_id"])
+
+    assert repo.get_by_id(world["org_id"], so.id).status == SalesOrderStatus.FULFILLED
+
+
+def test_payment_of_exactly_the_remaining_balance_is_accepted(world):
+    repo = _repo()
+    so = _fulfilled_so(world, quantity=Decimal("10"), unit_price=Decimal("100"),
+                       tax_percent=Decimal("0"))
+    invoice = repo.generate_invoice(world["org_id"], so.id, world["user_id"])
+    repo.record_payment(world["org_id"],
+                        PaymentRequest(invoice_id=invoice.id, amount=Decimal("600"),
+                                      method=PaymentMethod.CASH), world["user_id"])
+
+    repo.record_payment(world["org_id"],
+                        PaymentRequest(invoice_id=invoice.id, amount=Decimal("400"),
+                                      method=PaymentMethod.CASH), world["user_id"])
+
+    assert repo.get_by_id(world["org_id"], so.id).status == SalesOrderStatus.COMPLETED
+
+
+def test_concurrent_payments_cannot_jointly_overpay_an_invoice(world):
+    # Two threads each try to pay 700 against a 1000 invoice at the same
+    # moment (1400 combined > 1000). The Invoice-row lock in
+    # record_payment must serialize them: the second to acquire the lock
+    # sees the first payment's effect and gets rejected as an
+    # overpayment, rather than both succeeding.
+    repo = _repo()
+    so = _fulfilled_so(world, quantity=Decimal("10"), unit_price=Decimal("100"),
+                       tax_percent=Decimal("0"))
+    invoice = repo.generate_invoice(world["org_id"], so.id, world["user_id"])
+
+    results = []
+    barrier = threading.Barrier(2)
+
+    def attempt():
+        barrier.wait()
+        try:
+            repo.record_payment(
+                world["org_id"],
+                PaymentRequest(invoice_id=invoice.id, amount=Decimal("700"),
+                              method=PaymentMethod.CASH), world["user_id"])
+            results.append("ok")
+        except OverpaymentError:
+            results.append("rejected")
+
+    threads = [threading.Thread(target=attempt) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert sorted(results) == ["ok", "rejected"]
+    doc = repo.get_invoice_document(world["org_id"], invoice.id)
+    assert doc.amount_paid == Decimal("700")  # exactly one payment landed
 
 
 # -- sales returns ----------------------------------------------------------#

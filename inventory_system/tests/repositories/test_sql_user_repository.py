@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from app.core.exceptions import InvalidCredentialsError
+from app.core.exceptions import DuplicateEmailError, DuplicateUsernameError, InvalidCredentialsError
 from app.database.session import get_session
 from app.models import AuditLog, Organization, Permission, Role, RolePermission, User
 from app.repositories.sql.audit_log_repository import SqlAuditLogRepository
@@ -75,6 +75,32 @@ def test_create_user_then_login_end_to_end(org_and_role):
     session = AuthService(users, login_sessions, SqlAuditLogRepository(), SqlOrganizationRepository()).login("staff@acme.test", "s3cret!1")
     assert session.organization_id == org_id
     assert session.permissions == frozenset({"sales.create"})
+
+
+def test_repository_translates_duplicate_email_into_a_clean_exception(org_and_role):
+    # Calls SqlUserRepository directly (bypassing UserService's own
+    # email_exists pre-check) to prove the repository-level fallback for
+    # the rare concurrent-duplicate race also translates cleanly, rather
+    # than leaking a raw IntegrityError.
+    org_id, role_id = org_and_role
+    users = SqlUserRepository()
+    users.create_user(email="dup@acme.test", full_name="First", hashed_password="x",
+                      organization_id=org_id, role_id=role_id, username="first")
+
+    with pytest.raises(DuplicateEmailError):
+        users.create_user(email="dup@acme.test", full_name="Second", hashed_password="x",
+                          organization_id=org_id, role_id=role_id, username="second")
+
+
+def test_repository_translates_duplicate_username_into_a_clean_exception(org_and_role):
+    org_id, role_id = org_and_role
+    users = SqlUserRepository()
+    users.create_user(email="one@acme.test", full_name="First", hashed_password="x",
+                      organization_id=org_id, role_id=role_id, username="dupname")
+
+    with pytest.raises(DuplicateUsernameError):
+        users.create_user(email="two@acme.test", full_name="Second", hashed_password="x",
+                          organization_id=org_id, role_id=role_id, username="dupname")
 
 
 def test_login_rejects_wrong_password_against_real_db(org_and_role):

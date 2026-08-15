@@ -8,10 +8,13 @@ it's given, and translates ORM rows to schemas.
 import uuid
 
 from sqlalchemy import or_
+from sqlalchemy.exc import IntegrityError
 
+from app.core.exceptions import DuplicateBarcodeError, DuplicateSkuError
 from app.database.session import get_session
 from app.domain.product import ProductStatus
 from app.models import Product
+from app.repositories.sql.constraint_utils import constraint_name
 from app.schemas.product import (
     BrandOut,
     CategoryOut,
@@ -60,7 +63,23 @@ class SqlProductRepository:
                              selling_price=data.selling_price, tax_percent=data.tax_percent,
                              minimum_stock_level=data.minimum_stock_level)
             db.add(product)
-            db.flush()
+            try:
+                db.flush()
+            except IntegrityError as exc:
+                # ProductService pre-checks sku_exists/barcode_exists before
+                # calling here, which handles the common case — this is
+                # the fallback for the rare race where two concurrent
+                # creates both pass that pre-check for the same SKU/
+                # barcode before either has committed. Only translate the
+                # two constraints this class actually owns — anything else
+                # (e.g. the negative-price CHECK constraint) must keep
+                # raising as-is, not get mislabeled as a duplicate.
+                name = constraint_name(exc)
+                if name == "ix_products_org_barcode":
+                    raise DuplicateBarcodeError(data.barcode) from exc
+                if name == "ix_products_org_sku":
+                    raise DuplicateSkuError(data.sku) from exc
+                raise
             return _to_out(product)
 
     def update(self, organization_id: uuid.UUID, product_id: uuid.UUID,
@@ -71,7 +90,15 @@ class SqlProductRepository:
                 return None
             for field, value in data.model_dump(exclude_unset=True).items():
                 setattr(product, field, value)
-            db.flush()
+            try:
+                db.flush()
+            except IntegrityError as exc:
+                name = constraint_name(exc)
+                if name == "ix_products_org_barcode":
+                    raise DuplicateBarcodeError(product.barcode) from exc
+                if name == "ix_products_org_sku":
+                    raise DuplicateSkuError(product.sku) from exc
+                raise
             return _to_out(product)
 
     def get_by_id(self, organization_id: uuid.UUID,
