@@ -21,6 +21,23 @@ class InvalidCredentialsError(AppError):
         super().__init__("Invalid email or password")
 
 
+class AccountLockedError(AppError):
+    """Raised by AuthService.login instead of InvalidCredentialsError once
+    too many failed attempts have been made for an email in a short window
+    — see AuthService's module docstring for the lockout policy. Distinct
+    from InvalidCredentialsError so the UI can tell someone who already
+    knows they've been guessing wrong how long to wait, without that
+    message ever appearing for a first wrong guess (which stays a generic
+    "invalid credentials", revealing nothing about account existence).
+    """
+    def __init__(self, retry_after_seconds: int):
+        self.retry_after_seconds = retry_after_seconds
+        minutes = max(1, round(retry_after_seconds / 60))
+        super().__init__(
+            f"Too many failed login attempts. Try again in {minutes} minute"
+            f"{'s' if minutes != 1 else ''}.")
+
+
 class AmbiguousOrganizationError(AppError):
     """The user belongs to more than one organization and none is marked
     as their default — the caller must specify organization_id."""

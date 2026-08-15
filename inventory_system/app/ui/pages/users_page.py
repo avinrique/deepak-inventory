@@ -51,6 +51,7 @@ from app.services.user_service import UserService
 from app.ui.theme import ACCENT, GREEN, MUTED, RED
 from app.ui.widgets.async_content import AsyncContentArea
 from app.ui.widgets.change_user_role_dialog import ChangeUserRoleDialog
+from app.ui.widgets.combo_utils import select_by_data
 from app.ui.widgets.confirm_dialog import confirm
 from app.ui.widgets.page_header import PageHeader
 from app.ui.widgets.pagination_bar import PaginationBar
@@ -200,9 +201,7 @@ class UsersPage(QWidget):
         self._role_filter.addItem("All Roles", None)
         for role in roles:
             self._role_filter.addItem(role.name, role.id)
-        index = self._role_filter.findData(previous)
-        if index >= 0:
-            self._role_filter.setCurrentIndex(index)
+        select_by_data(self._role_filter, previous)
 
     def _on_organization_loaded(self, organization) -> None:
         self._password_policy = PasswordPolicy(

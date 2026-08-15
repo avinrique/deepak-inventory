@@ -18,19 +18,38 @@ change_password's new_password is checked against the organization's
 password policy (app.domain.security_policy) before being accepted.
 UserService.create_user enforces the same policy for admin-created
 accounts — see that module.
+
+Failed-login lockout: after _LOCKOUT_THRESHOLD failed attempts for the same
+(normalized) email within _LOCKOUT_WINDOW, further attempts for that email
+are rejected with AccountLockedError for _LOCKOUT_DURATION — tracked
+in-memory on this instance rather than a User column, consistent with
+SessionManager's own "one process, in-memory" state for this desktop app
+(see security/session.py's docstring). Tracked by email regardless of
+whether it belongs to a real account, so an attacker can't distinguish
+"unknown email" from "real email, now locked" any faster than they could
+already tell "unknown email" from "wrong password" — both already raise
+the same generic InvalidCredentialsError before lockout kicks in.
 """
 import uuid
 from datetime import datetime, timedelta, timezone
 
 from app.core.exceptions import (
+    AccountLockedError,
     AmbiguousOrganizationError,
     InvalidCredentialsError,
     PasswordPolicyViolationError,
+    UserNotFoundError,
 )
 from app.domain.security_policy import PasswordPolicy, validate_password
+from app.domain.user import normalize_email
 from app.repositories.interfaces import AuditLogRepository, OrganizationRepository, UserRepository
+from app.schemas.user import MembershipOut, UserOut
 from app.security.passwords import hash_password, needs_rehash, verify_password
 from app.security.session import Session, SessionManager
+
+_LOCKOUT_THRESHOLD = 5
+_LOCKOUT_WINDOW = timedelta(minutes=15)
+_LOCKOUT_DURATION = timedelta(minutes=15)
 
 
 class AuthService:
@@ -40,6 +59,7 @@ class AuthService:
         self._sessions = sessions
         self._audit_log = audit_log
         self._organizations = organizations
+        self._failed_attempts: dict[str, list[datetime]] = {}
 
     def _audit(self, *, action: str, user_id: uuid.UUID | None,
               organization_id: uuid.UUID | None, actor_email: str | None,
@@ -49,28 +69,63 @@ class AuthService:
                                action=action, entity_type="user", entity_id=user_id,
                                changes=changes)
 
+    def _recent_failures(self, key: str, now: datetime) -> list[datetime]:
+        cutoff = now - _LOCKOUT_WINDOW
+        recent = [t for t in self._failed_attempts.get(key, []) if t > cutoff]
+        self._failed_attempts[key] = recent
+        return recent
+
+    def _seconds_locked(self, key: str, now: datetime) -> int | None:
+        recent = self._recent_failures(key, now)
+        if len(recent) < _LOCKOUT_THRESHOLD:
+            return None
+        locked_until = recent[-1] + _LOCKOUT_DURATION
+        if now >= locked_until:
+            return None
+        return int((locked_until - now).total_seconds())
+
+    def _record_failure(self, key: str, now: datetime) -> None:
+        self._recent_failures(key, now)
+        self._failed_attempts.setdefault(key, []).append(now)
+
+    def _clear_failures(self, key: str) -> None:
+        self._failed_attempts.pop(key, None)
+
     def login(self, email: str, password: str,
              organization_id: uuid.UUID | None = None) -> Session:
         now = datetime.now(timezone.utc)
+        lockout_key = normalize_email(email)
+
+        seconds_locked = self._seconds_locked(lockout_key, now)
+        if seconds_locked is not None:
+            self._audit(action="auth.login_blocked_lockout", user_id=None,
+                       organization_id=None, actor_email=email)
+            raise AccountLockedError(seconds_locked)
+
         credentials = self._users.get_credentials_by_email(email)
 
         # Verify against *something* even when the email is unknown, so a
         # timing difference doesn't reveal account existence.
         if credentials is None:
             verify_password(password, hash_password("decoy-password-for-timing"))
+            self._record_failure(lockout_key, now)
             self._audit(action="auth.login_failed", user_id=None, organization_id=None,
                        actor_email=email, changes={"reason": "unknown_email"})
             raise InvalidCredentialsError()
         if not credentials.is_active:
+            self._record_failure(lockout_key, now)
             self._audit(action="auth.login_failed", user_id=credentials.id,
                        organization_id=None, actor_email=email,
                        changes={"reason": "account_inactive"})
             raise InvalidCredentialsError()
         if not verify_password(password, credentials.hashed_password):
+            self._record_failure(lockout_key, now)
             self._audit(action="auth.login_failed", user_id=credentials.id,
                        organization_id=None, actor_email=email,
                        changes={"reason": "wrong_password"})
             raise InvalidCredentialsError()
+
+        self._clear_failures(lockout_key)
 
         role_id: uuid.UUID | None = None
         org_id: uuid.UUID | None = organization_id
@@ -149,3 +204,48 @@ class AuthService:
                                          hash_password(new_password),
                                          must_change_password=False)
         self._sessions.mark_password_changed()
+
+    def get_current_user(self) -> UserOut:
+        """The full profile of whoever is logged in — the one place the UI
+        should reach for "current user" (full name, email, ...) instead of
+        going through a repository directly, so that stays consistent
+        everywhere it's shown (header, status bar, self-action guards) and
+        goes through the same session-expiry check as every other read.
+        """
+        session = self._sessions.current(now=datetime.now(timezone.utc))
+        user = self._users.get_by_id(session.user_id)
+        if user is None:
+            raise UserNotFoundError(session.user_id)
+        return user
+
+    def get_current_membership(self) -> MembershipOut | None:
+        """None for a superuser acting with no organization membership, or
+        any session with no organization_id — same "no membership" shape
+        MainWindow already handled ad hoc before this existed.
+        """
+        session = self._sessions.current(now=datetime.now(timezone.utc))
+        if session.organization_id is None:
+            return None
+        return self._users.get_membership(session.user_id, session.organization_id)
+
+    def is_current_user_still_active(self) -> bool:
+        """Whether the logged-in user's account is still active *right
+        now*, per the database — not from the session's own state, which
+        never updates itself. A permission check (require_permission) only
+        looks at the session's cached snapshot from login time, so it has
+        no way to notice a deactivation that happened after login; this is
+        what a periodic UI poll (see MainWindow's idle-check timer) uses to
+        actually enforce "a deactivated user's live session stops working",
+        not just "a deactivated user can't log in again". Returns True for
+        "nothing to check" (no session, or the user row is gone some other
+        way) — this method only ever *ends* a session, it doesn't start
+        raising where nothing was wrong before — but a user row that's
+        vanished entirely (deleted, not just deactivated) is treated the
+        same as "deactivated": there's no active account to keep a session
+        open for either way.
+        """
+        session = self._sessions.peek()
+        if session is None:
+            return True
+        credentials = self._users.get_credentials_by_id(session.user_id)
+        return credentials is not None and credentials.is_active

@@ -57,6 +57,7 @@ from app.services.inventory_service import InventoryService
 from app.services.organization_service import OrganizationService
 from app.ui.theme import MUTED, RED
 from app.ui.widgets.async_content import AsyncContentArea
+from app.ui.widgets.combo_utils import select_by_data as _select_by_data
 from app.ui.widgets.confirm_dialog import confirm_typed
 from app.ui.widgets.page_header import PageHeader
 from app.ui.widgets.states import EmptyStateWidget
@@ -77,12 +78,6 @@ def _human_size(num_bytes: int | None) -> str:
             return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
         size /= 1024
     return f"{size:.1f} GB"
-
-
-def _select_by_data(combo: QComboBox, data) -> None:
-    index = combo.findData(data)
-    if index >= 0:
-        combo.setCurrentIndex(index)
 
 
 def _parse_decimal(text: str, field_name: str) -> Decimal | None:

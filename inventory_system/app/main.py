@@ -34,6 +34,18 @@ class AppController:
         self.show_login()
 
     def show_login(self) -> None:
+        # A previous MainWindow (if any) must be torn down, not just have
+        # its reference dropped: its idle_timer keeps firing and its
+        # activity-filter stays installed on the whole QApplication even
+        # after this method returns, since nothing else calls close() on
+        # it — Python refcounting alone doesn't trigger Qt's closeEvent.
+        # Left alive, a stale timer can later end a *different*, currently
+        # valid session out from under the next login, and its still-wired
+        # session_ended signal would call show_login() a second time.
+        if self._main_window is not None:
+            self._main_window.session_ended.disconnect(self.show_login)
+            self._main_window.close()
+            self._main_window.deleteLater()
         self._main_window = None
         self._login_window = LoginWindow(self._container.auth_service())
         self._login_window.login_succeeded.connect(self._show_main)

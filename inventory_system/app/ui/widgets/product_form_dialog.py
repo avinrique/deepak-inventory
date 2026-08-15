@@ -41,6 +41,7 @@ from app.core.exceptions import (
 from app.schemas.product import BrandOut, CategoryOut, ProductCreate, ProductOut, ProductUpdate, UnitOut
 from app.services.product_service import ProductService
 from app.ui.theme import RED, STYLESHEET
+from app.ui.widgets.combo_utils import select_by_data
 from app.workers.base_worker import Worker
 
 _NONE_ITEM = "—"
@@ -86,7 +87,7 @@ class ProductFormDialog(QDialog):
         for c in categories:
             self._category.addItem(c.name, c.id)
         if product and product.category:
-            self._select_by_data(self._category, product.category.id)
+            select_by_data(self._category, product.category.id)
         form.addRow("Category", self._category)
 
         self._brand = QComboBox()
@@ -94,14 +95,14 @@ class ProductFormDialog(QDialog):
         for b in brands:
             self._brand.addItem(b.name, b.id)
         if product and product.brand:
-            self._select_by_data(self._brand, product.brand.id)
+            select_by_data(self._brand, product.brand.id)
         form.addRow("Brand", self._brand)
 
         self._unit = QComboBox()
         for u in units:
             self._unit.addItem(f"{u.name} ({u.abbreviation})", u.id)
         if product:
-            self._select_by_data(self._unit, product.unit.id)
+            select_by_data(self._unit, product.unit.id)
         form.addRow("Unit *", self._unit)
 
         self._purchase_price = QLineEdit(str(product.purchase_price) if product else "0")
@@ -142,12 +143,6 @@ class ProductFormDialog(QDialog):
             self._save_button.setCursor(Qt.CursorShape.PointingHandCursor)
             self._save_button.clicked.connect(self._submit)
             layout.addWidget(self._save_button)
-
-    @staticmethod
-    def _select_by_data(combo: QComboBox, value) -> None:
-        index = combo.findData(value)
-        if index >= 0:
-            combo.setCurrentIndex(index)
 
     def _parse_decimal(self, text: str, field_label: str) -> Decimal | None:
         try:

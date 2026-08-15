@@ -11,6 +11,7 @@ from app.core.exceptions import OwnerProtectedError, RoleNotFoundError
 from app.schemas.user import RoleOut, UserSummaryOut
 from app.services.user_service import UserService
 from app.ui.theme import RED, STYLESHEET
+from app.ui.widgets.combo_utils import select_by_data
 from app.workers.base_worker import Worker
 
 
@@ -33,9 +34,7 @@ class ChangeUserRoleDialog(QDialog):
         self._role = QComboBox()
         for role in roles:
             self._role.addItem(role.name, role.id)
-        index = self._role.findData(user.role_id)
-        if index >= 0:
-            self._role.setCurrentIndex(index)
+        select_by_data(self._role, user.role_id)
         layout.addWidget(self._role)
 
         self._error_label = QLabel("")

@@ -34,6 +34,7 @@ from app.services.catalog_service import CatalogService
 from app.services.product_service import ProductService
 from app.ui.widgets.async_content import AsyncContentArea
 from app.ui.widgets.catalog_manager_dialog import CatalogManagerDialog
+from app.ui.widgets.combo_utils import select_by_data
 from app.ui.widgets.confirm_dialog import confirm
 from app.ui.widgets.page_header import PageHeader
 from app.ui.widgets.pagination_bar import PaginationBar
@@ -192,12 +193,8 @@ class ProductsPage(QWidget):
         for brand in self._brands:
             self._brand_filter.addItem(brand.name, brand.id)
 
-        index = self._category_filter.findData(previous_category)
-        if index >= 0:
-            self._category_filter.setCurrentIndex(index)
-        index = self._brand_filter.findData(previous_brand)
-        if index >= 0:
-            self._brand_filter.setCurrentIndex(index)
+        select_by_data(self._category_filter, previous_category)
+        select_by_data(self._brand_filter, previous_brand)
 
     def _on_catalog_options_error(self, exc: Exception) -> None:
         _logger.exception("Failed to load catalog options (categories/brands/units)",

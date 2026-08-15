@@ -3,12 +3,17 @@ database. Proves login/logout/change-password and session-timeout
 interplay without needing Postgres.
 """
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from app.core.exceptions import AmbiguousOrganizationError, InvalidCredentialsError
-from app.schemas.user import MembershipOut, UserCredentials
+from app.core.exceptions import (
+    AccountLockedError,
+    AmbiguousOrganizationError,
+    InvalidCredentialsError,
+    UserNotFoundError,
+)
+from app.schemas.user import MembershipOut, UserCredentials, UserOut
 from app.security.authorization import require_permission
 from app.security.passwords import hash_password
 from app.security.session import NotAuthenticatedError, SessionExpiredError, SessionManager
@@ -26,20 +31,37 @@ class FakeUserRepository:
         self.role_permissions: dict[uuid.UUID, frozenset[str]] = {}
         self.logins: list[tuple[uuid.UUID, object]] = []
         self.password_updates: list[tuple[uuid.UUID, uuid.UUID | None, str, bool]] = []
+        self.profiles: dict[uuid.UUID, dict] = {}
 
     def seed_user(self, email, password, *, is_active=True, is_superuser=False,
-                 must_change_password=False, memberships=()):
+                 must_change_password=False, memberships=(), full_name="Test User",
+                 username="testuser"):
         user_id = uuid.uuid4()
         self.users[user_id] = UserCredentials(
             id=user_id, email=email, hashed_password=hash_password(password),
             is_active=is_active, is_superuser=is_superuser,
             must_change_password=must_change_password)
         self.memberships[user_id] = list(memberships)
+        self.profiles[user_id] = {"full_name": full_name, "username": username, "phone": None,
+                                  "created_at": datetime.now(timezone.utc)}
         return user_id
+
+    def set_active(self, user_id, is_active):
+        old = self.users[user_id]
+        self.users[user_id] = old.model_copy(update={"is_active": is_active})
+        return True
 
     # --- UserRepository protocol -----------------------------------
     def get_by_id(self, user_id):
-        raise NotImplementedError
+        credentials = self.users.get(user_id)
+        profile = self.profiles.get(user_id)
+        if credentials is None or profile is None:
+            return None
+        return UserOut(id=user_id, email=credentials.email, username=profile["username"],
+                      full_name=profile["full_name"], phone=profile["phone"],
+                      is_active=credentials.is_active, is_superuser=credentials.is_superuser,
+                      must_change_password=credentials.must_change_password,
+                      created_at=profile["created_at"], last_login_at=None)
 
     def get_credentials_by_email(self, email):
         email = email.strip().lower()
@@ -62,9 +84,6 @@ class FakeUserRepository:
         return self.role_permissions.get(role_id, frozenset())
 
     def create_user(self, **kwargs):
-        raise NotImplementedError
-
-    def set_active(self, user_id, is_active):
         raise NotImplementedError
 
     def update_password_hash(self, user_id, organization_id, new_hash,
@@ -302,3 +321,163 @@ def test_login_after_idle_timeout_requires_relogin_for_protected_calls():
 
     with pytest.raises(SessionExpiredError):
         Protected(sessions).do_it()
+
+
+# -- failed-login lockout ----------------------------------------------#
+
+def test_repeated_wrong_password_locks_out_further_attempts():
+    repo = FakeUserRepository()
+    repo.seed_user("owner@acme.test", "s3cret!")
+    service, _, sessions, _ = _service(repo)
+
+    for _ in range(5):
+        with pytest.raises(InvalidCredentialsError):
+            service.login("owner@acme.test", "wrong")
+
+    with pytest.raises(AccountLockedError):
+        service.login("owner@acme.test", "wrong")
+    # Even the *correct* password is rejected while locked out.
+    with pytest.raises(AccountLockedError):
+        service.login("owner@acme.test", "s3cret!")
+    assert sessions.is_authenticated is False
+
+
+def test_lockout_is_scoped_to_a_single_email():
+    repo = FakeUserRepository()
+    repo.seed_user("owner@acme.test", "s3cret!")
+    repo.seed_user("other@acme.test", "different!")
+    service, _, sessions, _ = _service(repo)
+
+    for _ in range(5):
+        with pytest.raises(InvalidCredentialsError):
+            service.login("owner@acme.test", "wrong")
+
+    # A different email is unaffected.
+    session = service.login("other@acme.test", "different!")
+    assert session is not None
+
+
+def test_lockout_tracking_is_case_and_whitespace_insensitive():
+    repo = FakeUserRepository()
+    repo.seed_user("owner@acme.test", "s3cret!")
+    service, _, _, _ = _service(repo)
+
+    for _ in range(5):
+        with pytest.raises(InvalidCredentialsError):
+            service.login("  Owner@Acme.TEST  ", "wrong")
+
+    with pytest.raises(AccountLockedError):
+        service.login("owner@acme.test", "s3cret!")
+
+
+def test_successful_login_clears_the_failure_count():
+    repo = FakeUserRepository()
+    repo.seed_user("owner@acme.test", "s3cret!")
+    service, _, sessions, _ = _service(repo)
+
+    for _ in range(4):  # one under the threshold
+        with pytest.raises(InvalidCredentialsError):
+            service.login("owner@acme.test", "wrong")
+
+    service.login("owner@acme.test", "s3cret!")
+    sessions.end()
+
+    # The slate was wiped by the successful login — one more wrong guess
+    # doesn't immediately lock out (it would if the old count had carried
+    # over from 4 -> 5).
+    with pytest.raises(InvalidCredentialsError):
+        service.login("owner@acme.test", "wrong")
+    session = service.login("owner@acme.test", "s3cret!")
+    assert session is not None
+
+
+def test_lockout_also_applies_to_an_unknown_email():
+    service, _, _, _ = _service()
+    for _ in range(5):
+        with pytest.raises(InvalidCredentialsError):
+            service.login("nobody@acme.test", "whatever")
+    with pytest.raises(AccountLockedError):
+        service.login("nobody@acme.test", "whatever")
+
+
+# -- current user / live active-status ----------------------------------#
+
+def test_get_current_user_returns_the_logged_in_users_full_profile():
+    repo = FakeUserRepository()
+    user_id = repo.seed_user("owner@acme.test", "s3cret!", full_name="Owner Person",
+                             username="owner")
+    service, _, _, _ = _service(repo)
+    service.login("owner@acme.test", "s3cret!")
+
+    current = service.get_current_user()
+    assert current.id == user_id
+    assert current.full_name == "Owner Person"
+    assert current.username == "owner"
+
+
+def test_get_current_user_requires_a_session():
+    service, _, _, _ = _service()
+    with pytest.raises(NotAuthenticatedError):
+        service.get_current_user()
+
+
+def test_get_current_user_raises_if_the_user_row_is_gone():
+    repo = FakeUserRepository()
+    user_id = repo.seed_user("owner@acme.test", "s3cret!")
+    service, _, _, _ = _service(repo)
+    service.login("owner@acme.test", "s3cret!")
+
+    del repo.profiles[user_id]  # simulate the row vanishing after login
+
+    with pytest.raises(UserNotFoundError):
+        service.get_current_user()
+
+
+def test_get_current_membership_returns_role_for_the_sessions_organization():
+    repo = FakeUserRepository()
+    user_id = repo.seed_user("owner@acme.test", "s3cret!")
+    repo.memberships[user_id] = [_membership(user_id)]
+    service, _, _, _ = _service(repo)
+    service.login("owner@acme.test", "s3cret!")
+
+    membership = service.get_current_membership()
+    assert membership is not None
+    assert membership.organization_id == ORG_ID
+    assert membership.role_name == "MANAGER"
+
+
+def test_get_current_membership_is_none_for_a_superuser_with_no_org():
+    repo = FakeUserRepository()
+    repo.seed_user("root@acme.test", "s3cret!", is_superuser=True)
+    service, _, _, _ = _service(repo)
+    service.login("root@acme.test", "s3cret!")
+
+    assert service.get_current_membership() is None
+
+
+def test_is_current_user_still_active_true_while_active():
+    repo = FakeUserRepository()
+    repo.seed_user("owner@acme.test", "s3cret!")
+    service, _, _, _ = _service(repo)
+    service.login("owner@acme.test", "s3cret!")
+
+    assert service.is_current_user_still_active() is True
+
+
+def test_is_current_user_still_active_false_after_admin_deactivates_them():
+    repo = FakeUserRepository()
+    user_id = repo.seed_user("owner@acme.test", "s3cret!")
+    service, _, _, _ = _service(repo)
+    service.login("owner@acme.test", "s3cret!")
+
+    # Simulate a different admin deactivating this account mid-session —
+    # the live session doesn't know yet (it only has a permission snapshot
+    # from login time), but a poll against the repository does.
+    repo.set_active(user_id, False)
+
+    assert service.is_current_user_still_active() is False
+
+
+def test_is_current_user_still_active_true_when_nobody_is_logged_in():
+    service, _, _, _ = _service()
+    assert service.is_current_user_still_active() is True

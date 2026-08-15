@@ -17,7 +17,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.core.exceptions import AmbiguousOrganizationError, InvalidCredentialsError
+from app.core.exceptions import (
+    AccountLockedError,
+    AmbiguousOrganizationError,
+    InvalidCredentialsError,
+)
 from app.security.session import Session
 from app.services.auth_service import AuthService
 from app.ui.theme import CONTENT_BG, MUTED, RED, STYLESHEET, TEXT
@@ -114,7 +118,7 @@ class LoginWindow(QWidget):
         self._set_busy(False)
         if isinstance(exc, InvalidCredentialsError):
             self._show_error("Incorrect email or password.")
-        elif isinstance(exc, AmbiguousOrganizationError):
+        elif isinstance(exc, (AmbiguousOrganizationError, AccountLockedError)):
             self._show_error(str(exc))
         else:
             self._show_error("Something went wrong logging in. Please try again.")
