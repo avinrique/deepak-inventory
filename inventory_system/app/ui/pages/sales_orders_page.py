@@ -1,17 +1,19 @@
 """Sales orders page — search/filter/paginate SalesOrder records, with
-Create/Confirm/Fulfill/Cancel actions and a "View Invoice" action per
-selected row. Replaces the "Sales" sidebar entry's previous content (a
-read-only legacy Excel Bill list — still at app.ui.pages.sales_page.
-SalesPage, untouched, just no longer wired into the sidebar) now that the
-real sales workflow (Customer/SalesOrder/Invoice/Payment, see
-app.services.sales_service) is what actually tracks sales and moves
-inventory (via fulfill_sale).
+Create/Confirm/Fulfill/Cancel actions, invoice generation, payment
+recording, and returns, all per selected row. Replaces the "Sales" sidebar
+entry's previous content (a read-only legacy Excel Bill list — still at
+app.ui.pages.sales_page.SalesPage, untouched, just no longer wired into the
+sidebar) now that the real sales workflow (Customer/SalesOrder/Invoice/
+Payment, see app.services.sales_service) is what actually tracks sales and
+moves inventory (via fulfill_sale).
 
 No business logic here: every action calls SalesService on a background
-Worker. Confirm/Fulfill/Cancel are the create-through-fulfillment
-lifecycle; invoice generation/payment recording aren't wired up yet
-(sales.invoice/sales.payment permissions already exist in the catalog for
-when that lands) — "View Invoice" only looks up one if it already exists.
+Worker and renders whatever comes back — the outstanding-balance check on
+a payment, the over-return check, and the FULFILLED/COMPLETED-only
+eligibility for invoicing/payment/returns are all enforced independently
+by the service layer (RecordPaymentDialog/SalesReturnDialog map the
+specific exceptions to friendly text); button enablement here is a
+convenience, not the boundary.
 """
 import logging
 
@@ -28,10 +30,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.core.exceptions import DuplicateInvoiceError
 from app.domain.product import ProductStatus
 from app.domain.sales import SalesOrderStatus
 from app.schemas.product import ProductFilter
-from app.schemas.sales import SalesOrderFilter, SalesOrderOut, SalesOrderPage
+from app.schemas.sales import InvoiceOut, SalesOrderFilter, SalesOrderOut, SalesOrderPage
 from app.security.session import SessionManager
 from app.services.inventory_service import InventoryService
 from app.services.product_service import ProductService
@@ -42,7 +45,9 @@ from app.ui.widgets.confirm_dialog import confirm
 from app.ui.widgets.invoice_preview_dialog import InvoicePreviewDialog
 from app.ui.widgets.page_header import PageHeader
 from app.ui.widgets.pagination_bar import PaginationBar
+from app.ui.widgets.record_payment_dialog import RecordPaymentDialog
 from app.ui.widgets.sales_order_form_dialog import SalesOrderFormDialog
+from app.ui.widgets.sales_return_dialog import SalesReturnDialog
 from app.ui.widgets.states import EmptyStateWidget
 from app.workers.base_worker import Worker
 
@@ -203,6 +208,27 @@ class SalesOrdersPage(QWidget):
         self._view_invoice_button.setEnabled(False)
         bar.addWidget(self._view_invoice_button)
 
+        self._generate_invoice_button = QPushButton("Generate Invoice")
+        self._generate_invoice_button.setObjectName("ghost")
+        self._generate_invoice_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._generate_invoice_button.clicked.connect(self._generate_invoice_for_selected)
+        self._generate_invoice_button.setEnabled(False)
+        bar.addWidget(self._generate_invoice_button)
+
+        self._record_payment_button = QPushButton("Record Payment")
+        self._record_payment_button.setObjectName("ghost")
+        self._record_payment_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._record_payment_button.clicked.connect(self._record_payment_for_selected)
+        self._record_payment_button.setEnabled(False)
+        bar.addWidget(self._record_payment_button)
+
+        self._return_button = QPushButton("Return")
+        self._return_button.setObjectName("ghost")
+        self._return_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._return_button.clicked.connect(self._return_for_selected)
+        self._return_button.setEnabled(False)
+        bar.addWidget(self._return_button)
+
         bar.addStretch()
         return bar
 
@@ -266,6 +292,15 @@ class SalesOrdersPage(QWidget):
             and status in (SalesOrderStatus.DRAFT, SalesOrderStatus.CONFIRMED))
         self._view_invoice_button.setEnabled(
             so is not None and status in _INVOICEABLE_STATUSES)
+        self._generate_invoice_button.setEnabled(
+            so is not None and self._can("sales.invoice")
+            and status in _INVOICEABLE_STATUSES)
+        self._record_payment_button.setEnabled(
+            so is not None and self._can("sales.payment")
+            and status in _INVOICEABLE_STATUSES)
+        self._return_button.setEnabled(
+            so is not None and self._can("sales.refund")
+            and status in _INVOICEABLE_STATUSES)
 
     def _selected_order(self) -> SalesOrderOut | None:
         table = self._async_area.currentWidget()
@@ -334,3 +369,66 @@ class SalesOrdersPage(QWidget):
         self._view_invoice_button.setEnabled(True)
         _logger.exception("Looking up invoice for sales order failed", exc_info=exc)
         QMessageBox.critical(self, "Couldn't open invoice", str(exc))
+
+    # -- generate invoice -------------------------------------------------- #
+    def _generate_invoice_for_selected(self) -> None:
+        so = self._selected_order()
+        if so is None:
+            return
+        self._generate_invoice_button.setEnabled(False)
+        worker = Worker(self._sales_service.generate_invoice, so.id)
+        worker.signals.finished.connect(self._on_invoice_generated)
+        worker.signals.error.connect(self._on_generate_invoice_error)
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_invoice_generated(self, invoice: InvoiceOut) -> None:
+        self._generate_invoice_button.setEnabled(True)
+        self.refresh()
+        dialog = InvoicePreviewDialog(self._sales_service, invoice.id, parent=self)
+        dialog.exec()
+
+    def _on_generate_invoice_error(self, exc: Exception) -> None:
+        self._generate_invoice_button.setEnabled(True)
+        _logger.exception("Generating invoice failed", exc_info=exc)
+        if isinstance(exc, DuplicateInvoiceError):
+            QMessageBox.information(self, "Invoice already exists",
+                                    "This order already has an invoice — use View Invoice "
+                                    "to see it.")
+        else:
+            QMessageBox.critical(self, "Couldn't generate invoice", str(exc))
+
+    # -- record payment ------------------------------------------------------#
+    def _record_payment_for_selected(self) -> None:
+        so = self._selected_order()
+        if so is None:
+            return
+        self._record_payment_button.setEnabled(False)
+        worker = Worker(self._sales_service.get_invoice_by_sales_order, so.id)
+        worker.signals.finished.connect(self._on_invoice_looked_up_for_payment)
+        worker.signals.error.connect(self._on_payment_invoice_lookup_error)
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_invoice_looked_up_for_payment(self, invoice) -> None:
+        self._record_payment_button.setEnabled(True)
+        if invoice is None:
+            QMessageBox.information(self, "No invoice yet",
+                                   "Generate an invoice for this order before recording a "
+                                   "payment.")
+            return
+        dialog = RecordPaymentDialog(self._sales_service, invoice.id, parent=self)
+        if dialog.exec():
+            self.refresh()
+
+    def _on_payment_invoice_lookup_error(self, exc: Exception) -> None:
+        self._record_payment_button.setEnabled(True)
+        _logger.exception("Looking up invoice for payment failed", exc_info=exc)
+        QMessageBox.critical(self, "Couldn't record payment", str(exc))
+
+    # -- returns ------------------------------------------------------------#
+    def _return_for_selected(self) -> None:
+        so = self._selected_order()
+        if so is None:
+            return
+        dialog = SalesReturnDialog(self._sales_service, so, self._products, parent=self)
+        if dialog.exec():
+            self.refresh()

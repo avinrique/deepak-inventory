@@ -3,10 +3,20 @@ framework. SalesOrderStatus lives here for the same reason as
 app.domain.purchasing.PurchaseOrderStatus: the ORM model and the Pydantic
 schema share one source of truth instead of two enums that could drift.
 """
+import re
 from decimal import Decimal
 from enum import Enum
 
 from app.domain.pricing import line_subtotal, line_tax, line_total  # noqa: F401 - re-exported
+
+# Mirrors app.domain.user's own _EMAIL_RE/_PHONE_RE rather than importing
+# them — each app.domain.* module validates its own fields in isolation
+# (no I/O, no cross-module deps), same convention as
+# app.domain.purchasing.validate_supplier not reaching into this module
+# either. See this module's own docstring.
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_PHONE_RE = re.compile(r"^[0-9+()\-.\s]{7,32}$")
+_CUSTOMER_CODE_RE = re.compile(r"^[A-Z0-9._-]+$")
 
 
 class SalesOrderStatus(str, Enum):
@@ -29,6 +39,11 @@ class InvoicePaymentStatus(str, Enum):
     UNPAID = "UNPAID"
     PARTIALLY_PAID = "PARTIALLY_PAID"
     PAID = "PAID"
+
+
+class CustomerType(str, Enum):
+    INDIVIDUAL = "INDIVIDUAL"
+    BUSINESS = "BUSINESS"
 
 
 def compute_payment_status(total_amount: Decimal, amount_paid: Decimal) -> InvoicePaymentStatus:
@@ -59,10 +74,38 @@ def can_transition(current: SalesOrderStatus, target: SalesOrderStatus) -> bool:
     return target in ALLOWED_TRANSITIONS.get(current, frozenset())
 
 
-def validate_customer(*, name: str) -> list[str]:
+def normalize_customer_code(code: str) -> str:
+    return code.strip().upper()
+
+
+def validate_customer(*, name: str, customer_code: str | None = None,
+                      email: str | None = None, phone: str | None = None,
+                      credit_limit: Decimal | None = None,
+                      opening_balance: Decimal | None = None) -> list[str]:
     errors = []
     if not name.strip():
         errors.append("Customer name is required.")
+
+    if customer_code is not None:
+        normalized_code = normalize_customer_code(customer_code)
+        if not normalized_code:
+            errors.append("Customer code is required.")
+        elif not _CUSTOMER_CODE_RE.match(normalized_code):
+            errors.append(
+                "Customer code may only contain letters, numbers, '.', '_', and '-'.")
+
+    if email is not None and email.strip() and not _EMAIL_RE.match(email.strip()):
+        errors.append("Email address format is invalid.")
+
+    if phone is not None and phone.strip() and not _PHONE_RE.match(phone.strip()):
+        errors.append("Phone number format is invalid.")
+
+    if credit_limit is not None and credit_limit < 0:
+        errors.append("Credit limit cannot be negative.")
+
+    if opening_balance is not None and opening_balance < 0:
+        errors.append("Opening balance cannot be negative.")
+
     return errors
 
 
