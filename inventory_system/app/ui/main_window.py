@@ -205,7 +205,7 @@ def _build_page(key: str, container: Container) -> QWidget:
                            container.purchase_service(), container.sales_service())
     if key == "users":
         from app.ui.pages.users_page import UsersPage
-        return UsersPage()
+        return UsersPage(container.user_service(), container.sessions)
     if key == "settings":
         from app.ui.pages.settings_page import SettingsPage
         return SettingsPage(container.organization_service(), container.backup_service(),
