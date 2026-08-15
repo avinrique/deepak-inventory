@@ -16,7 +16,7 @@ from PySide6.QtCharts import (
     QValueAxis,
 )
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QPainter
+from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
 
 from app.schemas.reporting import DashboardMetrics
 from app.services.reporting_service import ReportingService
-from app.ui.theme import ACCENT, AMBER, GREEN, RED
+from app.ui.theme import ACCENT, AMBER, CARD_BG, GREEN, MUTED, RED, TEXT
 from app.ui.widgets.async_content import AsyncContentArea
 from app.ui.widgets.page_header import PageHeader
 from app.ui.widgets.stat_card import StatCard
@@ -54,9 +54,28 @@ def _section_label(text: str) -> QWidget:
     return label
 
 
+def _style_chart(chart: QChart, *axes) -> None:
+    """QChart renders its own QGraphicsScene rather than painting like a
+    normal QWidget, so it never picks up app.ui.theme.STYLESHEET's QSS —
+    left alone, it falls back to the OS/Qt default palette, which is dark
+    in macOS Dark Mode regardless of this app's own (light) theme. Applied
+    to every chart built below so a chart always reads as part of this
+    app's theme, not whatever the OS happens to be set to.
+    """
+    chart.setBackgroundBrush(QColor(CARD_BG))
+    chart.setPlotAreaBackgroundBrush(QColor(CARD_BG))
+    chart.setPlotAreaBackgroundVisible(True)
+    chart.setTitleBrush(QColor(TEXT))
+    chart.legend().setLabelColor(QColor(TEXT))
+    for axis in axes:
+        axis.setLabelsColor(QColor(MUTED))
+        axis.setLinePenColor(QColor(MUTED))
+
+
 def _empty_chart_view(title: str) -> QChartView:
     chart = QChart()
     chart.setTitle(title)
+    _style_chart(chart)
     view = QChartView(chart)
     view.setRenderHint(QPainter.RenderHint.Antialiasing)
     view.setMinimumHeight(_CHART_MIN_HEIGHT)
@@ -85,6 +104,7 @@ def _line_chart(title: str, categories: list[str], values: list[float]) -> QChar
     axis_y.setRange(0, top * 1.15 if top else 1.0)
     chart.addAxis(axis_y, Qt.AlignmentFlag.AlignLeft)
     series.attachAxis(axis_y)
+    _style_chart(chart, axis_x, axis_y)
 
     view = QChartView(chart)
     view.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -116,6 +136,7 @@ def _bar_chart(title: str, categories: list[str], values: list[float],
     axis_y.setRange(0, top * 1.15 if top else 1.0)
     chart.addAxis(axis_y, Qt.AlignmentFlag.AlignLeft)
     series.attachAxis(axis_y)
+    _style_chart(chart, axis_x, axis_y)
 
     view = QChartView(chart)
     view.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -136,6 +157,7 @@ def _pie_chart(title: str, labels: list[str], values: list[float]) -> QChartView
     chart.addSeries(series)
     chart.setTitle(title)
     chart.legend().setAlignment(Qt.AlignmentFlag.AlignRight)
+    _style_chart(chart)
 
     view = QChartView(chart)
     view.setRenderHint(QPainter.RenderHint.Antialiasing)

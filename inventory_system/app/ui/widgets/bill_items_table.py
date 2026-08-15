@@ -21,6 +21,7 @@ import uuid
 from decimal import Decimal, InvalidOperation
 
 from PySide6.QtCore import QThreadPool, Qt, QTimer, Signal
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
@@ -279,7 +280,7 @@ class BillItemsTable(QWidget):
             return
         if self._warehouse_id is None:
             stock_item.setText("—")
-            stock_item.setForeground(Qt.GlobalColor.black)
+            stock_item.setForeground(QColor(MUTED))
             return
         product = self._rows[row]["product"]
         worker = Worker(self._inventory_service.get_inventory_level, product.id,
@@ -296,7 +297,6 @@ class BillItemsTable(QWidget):
         if stock_item is None:
             return
         stock_item.setText(f"{level.quantity_available:g}")
-        from PySide6.QtGui import QColor
         stock_item.setForeground(QColor(RED if level.quantity_available <= 0 else GREEN))
 
     # -- collection / totals ------------------------------------------------#

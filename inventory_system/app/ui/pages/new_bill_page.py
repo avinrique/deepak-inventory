@@ -158,23 +158,32 @@ class NewBillPage(QWidget):
 
         layout.addWidget(self._build_bill_details_group())
 
+        products_card = QWidget()
+        products_card.setObjectName("card")
+        products_layout = QVBoxLayout(products_card)
+        products_layout.setContentsMargins(20, 18, 20, 18)
+        products_layout.setSpacing(10)
+
         items_label = QLabel("Products")
         items_label.setObjectName("sectionTitle")
-        layout.addWidget(items_label)
+        products_layout.addWidget(items_label)
 
         self._items_table = BillItemsTable(self._product_service, self._inventory_service)
         self._items_table.totals_changed.connect(self._on_totals_changed)
         self._items_table.setSizePolicy(QSizePolicy.Policy.Expanding,
                                         QSizePolicy.Policy.Expanding)
-        layout.addWidget(self._items_table, stretch=1)
+        products_layout.addWidget(self._items_table, stretch=1)
+        layout.addWidget(products_card, stretch=1)
 
         scroll.setWidget(content)
         return scroll
 
     def _build_bill_details_group(self) -> QWidget:
         group = QWidget()
+        group.setObjectName("card")
         form = QFormLayout(group)
-        form.setSpacing(8)
+        form.setContentsMargins(20, 18, 20, 18)
+        form.setSpacing(10)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
 
         self._bill_number_label = QLabel("Assigned on save")
@@ -235,9 +244,15 @@ class NewBillPage(QWidget):
     def _build_right_column(self) -> QWidget:
         panel = QWidget()
         panel.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(16, 6, 28, 16)
-        layout.setSpacing(18)
+        outer_layout = QVBoxLayout(panel)
+        outer_layout.setContentsMargins(16, 6, 28, 16)
+        outer_layout.setSpacing(18)
+
+        card = QWidget()
+        card.setObjectName("card")
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(14)
 
         totals_title = QLabel("Totals")
         totals_title.setObjectName("sectionTitle")
@@ -296,7 +311,9 @@ class NewBillPage(QWidget):
         payment_form.addRow("Balance Due", self._balance_due_label)
 
         layout.addLayout(payment_form)
-        layout.addStretch()
+
+        outer_layout.addWidget(card)
+        outer_layout.addStretch()
         return panel
 
     def _on_totals_changed(self) -> None:
@@ -344,7 +361,7 @@ class NewBillPage(QWidget):
         self._generate_pdf_button.clicked.connect(lambda: self._on_finalize(then_open=True))
         bar.addWidget(self._generate_pdf_button)
 
-        self._save_print_button = QPushButton("Save & Print")
+        self._save_print_button = QPushButton("Save && Print")
         self._save_print_button.setObjectName("ghost")
         self._save_print_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self._save_print_button.clicked.connect(lambda: self._on_finalize(then_open=True))
@@ -629,6 +646,7 @@ class NewBillPage(QWidget):
         self._bill_number_label.setStyleSheet("")
         self._update_status_banner()
         self._update_button_states()
+        self._on_customer_changed()  # outstanding balance now includes this bill
         if getattr(self, "_pending_then_open", False):
             self._open_invoice_preview()
         else:

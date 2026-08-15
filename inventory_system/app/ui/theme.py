@@ -42,6 +42,16 @@ STYLESHEET = f"""
     font-family: "{FAMILY}";
     color: {TEXT};
 }}
+QMainWindow, QDialog {{
+    background: {CONTENT_BG};
+}}
+QScrollArea {{
+    background: transparent;
+    border: none;
+}}
+QScrollArea > QWidget > QWidget {{
+    background: transparent;
+}}
 QWidget#contentArea {{
     background: {CONTENT_BG};
 }}
@@ -63,6 +73,11 @@ QLabel#sectionLabel {{
     font-weight: 700;
     color: {MUTED};
     letter-spacing: 0.5px;
+}}
+QLabel#sectionTitle {{
+    font-size: 14px;
+    font-weight: 700;
+    color: {TEXT};
 }}
 
 QPushButton {{
