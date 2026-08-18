@@ -149,8 +149,16 @@ pip install -r requirements-dev.txt
 pytest -q
 ```
 
-The tests always run against a throwaway folder and refuse to start if they
-are ever pointed at a real data directory.
+69 tests covering the storage layer. They always run against a throwaway
+folder and refuse to start if they are ever pointed at a real data directory.
+
+`pytest.ini` scopes this to the legacy app's suite only. The rewrite in
+`inventory_system/` has its own dependencies and is run from inside that
+directory:
+
+```bash
+cd inventory_system && pytest -q
+```
 
 ## Build the Windows .exe
 

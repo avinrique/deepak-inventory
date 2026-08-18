@@ -22,6 +22,9 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements-dev.txt
+      # pytest.ini scopes this to the legacy app's suite. The rewrite in
+      # inventory_system/ has its own dependencies and its own pyproject.toml;
+      # it is not built or tested by this workflow.
       - name: Run tests
         run: python -m pytest -q
       - name: Check the GUI module imports cleanly
