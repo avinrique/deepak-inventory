@@ -127,6 +127,7 @@ QLineEdit {{
     padding: 9px 12px;
     font-size: 13px;
     background: white;
+    color: {TEXT};
     selection-background-color: {ACCENT};
 }}
 QLineEdit:focus {{
@@ -134,6 +135,87 @@ QLineEdit:focus {{
 }}
 QLineEdit[error="true"] {{
     border: 1px solid {RED};
+}}
+QLineEdit:disabled {{
+    background: #f1f5f9;
+    color: {MUTED};
+}}
+
+/* QComboBox/QDateEdit/QTextEdit have no Qt Style Sheet rules by default in
+   this app, unlike QLineEdit above — without one, each falls back to the
+   OS-native widget style (dark/near-black on a system in dark mode, on
+   macOS in particular), which is what produced the black Description
+   textarea and black report filter dropdowns/date fields this block
+   fixes. Every value below reuses the same tokens QLineEdit already uses,
+   so all four input types look and behave identically. */
+QComboBox, QDateEdit, QTextEdit, QPlainTextEdit {{
+    border: 1px solid {BORDER};
+    border-radius: {RADIUS}px;
+    padding: 9px 12px;
+    font-size: 13px;
+    background: white;
+    color: {TEXT};
+    selection-background-color: {ACCENT};
+    selection-color: white;
+}}
+QComboBox:focus, QDateEdit:focus, QTextEdit:focus, QPlainTextEdit:focus {{
+    border: 1px solid {ACCENT};
+}}
+QComboBox:disabled, QDateEdit:disabled, QTextEdit:disabled, QPlainTextEdit:disabled {{
+    background: #f1f5f9;
+    color: {MUTED};
+}}
+QComboBox::drop-down, QDateEdit::drop-down {{
+    border: none;
+    width: 24px;
+}}
+QComboBox QAbstractItemView {{
+    background: white;
+    color: {TEXT};
+    border: 1px solid {BORDER};
+    border-radius: {RADIUS}px;
+    outline: none;
+    padding: 4px;
+    selection-background-color: {ACCENT_TINT};
+    selection-color: {ACCENT};
+}}
+
+/* QDateEdit's calendar popup (setCalendarPopup(True), used by every date
+   filter in Reports) is a QCalendarWidget — same "unstyled = OS-native
+   dark chrome" problem as above. */
+QCalendarWidget {{
+    background: white;
+    color: {TEXT};
+}}
+QCalendarWidget QWidget {{
+    background: white;
+    color: {TEXT};
+}}
+QCalendarWidget QToolButton {{
+    background: white;
+    color: {TEXT};
+    border: none;
+    border-radius: 4px;
+    padding: 4px 8px;
+    font-weight: 600;
+}}
+QCalendarWidget QToolButton:hover {{
+    background: {ACCENT_TINT};
+    color: {ACCENT};
+}}
+QCalendarWidget QAbstractItemView {{
+    background: white;
+    color: {TEXT};
+    selection-background-color: {ACCENT};
+    selection-color: white;
+    outline: none;
+}}
+QCalendarWidget QAbstractItemView:disabled {{
+    color: {MUTED};
+}}
+QCalendarWidget #qt_calendar_navigationbar {{
+    background: white;
+    border-bottom: 1px solid {BORDER};
 }}
 
 QListWidget#sidebarList {{
