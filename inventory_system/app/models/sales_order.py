@@ -51,7 +51,7 @@ class SalesOrder(UUIDPKMixin, TimestampMixin, Base):
     )
 
     organization_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"),
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="RESTRICT"),
         nullable=False)
     # RESTRICT: a customer/warehouse referenced by a sales order can't be
     # deleted out from under it — same policy as PurchaseOrder.supplier_id.
@@ -148,7 +148,7 @@ class Invoice(UUIDPKMixin, Base):
     )
 
     organization_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"),
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="RESTRICT"),
         nullable=False)
     sales_order_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("sales_orders.id", ondelete="RESTRICT"),
@@ -199,7 +199,7 @@ class Payment(UUIDPKMixin, Base):
     )
 
     organization_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"),
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="RESTRICT"),
         nullable=False)
     invoice_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("invoices.id", ondelete="RESTRICT"), nullable=False)
@@ -225,7 +225,7 @@ class SalesReturn(UUIDPKMixin, Base):
     )
 
     organization_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"),
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="RESTRICT"),
         nullable=False)
     sales_order_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("sales_orders.id", ondelete="RESTRICT"), nullable=False)

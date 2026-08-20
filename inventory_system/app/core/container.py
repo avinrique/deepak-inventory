@@ -11,7 +11,7 @@ of which inventory backend is active.
 from datetime import timedelta
 
 from app.config.settings import settings
-from app.repositories.interfaces import BillRepository, PartyRepository, StockRepository
+from app.repositories.interfaces import StockRepository
 from app.repositories.sql.audit_log_repository import SqlAuditLogRepository
 from app.repositories.sql.backup_repository import SqlBackupRepository
 from app.repositories.sql.brand_repository import SqlBrandRepository
@@ -30,12 +30,9 @@ from app.repositories.sql.warehouse_repository import SqlWarehouseRepository
 from app.security.session import SessionManager
 from app.services.auth_service import AuthService
 from app.services.backup_service import BackupService
-from app.services.billing_service import BillingService
 from app.services.catalog_service import CatalogService
-from app.services.dashboard_service import DashboardService
 from app.services.inventory_service import InventoryService
 from app.services.organization_service import OrganizationService
-from app.services.party_service import PartyService
 from app.services.product_service import ProductService
 from app.services.purchase_service import PurchaseService
 from app.services.reporting_service import ReportingService
@@ -44,29 +41,26 @@ from app.services.stock_service import StockService
 from app.services.user_service import UserService
 
 
-def _build_excel_repositories() -> tuple[BillRepository, BillRepository,
-                                         StockRepository, PartyRepository]:
-    # Imported lazily, and in this order: importing app.repositories.excel
-    # first runs its sys.path shim, which is what makes `import storage`
-    # resolve to the legacy app's file — only needed for the excel backend,
-    # so postgres deployments never touch either.
-    from app.repositories.excel.bill_repository import ExcelBillRepository
-    from app.repositories.excel.party_repository import ExcelPartyRepository
+def _build_excel_stock_repository() -> StockRepository:
+    # Imported lazily: importing app.repositories.excel first runs its
+    # sys.path shim, which is what makes `import storage` resolve to the
+    # legacy app's file — only needed for the excel backend, so postgres
+    # deployments never touch it. BillRepository/PartyRepository excel
+    # implementations (ExcelBillRepository/ExcelPartyRepository) backed the
+    # now-removed legacy BillingService/PartyService (superseded by the
+    # SQL-backed SalesService/PurchaseService/CustomerService/
+    # SupplierService) and are no longer constructed here — the excel/
+    # modules themselves are untouched and still covered by their own
+    # repository-level tests.
     from app.repositories.excel.stock_repository import ExcelStockRepository
-    import storage as db
 
-    sales = ExcelBillRepository(db.SALES_FILE)
-    purchases = ExcelBillRepository(db.PURCHASES_FILE)
-    stock = ExcelStockRepository()
-    parties = ExcelPartyRepository()
-    return sales, purchases, stock, parties
+    return ExcelStockRepository()
 
 
-def _build_sql_repositories() -> tuple[BillRepository, BillRepository,
-                                       StockRepository, PartyRepository]:
+def _build_sql_stock_repository() -> StockRepository:
     raise NotImplementedError(
-        "postgres backend: Phase 2 — app/repositories/sql/{bill,stock,party}.py "
-        "are still stubs, see docs/architecture.md")
+        "postgres backend: Phase 2 — app/repositories/sql/stock.py is still a stub, "
+        "see docs/architecture.md")
 
 
 class Container:
@@ -79,11 +73,9 @@ class Container:
 
     def __init__(self):
         if settings.backend == "excel":
-            self.sales_repo, self.purchases_repo, self.stock_repo, self.party_repo = (
-                _build_excel_repositories())
+            self.stock_repo = _build_excel_stock_repository()
         elif settings.backend == "postgres":
-            self.sales_repo, self.purchases_repo, self.stock_repo, self.party_repo = (
-                _build_sql_repositories())
+            self.stock_repo = _build_sql_stock_repository()
         else:
             raise ValueError(f"Unknown INVENTORY_BACKEND: {settings.backend!r}")
 
@@ -105,15 +97,8 @@ class Container:
         self.sessions = SessionManager(
             idle_timeout=timedelta(minutes=settings.session_idle_timeout_minutes))
 
-    def billing_service(self) -> BillingService:
-        return BillingService(self.sales_repo, self.purchases_repo, self.stock_repo,
-                              self.party_repo)
-
     def stock_service(self) -> StockService:
         return StockService(self.stock_repo)
-
-    def party_service(self) -> PartyService:
-        return PartyService(self.party_repo)
 
     def auth_service(self) -> AuthService:
         return AuthService(self.user_repo, self.sessions, self.audit_log_repo,
@@ -127,10 +112,6 @@ class Container:
     def user_service(self) -> UserService:
         return UserService(self.user_repo, self.sessions, self.audit_log_repo,
                            self.organization_repo)
-
-    def dashboard_service(self) -> DashboardService:
-        return DashboardService(self.billing_service(), self.stock_service(),
-                                self.party_service())
 
     def product_service(self) -> ProductService:
         return ProductService(self.product_repo, self.sessions, self.audit_log_repo)

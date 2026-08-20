@@ -1,12 +1,16 @@
 """Inventory page — live per-warehouse stock levels via InventoryService
 (the SQL-backed warehouse ledger, see app/services/inventory_service.py),
-plus a "+ Stock In" action that writes to the same ledger. The legacy
-Excel-backed StockService (app.services.stock_service) still exists and
-still powers the old Tkinter app / billing flow, but this page no longer
-reads from it — it was a second, disconnected stock number that a Stock In
-here never moved, which made Stock In look broken. Only Stock In is wired
-up; other adjustments/transfers aren't (inventory.transfer permission
-exists in the catalog for when that lands).
+plus "+ Stock In" and "Adjust Stock" actions that write to the same
+ledger. The legacy Excel-backed StockService (app.services.stock_service)
+still exists and still powers the old Tkinter app, but this page no
+longer reads from it — it was a second, disconnected stock number that a
+Stock In here never moved, which made Stock In look broken.
+
+"Adjust Stock" opens StockAdjustmentDialog, covering the rest of
+InventoryService's stock-changing operations (stock out, mark damaged,
+manual adjustment, transfer between warehouses) that previously had no UI
+at all despite being fully implemented and atomically ledgered in
+InventoryService/InventoryRepository — see that dialog's docstring.
 """
 import logging
 
@@ -33,6 +37,7 @@ from app.ui import permission_hints
 from app.ui.widgets.async_content import AsyncContentArea
 from app.ui.widgets.page_header import PageHeader
 from app.ui.widgets.states import EmptyStateWidget
+from app.ui.widgets.stock_adjustment_dialog import StockAdjustmentDialog, StockAdjustmentMode
 from app.ui.widgets.stock_in_dialog import StockInDialog
 
 _logger = logging.getLogger(__name__)
@@ -78,6 +83,12 @@ class InventoryPage(QWidget):
         bar.addStretch()
 
         if self._can("inventory.adjust"):
+            self._adjust_button = QPushButton("Adjust Stock")
+            self._adjust_button.setObjectName("ghost")
+            self._adjust_button.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._adjust_button.clicked.connect(self._open_stock_adjustment_dialog)
+            bar.addWidget(self._adjust_button)
+
             self._stock_in_button = QPushButton("+ Stock In")
             self._stock_in_button.setObjectName("primary")
             self._stock_in_button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -113,6 +124,40 @@ class InventoryPage(QWidget):
             self, "Stock added",
             f"{product_label} at {warehouse_label} now has "
             f"{transaction.quantity_on_hand_after:g} on hand.")
+
+    # -- stock out / mark damaged / adjustment / transfer ----------------#
+    def _open_stock_adjustment_dialog(self) -> None:
+        dialog = StockAdjustmentDialog(
+            self._inventory_service, self._products, self._warehouses,
+            allow_transfer=self._can("inventory.transfer"), parent=self)
+        if dialog.exec() and dialog.transaction is not None:
+            self._show_stock_adjustment_confirmation(dialog.mode, dialog.transaction)
+            self.refresh()
+
+    def _show_stock_adjustment_confirmation(self, mode, result) -> None:
+        def product_label(product_id):
+            product = next((p for p in self._products if p.id == product_id), None)
+            return product.name if product else str(product_id)
+
+        def warehouse_label(warehouse_id):
+            warehouse = next((w for w in self._warehouses if w.id == warehouse_id), None)
+            return warehouse.name if warehouse else str(warehouse_id)
+
+        if mode is StockAdjustmentMode.TRANSFER:
+            from_txn, to_txn = result
+            QMessageBox.information(
+                self, "Stock transferred",
+                f"{product_label(from_txn.product_id)}: "
+                f"{warehouse_label(from_txn.warehouse_id)} now has "
+                f"{from_txn.quantity_on_hand_after:g}, "
+                f"{warehouse_label(to_txn.warehouse_id)} now has "
+                f"{to_txn.quantity_on_hand_after:g}.")
+        else:
+            QMessageBox.information(
+                self, "Stock updated",
+                f"{product_label(result.product_id)} at "
+                f"{warehouse_label(result.warehouse_id)} now has "
+                f"{result.quantity_on_hand_after:g} on hand.")
 
     # -- table rendering --------------------------------------------- #
     def _render_table(self, data) -> QTableWidget:

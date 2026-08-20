@@ -21,6 +21,7 @@ backup.create/backup.restore permissions (already OWNER/ADMIN-only), on
 top of settings.manage for the location/frequency/retention fields.
 """
 import logging
+import os
 from collections.abc import Callable
 from decimal import Decimal, InvalidOperation
 
@@ -67,6 +68,7 @@ _logger = logging.getLogger(__name__)
 
 _BACKUP_COLUMNS = ["Created", "Filename", "Size", "Status", "Verified"]
 _LOGO_PREVIEW_SIZE = 96
+_LOGO_MAX_BYTES = 5 * 1024 * 1024  # 5 MB — a logo has no business being larger
 
 
 def _human_size(num_bytes: int | None) -> str:
@@ -446,8 +448,19 @@ class _LogoEditor(QWidget):
             self, "Choose a logo image", "", "Images (*.png *.jpg *.jpeg *.gif *.bmp)")
         if not path:
             return
-        with open(path, "rb") as f:
-            image_bytes = f.read()
+        try:
+            if os.path.getsize(path) > _LOGO_MAX_BYTES:
+                QMessageBox.warning(
+                    self, "Logo too large",
+                    f"Choose an image smaller than {_LOGO_MAX_BYTES // (1024 * 1024)} MB.")
+                return
+            with open(path, "rb") as f:
+                image_bytes = f.read()
+        except OSError as exc:
+            _logger.exception("Failed to read logo file", exc_info=exc)
+            QMessageBox.warning(self, "Couldn't read file",
+                               "That file couldn't be read. Choose a different image.")
+            return
         content_type = {
             "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
             "gif": "image/gif", "bmp": "image/bmp",

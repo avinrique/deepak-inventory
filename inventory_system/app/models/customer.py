@@ -45,7 +45,7 @@ class Customer(UUIDPKMixin, TimestampMixin, Base):
     )
 
     organization_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"),
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="RESTRICT"),
         nullable=False)
     customer_code: Mapped[str | None] = mapped_column(String(50), nullable=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)

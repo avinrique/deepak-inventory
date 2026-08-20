@@ -143,3 +143,72 @@ def test_connection_dropped_mid_transaction_persists_nothing(live_db):
             name="Partial Write Before Drop").first() is None
         assert session.query(Organization).filter_by(
             name="Should Never Persist").first() is None
+
+
+# -- startup schema-version guard ---------------------------------------- #
+# check_schema_version (app.database.schema_check) is the fix for a real
+# production incident: a deployed database was one migration behind the
+# code, and the first user action that touched the missing column crashed
+# deep inside a repository call instead of failing clearly at startup. See
+# SchemaVersionMismatchError's docstring.
+
+def _reset_alembic_version_table(engine) -> None:
+    # Base.metadata.drop_all (live_db's own teardown) doesn't touch
+    # alembic_version — it isn't part of Base.metadata, alembic owns it
+    # separately — so a stamp() from an earlier test in the same run would
+    # otherwise leak into whichever of these three runs next. Called at the
+    # start of each test below for order-independence.
+    with engine.connect() as conn:
+        conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
+        conn.commit()
+
+
+def test_check_schema_version_passes_when_database_is_at_head(live_db):
+    from alembic.command import stamp
+    from app.database.schema_check import _expected_head_revision, check_schema_version
+    from app.database.schema_check import _PROJECT_ROOT
+    from alembic.config import Config
+
+    _reset_alembic_version_table(live_db)
+    config = Config(str(_PROJECT_ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(_PROJECT_ROOT / "migrations"))
+    config.set_main_option("sqlalchemy.url", str(live_db.url))
+    stamp(config, _expected_head_revision())
+
+    check_schema_version()  # no exception
+
+
+def test_check_schema_version_raises_when_database_is_behind(live_db):
+    from alembic.command import stamp
+    from alembic.config import Config
+
+    from app.database.schema_check import _PROJECT_ROOT
+    from app.core.exceptions import SchemaVersionMismatchError
+    from app.database.schema_check import check_schema_version
+
+    _reset_alembic_version_table(live_db)
+    config = Config(str(_PROJECT_ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(_PROJECT_ROOT / "migrations"))
+    config.set_main_option("sqlalchemy.url", str(live_db.url))
+    # One revision behind head — reproduces the exact incident this guard
+    # exists for (missing invoices.overall_discount_amount).
+    stamp(config, "65a248c62115")
+
+    with pytest.raises(SchemaVersionMismatchError) as excinfo:
+        check_schema_version()
+    assert "65a248c62115" in str(excinfo.value)
+
+
+def test_check_schema_version_raises_when_no_migrations_ever_applied(live_db):
+    """live_db's own Base.metadata.create_all builds every table without
+    ever writing an alembic_version row — the same state a brand-new
+    database would be in before anyone runs ``alembic upgrade head``.
+    """
+    from app.core.exceptions import SchemaVersionMismatchError
+    from app.database.schema_check import check_schema_version
+
+    _reset_alembic_version_table(live_db)
+
+    with pytest.raises(SchemaVersionMismatchError) as excinfo:
+        check_schema_version()
+    assert "no migrations applied" in str(excinfo.value)

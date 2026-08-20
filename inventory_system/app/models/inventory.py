@@ -48,7 +48,7 @@ class Inventory(UUIDPKMixin, TimestampMixin, Base):
     )
 
     organization_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"),
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="RESTRICT"),
         nullable=False)
     # RESTRICT: a product/warehouse with inventory history can't be deleted
     # out from under it — same policy as Product.category_id/brand_id.
@@ -84,7 +84,7 @@ class InventoryTransaction(UUIDPKMixin, Base):
     )
 
     organization_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"),
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="RESTRICT"),
         nullable=False)
     product_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("products.id", ondelete="RESTRICT"), nullable=False)
@@ -131,7 +131,7 @@ class StockAdjustment(UUIDPKMixin, Base):
     )
 
     organization_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"),
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="RESTRICT"),
         nullable=False)
     product_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("products.id", ondelete="RESTRICT"), nullable=False)
@@ -168,7 +168,7 @@ class StockTransfer(UUIDPKMixin, Base):
     )
 
     organization_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"),
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="RESTRICT"),
         nullable=False)
     product_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("products.id", ondelete="RESTRICT"), nullable=False)

@@ -7,6 +7,7 @@ permission covering every Settings tab). This is the "Settings" the
 invoice/PDF system pulls company information from — see
 app.reports.sales_invoice_pdf.
 """
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -16,6 +17,13 @@ from app.repositories.interfaces import AuditLogRepository, OrganizationReposito
 from app.schemas.organization import OrganizationOut, OrganizationUpdate
 from app.security.authorization import require_permission
 from app.security.session import SessionManager
+
+# Mirrors app.domain.sales/app.domain.purchasing's own _EMAIL_RE/_PHONE_RE
+# copies rather than importing one of them — garbage values here would
+# silently flow into every generated invoice PDF (company_email/phone), see
+# app.reports.sales_invoice_pdf.
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_PHONE_RE = re.compile(r"^[0-9+()\-.\s]{7,32}$")
 
 
 class OrganizationService:
@@ -58,6 +66,12 @@ class OrganizationService:
             errors.append("Minimum password length must be at least 4 characters.")
         if data.backup_retention_count is not None and data.backup_retention_count < 0:
             errors.append("Backup retention count cannot be negative.")
+        if data.email is not None and data.email.strip() and not _EMAIL_RE.match(
+                data.email.strip()):
+            errors.append("Email address format is invalid.")
+        if data.phone is not None and data.phone.strip() and not _PHONE_RE.match(
+                data.phone.strip()):
+            errors.append("Phone number format is invalid.")
         if data.default_warehouse_id is not None:
             warehouse = self._warehouses.get_by_id(org_id, data.default_warehouse_id)
             if warehouse is None:

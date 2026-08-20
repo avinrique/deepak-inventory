@@ -347,9 +347,19 @@ class SqlSalesOrderRepository:
     def update(self, organization_id: uuid.UUID, sales_order_id: uuid.UUID,
               data: SalesOrderUpdate) -> SalesOrderOut | None:
         with get_session() as db:
-            so = db.get(SalesOrder, sales_order_id)
+            so = db.get(SalesOrder, sales_order_id, with_for_update=True)
             if so is None or so.organization_id != organization_id:
                 return None
+            # Re-checked here, locked, as defense in depth: SalesService
+            # already checks status == DRAFT before calling update(), but
+            # that check happens in a separate, unlocked read — without
+            # this re-check under the row lock, a concurrent confirm()
+            # could land between the service's check and this transaction,
+            # letting items be deleted/replaced on an order that is no
+            # longer DRAFT (possibly already fulfilled against the old
+            # items). Same convention as finalize_new_bill's own re-check.
+            if so.status != SalesOrderStatus.DRAFT:
+                raise SalesOrderValidationError(["Only draft sales orders can be edited."])
             for field, value in data.model_dump(exclude_unset=True, exclude={"items"}).items():
                 setattr(so, field, value)
             if data.items is not None:
@@ -410,18 +420,27 @@ class SqlSalesOrderRepository:
     def confirm(self, organization_id: uuid.UUID, sales_order_id: uuid.UUID,
               confirmed_by: uuid.UUID) -> SalesOrderOut | None:
         with get_session() as db:
-            so = db.get(SalesOrder, sales_order_id)
+            so = db.get(SalesOrder, sales_order_id, with_for_update=True)
             if so is None or so.organization_id != organization_id:
                 return None
+            # Locked re-check, same reasoning as update()/cancel(): the
+            # service layer already validates the transition against an
+            # unlocked read, so a concurrent transition on this same order
+            # (e.g. a second confirm, or a cancel) must be re-validated
+            # once this transaction actually holds the row.
+            if not can_transition(so.status, SalesOrderStatus.CONFIRMED):
+                raise InvalidSalesOrderTransitionError(so.status, SalesOrderStatus.CONFIRMED)
             _confirm(db, so, confirmed_by)
             return _to_out(so)
 
     def cancel(self, organization_id: uuid.UUID, sales_order_id: uuid.UUID,
               cancelled_by: uuid.UUID) -> SalesOrderOut | None:
         with get_session() as db:
-            so = db.get(SalesOrder, sales_order_id)
+            so = db.get(SalesOrder, sales_order_id, with_for_update=True)
             if so is None or so.organization_id != organization_id:
                 return None
+            if not can_transition(so.status, SalesOrderStatus.CANCELLED):
+                raise InvalidSalesOrderTransitionError(so.status, SalesOrderStatus.CANCELLED)
             previous_status = so.status
             so.status = SalesOrderStatus.CANCELLED
             db.flush()
@@ -440,7 +459,14 @@ class SqlSalesOrderRepository:
     def fulfill_sale(self, organization_id: uuid.UUID, sales_order_id: uuid.UUID,
                     fulfilled_by: uuid.UUID) -> SalesOrderOut:
         with get_session() as db:
-            so = db.get(SalesOrder, sales_order_id)
+            # Locked before _fulfill reads so.status: without this,
+            # concurrent fulfill_sale calls on the same order could both
+            # observe status == CONFIRMED before either commits (the
+            # SalesOrderItem row lock inside _fulfill serializes the
+            # inventory deduction itself, but the second caller's
+            # already-read so.status is never refreshed after waiting on
+            # that lock, so it would double-deduct without this).
+            so = db.get(SalesOrder, sales_order_id, with_for_update=True)
             if so is None or so.organization_id != organization_id:
                 raise SalesOrderNotFoundError(sales_order_id)
             _fulfill(db, organization_id, so, fulfilled_by)
@@ -558,7 +584,7 @@ class SqlSalesOrderRepository:
         fulfill_sale/generate_invoice re-checking their own preconditions.
         """
         with get_session() as db:
-            so = db.get(SalesOrder, sales_order_id)
+            so = db.get(SalesOrder, sales_order_id, with_for_update=True)
             if so is None or so.organization_id != organization_id:
                 raise SalesOrderNotFoundError(sales_order_id)
             if so.status != SalesOrderStatus.DRAFT:

@@ -1,22 +1,22 @@
-"""Suppliers page — list/add/edit/activate/deactivate suppliers.
-
-Replaces the previous placeholder: Supplier has been a real, typed,
-first-class entity (model + SqlSupplierRepository + PurchaseService) since
-the purchasing workflow was built around supplier_id — this page just
-never got built alongside them, which meant a fresh organization had no
-way to create its first supplier through the UI at all (the Purchase
-Order dialog needs at least one to even enable its Submit button). No
-business logic here: every action calls PurchaseService on a background
-Worker — validation and purchases.* permission checks all live in the
-service layer.
+"""Suppliers page — list/add/edit vendor records via PurchaseService.
+Replaces the previous placeholder ("party records aren't typed yet"
+reasoning is stale — Supplier has been a real, typed, first-class entity
+since app.services.purchase_service/app.repositories.sql.supplier_repository
+were built for Purchase Order creation; this page just never got built
+alongside them, leaving Purchasing with no way to create a supplier on a
+fresh database). No business logic here: every action calls PurchaseService
+on a background Worker and renders whatever comes back — validation,
+email/phone format checks, and the purchases.*/inventory.view permission
+checks all live in the service layer.
 """
 import logging
 
-from PySide6.QtCore import Qt, QThreadPool
+from PySide6.QtCore import Qt, QThreadPool, QTimer
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
+    QLineEdit,
     QMenu,
     QMessageBox,
     QPushButton,
@@ -40,8 +40,9 @@ from app.ui.widgets.states import EmptyStateWidget
 from app.ui.widgets.supplier_form_dialog import SupplierFormDialog
 from app.workers.base_worker import Worker
 
-_COLUMNS = ["Name", "Contact Person", "Phone", "Email", "Status", "Actions"]
+_COLUMNS = ["Supplier", "Contact", "Phone", "Email", "Status", "Actions"]
 _ACTIONS_COL = 5
+_SEARCH_DEBOUNCE_MS = 300
 
 _logger = logging.getLogger(__name__)
 
@@ -51,7 +52,6 @@ class SuppliersPage(QWidget):
         super().__init__()
         self._purchase_service = purchase_service
         self._sessions = sessions
-        self._current_rows: list[SupplierOut] = []
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -60,24 +60,36 @@ class SuppliersPage(QWidget):
         layout.addLayout(self._build_toolbar())
 
         self._async_area = AsyncContentArea(
-            load=self._purchase_service.list_suppliers, render=self._render_table,
+            load=self._load, render=self._render_table,
             is_empty=lambda rows: len(rows) == 0,
             empty_state=EmptyStateWidget(
                 "No suppliers yet", icon="🚚",
-                message="Add your first supplier to start creating purchase orders."),
+                message="Try a different search, or add your first supplier."),
             error_message="Couldn't load suppliers.")
         layout.addWidget(self._async_area, stretch=1)
+
+        self._search_debounce = QTimer(self)
+        self._search_debounce.setSingleShot(True)
+        self._search_debounce.timeout.connect(self.refresh)
 
     def refresh(self) -> None:
         self._async_area.reload()
 
+    # -- permissions ------------------------------------------------- #
     def _can(self, code: str) -> bool:
         return permission_hints.can(self._sessions, code)
 
+    # -- toolbar ------------------------------------------------------#
     def _build_toolbar(self) -> QHBoxLayout:
         bar = QHBoxLayout()
         bar.setContentsMargins(28, 4, 28, 12)
         bar.setSpacing(10)
+
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("Search name, contact, phone, or email…")
+        self._search.setFixedWidth(260)
+        self._search.textChanged.connect(self._on_search_changed)
+        bar.addWidget(self._search)
         bar.addStretch()
 
         if self._can("purchases.update"):
@@ -88,9 +100,23 @@ class SuppliersPage(QWidget):
             bar.addWidget(add_button)
         return bar
 
-    def _render_table(self, rows: list[SupplierOut]) -> QTableWidget:
-        self._current_rows = rows
+    def _on_search_changed(self) -> None:
+        self._search_debounce.start(_SEARCH_DEBOUNCE_MS)
 
+    # -- data flow ------------------------------------------------------#
+    def _load(self) -> list[SupplierOut]:
+        suppliers = self._purchase_service.list_suppliers()
+        search = self._search.text().strip().lower()
+        if not search:
+            return suppliers
+        return [s for s in suppliers if
+               search in s.name.lower()
+               or (s.contact_person and search in s.contact_person.lower())
+               or (s.phone and search in s.phone.lower())
+               or (s.email and search in s.email.lower())]
+
+    # -- table rendering --------------------------------------------- #
+    def _render_table(self, rows: list[SupplierOut]) -> QTableWidget:
         table = QTableWidget(len(rows), len(_COLUMNS))
         table.setHorizontalHeaderLabels(_COLUMNS)
         table.verticalHeader().setVisible(False)
@@ -99,16 +125,17 @@ class SuppliersPage(QWidget):
         table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
 
-        for row_idx, s in enumerate(rows):
-            values = [s.name, s.contact_person or "—", s.phone or "—", s.email or "—"]
+        for row_idx, supplier in enumerate(rows):
+            values = [supplier.name, supplier.contact_person or "—", supplier.phone or "—",
+                     supplier.email or "—"]
             for col, value in enumerate(values):
                 table.setItem(row_idx, col, QTableWidgetItem(value))
 
-            status_item = QTableWidgetItem("Active" if s.is_active else "Inactive")
-            status_item.setForeground(QColor(GREEN_DARK if s.is_active else RED))
+            status_item = QTableWidgetItem("Active" if supplier.is_active else "Inactive")
+            status_item.setForeground(QColor(GREEN_DARK if supplier.is_active else RED))
             table.setItem(row_idx, 4, status_item)
 
-            table.setCellWidget(row_idx, _ACTIONS_COL, self._build_actions_button(s))
+            table.setCellWidget(row_idx, _ACTIONS_COL, self._build_actions_button(supplier))
         return table
 
     def _build_actions_button(self, supplier: SupplierOut) -> QWidget:
@@ -141,6 +168,7 @@ class SuppliersPage(QWidget):
         layout.addStretch()
         return holder
 
+    # -- dialogs -------------------------------------------------------- #
     def _open_add_dialog(self) -> None:
         dialog = SupplierFormDialog(self._purchase_service, parent=self)
         if dialog.exec():
@@ -156,17 +184,21 @@ class SuppliersPage(QWidget):
         if dialog.exec():
             self.refresh()
 
+    # -- activate/deactivate ---------------------------------------------- #
     def _activate(self, supplier: SupplierOut) -> None:
-        self._run_action(supplier.id, SupplierUpdate(is_active=True))
+        self._run_action(self._purchase_service.update_supplier, supplier.id,
+                         SupplierUpdate(is_active=True))
 
     def _deactivate(self, supplier: SupplierOut) -> None:
         if confirm(self, "Deactivate Supplier",
-                  f"Deactivate {supplier.name!r}? It will no longer be selectable for new "
-                  "purchase orders.", confirm_label="Deactivate", danger=True):
-            self._run_action(supplier.id, SupplierUpdate(is_active=False))
+                  f"Deactivate {supplier.name!r}? It can still be viewed, but won't be "
+                  "selectable for new purchase orders going forward.",
+                  confirm_label="Deactivate", danger=True):
+            self._run_action(self._purchase_service.update_supplier, supplier.id,
+                             SupplierUpdate(is_active=False))
 
-    def _run_action(self, supplier_id, data: SupplierUpdate) -> None:
-        worker = Worker(self._purchase_service.update_supplier, supplier_id, data)
+    def _run_action(self, fn, *args) -> None:
+        worker = Worker(fn, *args)
         worker.signals.finished.connect(lambda _=None: self.refresh())
         worker.signals.error.connect(self._on_action_error)
         QThreadPool.globalInstance().start(worker)

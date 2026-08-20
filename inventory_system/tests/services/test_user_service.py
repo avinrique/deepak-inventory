@@ -17,6 +17,7 @@ from app.core.exceptions import (
     DuplicateUsernameError,
     MembershipNotFoundError,
     OwnerProtectedError,
+    OwnerRoleNotAssignableError,
     RoleNotFoundError,
     UserNotFoundError,
     UserValidationError,
@@ -149,7 +150,13 @@ class FakeUserRepository:
                       created_at=profile["created_at"], last_login_at=profile["last_login_at"])
 
     def list_roles(self):
-        return [RoleOut(id=ROLE_ID, name="SALES_STAFF", description=None, is_system=True)]
+        # Mirrors SqlUserRepository.list_roles: every role in the catalog,
+        # OWNER included — change_user_role's OwnerRoleNotAssignableError
+        # check depends on OWNER actually showing up here, same as the real
+        # repository would return it.
+        return [RoleOut(id=ROLE_ID, name="SALES_STAFF", description=None, is_system=True),
+               RoleOut(id=OTHER_ROLE_ID, name="MANAGER", description=None, is_system=True),
+               RoleOut(id=OWNER_ROLE_ID, name="OWNER", description=None, is_system=True)]
 
     def role_exists(self, role_id):
         return role_id in self._KNOWN_ROLE_IDS
@@ -578,6 +585,18 @@ def test_authorized_change_user_role_updates_and_audits():
     updated = service.change_user_role(TARGET_USER_ID, OTHER_ROLE_ID)
     assert updated.role_name == "MANAGER"
     assert any(e["action"] == "user.role_changed" for e in audit_log.entries)
+
+
+def test_promoting_a_non_owner_user_to_owner_role_is_refused():
+    # The inverse of test_change_role_of_the_organizations_owner_is_refused:
+    # OWNER can't be *assigned* through this action either (privilege
+    # escalation — an ADMIN with users.manage_roles must not be able to
+    # make themselves or anyone else the un-demotable Owner). There is
+    # exactly one Owner per organization, set at org creation.
+    service, repo, _, _ = _service_as({"users.manage_roles"})
+    with pytest.raises(OwnerRoleNotAssignableError):
+        service.change_user_role(TARGET_USER_ID, OWNER_ROLE_ID)
+    assert repo.memberships[(TARGET_USER_ID, ORG_ID)].role_name == "SALES_STAFF"
 
 
 def test_change_user_role_rejects_an_unknown_role_id():

@@ -75,6 +75,37 @@ def test_deleting_assigned_role_is_restricted(live_db):
             session.delete(session.get(Role, role_id))
 
 
+def test_deleting_organization_with_financial_history_is_restricted(live_db):
+    """A DELETE FROM organizations run outside the app (a support script, a
+    bad migration — there is no delete_organization feature anywhere in
+    the app itself) must never silently cascade away an organization's
+    invoices/payments/inventory ledger. Every business/financial table's
+    organization_id FK was CASCADE until this was fixed; this is the
+    regression test for that fix — see migration b7d4e91a5c33.
+    """
+    from app.models import Customer
+
+    with get_session() as session:
+        org = Organization(name="Has Financial History")
+        session.add(org)
+        session.flush()
+        session.add(Customer(organization_id=org.id, name="Some Customer"))
+        org_id = org.id
+
+    with pytest.raises(IntegrityError):
+        with get_session() as session:
+            session.delete(session.get(Organization, org_id))
+
+    # Unaffected once the offending child row is gone first — proves this
+    # is RESTRICT (blocks until cleared), not a permanently broken delete.
+    with get_session() as session:
+        session.query(Customer).filter_by(organization_id=org_id).delete()
+    with get_session() as session:
+        session.delete(session.get(Organization, org_id))
+    with get_session() as session:
+        assert session.get(Organization, org_id) is None
+
+
 def test_rollback_on_exception_persists_nothing(live_db):
     try:
         with get_session() as session:

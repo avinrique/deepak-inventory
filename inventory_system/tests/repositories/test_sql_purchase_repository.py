@@ -9,6 +9,7 @@ Uses the ``live_db`` fixture (tests/conftest.py) — see its docstring for
 why this is gated on INVENTORY_TEST_DATABASE_URL, separate from the app's
 real INVENTORY_DATABASE_URL, and how to run these locally.
 """
+import threading
 from decimal import Decimal
 
 import pytest
@@ -174,6 +175,59 @@ def test_cancel_records_audit_log_entry(world):
         assert entries[0].actor_email == "buyer@example.com"
         assert entries[0].changes["before"]["status"] == "DRAFT"
         assert entries[0].changes["after"]["status"] == "CANCELLED"
+
+
+def test_concurrent_approve_and_cancel_cannot_both_apply(world):
+    """Regression test: approve()/cancel() used to load the PurchaseOrder
+    via a plain (unlocked) db.get() with no re-validation of the current
+    status, so two concurrent transitions on the same SUBMITTED PO (e.g. a
+    clerk approving it while a manager cancels it) could both blindly
+    overwrite po.status with last-write-wins semantics, leaving no
+    guarantee about which transition "actually" happened or an audit trail
+    that doesn't match the final state. Now both lock the row and
+    re-validate the transition under that lock: exactly one of the two
+    concurrent calls must succeed, and the other must be rejected outright
+    rather than silently clobbering the winner's status.
+    """
+    repo = _repo()
+    po = _create_po(world)
+    repo.submit(world["org_id"], po.id)
+
+    results = {}
+    barrier = threading.Barrier(2)
+
+    def do_approve():
+        barrier.wait()
+        try:
+            repo.approve(world["org_id"], po.id, world["user_id"])
+            results["approve"] = "ok"
+        except Exception:
+            results["approve"] = "rejected"
+
+    def do_cancel():
+        barrier.wait()
+        try:
+            repo.cancel(world["org_id"], po.id, world["user_id"])
+            results["cancel"] = "ok"
+        except Exception:
+            results["cancel"] = "rejected"
+
+    threads = [threading.Thread(target=do_approve), threading.Thread(target=do_cancel)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    # Exactly one transition must have won — never both "ok" (that would
+    # mean the loser's write silently clobbered the winner's).
+    outcomes = sorted(results.values())
+    assert outcomes == ["ok", "rejected"]
+
+    final = repo.get_by_id(world["org_id"], po.id)
+    if results["approve"] == "ok":
+        assert final.status == PurchaseOrderStatus.APPROVED
+    else:
+        assert final.status == PurchaseOrderStatus.CANCELLED
 
 
 # -- receiving goods -------------------------------------------------------#

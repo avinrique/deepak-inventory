@@ -22,7 +22,7 @@ class Unit(UUIDPKMixin, TimestampMixin, Base):
     )
 
     organization_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"),
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="RESTRICT"),
         nullable=False)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     abbreviation: Mapped[str] = mapped_column(String(20), nullable=False)

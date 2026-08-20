@@ -21,7 +21,7 @@ class Supplier(UUIDPKMixin, TimestampMixin, Base):
     )
 
     organization_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"),
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="RESTRICT"),
         nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     contact_person: Mapped[str | None] = mapped_column(String(255), nullable=True)

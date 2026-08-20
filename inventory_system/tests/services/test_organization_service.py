@@ -132,6 +132,29 @@ def test_update_organization_rejects_blank_purchase_prefix():
         service.update_organization(OrganizationUpdate(purchase_number_prefix="  "))
 
 
+def test_update_organization_rejects_malformed_email():
+    """Regression test: Organization.email/phone had no format validation
+    at all, so garbage values could silently flow into every generated
+    invoice PDF (company_email/phone) — see
+    app.reports.sales_invoice_pdf.
+    """
+    service, _ = _service()
+    with pytest.raises(OrganizationValidationError):
+        service.update_organization(OrganizationUpdate(email="not-an-email"))
+
+
+def test_update_organization_accepts_valid_email():
+    service, repo = _service()
+    result = service.update_organization(OrganizationUpdate(email="billing@acme.test"))
+    assert result.email == "billing@acme.test"
+
+
+def test_update_organization_rejects_malformed_phone():
+    service, _ = _service()
+    with pytest.raises(OrganizationValidationError):
+        service.update_organization(OrganizationUpdate(phone="not a phone number!!"))
+
+
 def test_update_organization_rejects_out_of_range_default_tax_percent():
     service, _ = _service()
     with pytest.raises(OrganizationValidationError):

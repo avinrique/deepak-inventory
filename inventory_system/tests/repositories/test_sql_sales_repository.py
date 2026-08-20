@@ -129,6 +129,65 @@ def test_update_preserves_line_discount_percent(world):
     assert updated.items[0].discount_percent == Decimal("10")
 
 
+def test_concurrent_update_and_confirm_cannot_both_apply_to_the_same_draft(world):
+    """Regression test: update() used to load the SalesOrder via a plain
+    (unlocked) db.get() and never re-checked status == DRAFT, so a
+    confirm() racing in another thread could land between the service
+    layer's own (also unlocked) DRAFT check and this transaction — letting
+    items be deleted/replaced on an order that is no longer DRAFT. Now
+    update()/confirm() both lock the row and re-validate under that lock,
+    so exactly one of two orderings is possible: update fully completes
+    before confirm reads status (both succeed, confirm operates on the new
+    items), or confirm wins the race and update is rejected outright
+    (SalesOrderValidationError) rather than silently applying anyway.
+    """
+    so = _create_so(world, quantity=Decimal("5"))
+    repo = _repo()
+
+    results = {}
+    barrier = threading.Barrier(2)
+
+    def do_update():
+        barrier.wait()
+        try:
+            repo.update(world["org_id"], so.id, SalesOrderUpdate(
+                items=[SalesOrderItemInput(product_id=world["product2_id"],
+                                          quantity_ordered=Decimal("9"),
+                                          unit_price=Decimal("30"), tax_percent=Decimal("0"))]))
+            results["update"] = "ok"
+        except Exception:
+            results["update"] = "rejected"
+
+    def do_confirm():
+        barrier.wait()
+        try:
+            repo.confirm(world["org_id"], so.id, world["user_id"])
+            results["confirm"] = "ok"
+        except Exception:
+            results["confirm"] = "rejected"
+
+    threads = [threading.Thread(target=do_update), threading.Thread(target=do_confirm)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    final = repo.get_by_id(world["org_id"], so.id)
+    assert final.status == SalesOrderStatus.CONFIRMED, "confirm must win eventually either way"
+
+    if results["update"] == "ok":
+        # update fully applied before confirm observed the row: the
+        # confirmed order must reflect the NEW items, not the original ones.
+        assert len(final.items) == 1
+        assert final.items[0].product_id == world["product2_id"]
+        assert final.items[0].quantity_ordered == Decimal("9")
+    else:
+        # confirm won the race: update must have been cleanly rejected,
+        # never silently applied to a no-longer-DRAFT order.
+        assert final.items[0].product_id == world["product_id"]
+        assert final.items[0].quantity_ordered == Decimal("5")
+
+
 # -- status transitions ----------------------------------------------------#
 
 def test_confirm_sets_confirmed_by_and_at(world):

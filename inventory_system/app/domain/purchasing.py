@@ -5,10 +5,17 @@ app.domain.inventory.InventoryTransactionType: the ORM model and the
 Pydantic schema share one source of truth instead of two enums that could
 drift.
 """
+import re
 from decimal import Decimal
 from enum import Enum
 
 from app.domain.pricing import line_subtotal, line_tax, line_total  # noqa: F401 - re-exported
+
+# Mirrors app.domain.sales/app.domain.user's own _EMAIL_RE/_PHONE_RE rather
+# than importing them — this module stays dependency-free, same convention
+# app.domain.sales's own copy documents.
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_PHONE_RE = re.compile(r"^[0-9+()\-.\s]{7,32}$")
 
 
 class PurchaseOrderStatus(str, Enum):
@@ -46,10 +53,15 @@ def can_transition(current: PurchaseOrderStatus, target: PurchaseOrderStatus) ->
     return target in ALLOWED_TRANSITIONS.get(current, frozenset())
 
 
-def validate_supplier(*, name: str) -> list[str]:
+def validate_supplier(*, name: str, email: str | None = None,
+                      phone: str | None = None) -> list[str]:
     errors = []
     if not name.strip():
         errors.append("Supplier name is required.")
+    if email is not None and email.strip() and not _EMAIL_RE.match(email.strip()):
+        errors.append("Email address format is invalid.")
+    if phone is not None and phone.strip() and not _PHONE_RE.match(phone.strip()):
+        errors.append("Phone number format is invalid.")
     return errors
 
 

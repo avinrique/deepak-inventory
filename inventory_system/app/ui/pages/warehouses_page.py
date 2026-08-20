@@ -1,14 +1,12 @@
-"""Warehouses page — list/add/edit/activate/deactivate warehouses.
-
-Replaces the previous placeholder: Warehouse has been a real, typed,
-first-class entity (model + SqlWarehouseRepository + InventoryService)
-since the inventory ledger/purchasing/sales workflows were built around
-warehouse_id — this page just never got built alongside them, which meant
-a fresh organization had no way to create its first warehouse through the
-UI at all (Purchase/Sales order dialogs need at least one to even enable
-their Submit button). No business logic here: every action calls
-InventoryService on a background Worker — validation, duplicate-code
-checks, and warehouse.manage permission checks all live in the service
+"""Warehouses page — list/add/edit storage locations via InventoryService.
+Replaces the previous placeholder: InventoryService.create_warehouse/
+update_warehouse/list_warehouses have been real since Phase 2 (see
+app/services/inventory_service.py) — this page just never got built
+alongside them, leaving Purchasing/Stock In with no way to create a
+warehouse to receive stock into on a fresh database. No business logic
+here: every action calls InventoryService on a background Worker and
+renders whatever comes back — validation, duplicate-code checks, and the
+warehouse.manage/inventory.view permission checks all live in the service
 layer.
 """
 import logging
@@ -52,7 +50,6 @@ class WarehousesPage(QWidget):
         super().__init__()
         self._inventory_service = inventory_service
         self._sessions = sessions
-        self._current_rows: list[WarehouseOut] = []
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -61,25 +58,26 @@ class WarehousesPage(QWidget):
         layout.addLayout(self._build_toolbar())
 
         self._async_area = AsyncContentArea(
-            load=self._inventory_service.list_warehouses, render=self._render_table,
+            load=self._inventory_service.list_warehouses,
+            render=self._render_table,
             is_empty=lambda rows: len(rows) == 0,
             empty_state=EmptyStateWidget(
                 "No warehouses yet", icon="🏬",
-                message="Add your first warehouse to start receiving stock and "
-                       "creating orders."),
+                message="Add your first warehouse before receiving stock or recording sales."),
             error_message="Couldn't load warehouses.")
         layout.addWidget(self._async_area, stretch=1)
 
     def refresh(self) -> None:
         self._async_area.reload()
 
+    # -- permissions ------------------------------------------------- #
     def _can(self, code: str) -> bool:
         return permission_hints.can(self._sessions, code)
 
+    # -- toolbar ------------------------------------------------------#
     def _build_toolbar(self) -> QHBoxLayout:
         bar = QHBoxLayout()
         bar.setContentsMargins(28, 4, 28, 12)
-        bar.setSpacing(10)
         bar.addStretch()
 
         if self._can("warehouse.manage"):
@@ -90,9 +88,8 @@ class WarehousesPage(QWidget):
             bar.addWidget(add_button)
         return bar
 
+    # -- table rendering --------------------------------------------- #
     def _render_table(self, rows: list[WarehouseOut]) -> QTableWidget:
-        self._current_rows = rows
-
         table = QTableWidget(len(rows), len(_COLUMNS))
         table.setHorizontalHeaderLabels(_COLUMNS)
         table.verticalHeader().setVisible(False)
@@ -101,16 +98,16 @@ class WarehousesPage(QWidget):
         table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
 
-        for row_idx, w in enumerate(rows):
-            values = [w.code, w.name, w.address or "—"]
+        for row_idx, warehouse in enumerate(rows):
+            values = [warehouse.code, warehouse.name, warehouse.address or "—"]
             for col, value in enumerate(values):
                 table.setItem(row_idx, col, QTableWidgetItem(value))
 
-            status_item = QTableWidgetItem("Active" if w.is_active else "Inactive")
-            status_item.setForeground(QColor(GREEN_DARK if w.is_active else RED))
+            status_item = QTableWidgetItem("Active" if warehouse.is_active else "Inactive")
+            status_item.setForeground(QColor(GREEN_DARK if warehouse.is_active else RED))
             table.setItem(row_idx, 3, status_item)
 
-            table.setCellWidget(row_idx, _ACTIONS_COL, self._build_actions_button(w))
+            table.setCellWidget(row_idx, _ACTIONS_COL, self._build_actions_button(warehouse))
         return table
 
     def _build_actions_button(self, warehouse: WarehouseOut) -> QWidget:
@@ -143,6 +140,7 @@ class WarehousesPage(QWidget):
         layout.addStretch()
         return holder
 
+    # -- dialogs -------------------------------------------------------- #
     def _open_add_dialog(self) -> None:
         dialog = WarehouseFormDialog(self._inventory_service, parent=self)
         if dialog.exec():
@@ -158,17 +156,21 @@ class WarehousesPage(QWidget):
         if dialog.exec():
             self.refresh()
 
+    # -- activate/deactivate ---------------------------------------------- #
     def _activate(self, warehouse: WarehouseOut) -> None:
-        self._run_action(warehouse.id, WarehouseUpdate(is_active=True))
+        self._run_action(self._inventory_service.update_warehouse, warehouse.id,
+                         WarehouseUpdate(is_active=True))
 
     def _deactivate(self, warehouse: WarehouseOut) -> None:
         if confirm(self, "Deactivate Warehouse",
-                  f"Deactivate {warehouse.name!r}? It will no longer be selectable for new "
-                  "orders or stock movements.", confirm_label="Deactivate", danger=True):
-            self._run_action(warehouse.id, WarehouseUpdate(is_active=False))
+                  f"Deactivate {warehouse.name!r}? It can still be viewed, but won't be "
+                  "selectable for new stock movements going forward.",
+                  confirm_label="Deactivate", danger=True):
+            self._run_action(self._inventory_service.update_warehouse, warehouse.id,
+                             WarehouseUpdate(is_active=False))
 
-    def _run_action(self, warehouse_id, data: WarehouseUpdate) -> None:
-        worker = Worker(self._inventory_service.update_warehouse, warehouse_id, data)
+    def _run_action(self, fn, *args) -> None:
+        worker = Worker(fn, *args)
         worker.signals.finished.connect(lambda _=None: self.refresh())
         worker.signals.error.connect(self._on_action_error)
         QThreadPool.globalInstance().start(worker)

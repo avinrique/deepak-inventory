@@ -159,7 +159,12 @@ class AuthService:
         else:
             default = [m for m in memberships if m.is_default]
             if len(default) != 1:
-                raise AmbiguousOrganizationError()
+                candidates = []
+                for m in memberships:
+                    org = self._organizations.get_by_id(m.organization_id)
+                    if org is not None:
+                        candidates.append((m.organization_id, org.name))
+                raise AmbiguousOrganizationError(candidates)
             membership = default[0]
             org_id = membership.organization_id
 

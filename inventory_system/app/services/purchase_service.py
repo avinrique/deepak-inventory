@@ -77,15 +77,21 @@ class PurchaseService:
     # -- suppliers ------------------------------------------------------ #
     @require_permission("purchases.update")
     def create_supplier(self, data: SupplierCreate) -> SupplierOut:
-        errors = validate_supplier(name=data.name)
+        errors = validate_supplier(name=data.name, email=data.email, phone=data.phone)
         if errors:
             raise PurchaseOrderValidationError(errors)
         return self._suppliers.create(self._organization_id(), data)
 
     @require_permission("purchases.update")
     def update_supplier(self, supplier_id: uuid.UUID, data: SupplierUpdate) -> SupplierOut:
-        if data.name is not None:
-            errors = validate_supplier(name=data.name)
+        if data.name is not None or data.email is not None or data.phone is not None:
+            current = self._suppliers.get_by_id(self._organization_id(), supplier_id)
+            if current is None:
+                raise SupplierNotFoundError(supplier_id)
+            errors = validate_supplier(
+                name=data.name if data.name is not None else current.name,
+                email=data.email if data.email is not None else current.email,
+                phone=data.phone if data.phone is not None else current.phone)
             if errors:
                 raise PurchaseOrderValidationError(errors)
         result = self._suppliers.update(self._organization_id(), supplier_id, data)

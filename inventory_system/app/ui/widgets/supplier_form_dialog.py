@@ -1,10 +1,14 @@
-"""Add/Edit supplier dialog.
+"""Add/Edit/View supplier dialog — same shape as CustomerFormDialog/
+ProductFormDialog: collects raw field values, hands them to PurchaseService,
+and displays whatever it returns or raises (PurchaseOrderValidationError/
+SupplierNotFoundError). Client-side checks here are only the cheap,
+no-round-trip ones (required name); email/phone format is still enforced
+server-side (app.domain.purchasing.validate_supplier) and surfaced from
+whatever PurchaseService raises, same division of responsibility as every
+other form dialog in app.ui.widgets.
 
-No business logic here — collects raw field values, hands them to
-PurchaseService, and displays whatever it returns or raises
-(PurchaseOrderValidationError/SupplierNotFoundError). Name validation
-lives in app.domain.purchasing / PurchaseService, not in this class — same
-convention as ProductFormDialog/WarehouseFormDialog.
+read_only=True turns this into a "View Supplier" screen: every field
+disabled, no Save button — same convention as ProductFormDialog.
 """
 from PySide6.QtCore import QThreadPool, Qt
 from PySide6.QtWidgets import (
@@ -13,14 +17,13 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
-    QTextEdit,
     QVBoxLayout,
 )
 
 from app.core.exceptions import PurchaseOrderValidationError, SupplierNotFoundError
 from app.schemas.purchasing import SupplierCreate, SupplierOut, SupplierUpdate
 from app.services.purchase_service import PurchaseService
-from app.ui.theme import RED, STYLESHEET
+from app.ui.theme import MUTED, RED, STYLESHEET
 from app.workers.base_worker import Worker
 
 
@@ -30,7 +33,6 @@ class SupplierFormDialog(QDialog):
         super().__init__(parent)
         self._purchase_service = purchase_service
         self._supplier = supplier
-        self._read_only = read_only
         self.setWindowTitle("View Supplier" if read_only else
                             ("Edit Supplier" if supplier else "Add Supplier"))
         self.setMinimumWidth(420)
@@ -60,11 +62,18 @@ class SupplierFormDialog(QDialog):
         form.addRow("Address", self._address)
 
         self._tax_id = QLineEdit(supplier.tax_id if supplier and supplier.tax_id else "")
-        form.addRow("Tax ID", self._tax_id)
+        form.addRow("Tax/VAT ID", self._tax_id)
 
-        self._notes = QTextEdit(supplier.notes if supplier and supplier.notes else "")
-        self._notes.setFixedHeight(60)
+        self._notes = QLineEdit(supplier.notes if supplier and supplier.notes else "")
         form.addRow("Notes", self._notes)
+
+        editable_widgets = [self._name, self._contact_person, self._phone, self._email,
+                            self._address, self._tax_id, self._notes]
+
+        if supplier is not None:
+            status_label = QLabel("Active" if supplier.is_active else "Inactive")
+            status_label.setStyleSheet(f"color: {MUTED};")
+            form.addRow("Status", status_label)
 
         layout.addLayout(form)
 
@@ -75,8 +84,7 @@ class SupplierFormDialog(QDialog):
         layout.addWidget(self._error_label)
 
         if read_only:
-            for widget in (self._name, self._contact_person, self._phone, self._email,
-                          self._address, self._tax_id, self._notes):
+            for widget in editable_widgets:
                 widget.setEnabled(False)
             close_button = QPushButton("Close")
             close_button.setObjectName("primary")
@@ -97,15 +105,14 @@ class SupplierFormDialog(QDialog):
         self._error_label.hide()
         name = self._name.text().strip()
         if not name:
-            self._show_error("Supplier name is required.")
-            return
+            return self._show_error("Supplier name is required.")
 
         contact_person = self._contact_person.text().strip() or None
         phone = self._phone.text().strip() or None
         email = self._email.text().strip() or None
         address = self._address.text().strip() or None
         tax_id = self._tax_id.text().strip() or None
-        notes = self._notes.toPlainText().strip() or None
+        notes = self._notes.text().strip() or None
 
         self._set_busy(True)
         if self._supplier is None:

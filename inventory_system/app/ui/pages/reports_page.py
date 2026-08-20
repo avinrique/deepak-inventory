@@ -112,7 +112,18 @@ class ReportsPage(QWidget):
         self._table.verticalHeader().setVisible(False)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
-        self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        # Reports have different column sets per report type, so (unlike
+        # every other table in this app) there's no single column to
+        # dedicate Stretch to — Stretch on the whole header forces every
+        # column to equal, non-interactively-resizable width, truncating
+        # long text columns (product/customer names, emails) with no way
+        # to recover them. Interactive + a one-time content-sized initial
+        # width (done in _render_table, once columns are known) + the last
+        # column absorbing any remaining space gives sensible defaults
+        # while keeping every column user-resizable.
+        self._table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Interactive)
+        self._table.horizontalHeader().setStretchLastSection(True)
         body_layout.addWidget(self._table, stretch=1)
 
         layout.addWidget(body, stretch=1)
@@ -265,6 +276,7 @@ class ReportsPage(QWidget):
             for col_idx, column in enumerate(result.columns):
                 value = row.get(column)
                 self._table.setItem(row_idx, col_idx, QTableWidgetItem(_format_cell(value)))
+        self._table.resizeColumnsToContents()
 
     # -- export / print --------------------------------------------------#
     def _require_result(self) -> ReportResult | None:

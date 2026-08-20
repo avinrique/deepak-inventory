@@ -284,6 +284,24 @@ def test_get_supplier_missing_raises_not_found():
         service.get_supplier(uuid.uuid4())
 
 
+def test_create_supplier_rejects_malformed_email():
+    service, _, _ = _setup()
+    with pytest.raises(PurchaseOrderValidationError):
+        service.create_supplier(SupplierCreate(name="Acme 2", email="not-an-email"))
+
+
+def test_create_supplier_rejects_malformed_phone():
+    service, _, _ = _setup()
+    with pytest.raises(PurchaseOrderValidationError):
+        service.create_supplier(SupplierCreate(name="Acme 2", phone="abc"))
+
+
+def test_update_supplier_rejects_malformed_email():
+    service, supplier, _ = _setup()
+    with pytest.raises(PurchaseOrderValidationError):
+        service.update_supplier(supplier.id, SupplierUpdate(email="not-an-email"))
+
+
 # -- create / edit purchase orders --------------------------------------- #
 
 def test_create_purchase_order_does_not_call_inventory_at_all():

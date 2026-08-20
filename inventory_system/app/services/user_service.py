@@ -53,6 +53,7 @@ from app.core.exceptions import (
     OwnerRoleNotAssignableError,
     PasswordPolicyViolationError,
     RoleNotFoundError,
+    SelfDeactivationError,
     UserNotFoundError,
     UserValidationError,
 )
@@ -286,7 +287,10 @@ class UserService:
 
     @require_permission("users.deactivate")
     def deactivate_user(self, target_user_id: uuid.UUID) -> None:
-        organization_id = self._organization_id()
+        session = self._sessions.current(now=datetime.now(timezone.utc))
+        if target_user_id == session.user_id:
+            raise SelfDeactivationError(target_user_id)
+        organization_id = session.organization_id
         membership = self._require_membership(target_user_id, organization_id)
         if membership.role_name == _OWNER_ROLE_NAME:
             raise OwnerProtectedError(target_user_id)

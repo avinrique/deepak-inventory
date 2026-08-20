@@ -11,15 +11,20 @@ Flow: LoginWindow -> MainWindow -> (logout or idle timeout) -> a fresh
 LoginWindow, without quitting the process — this is a shared desktop
 terminal, so returning to the login screen (not exiting) is the point.
 """
+import logging
 import sys
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from app.core.container import Container
+from app.core.exceptions import SchemaVersionMismatchError
 from app.core.logging_config import configure_logging
+from app.database.schema_check import check_schema_version
 from app.ui.login_window import LoginWindow
 from app.ui.main_window import MainWindow
 from app.ui.theme import STYLESHEET
+
+_logger = logging.getLogger(__name__)
 
 
 class AppController:
@@ -62,6 +67,23 @@ def main() -> int:
     configure_logging()
     app = QApplication(sys.argv)
     app.setStyleSheet(STYLESHEET)
+
+    # Fails fast and clearly on schema drift, before any window is shown —
+    # see SchemaVersionMismatchError's docstring for the production
+    # incident this prevents a repeat of. Deliberately not wrapped around
+    # Container() itself: a database that's merely unreachable (network
+    # down, wrong credentials) should still surface its own real error
+    # rather than being misreported as a schema mismatch.
+    try:
+        check_schema_version()
+    except SchemaVersionMismatchError as exc:
+        _logger.critical("Refusing to start: %s", exc)
+        QMessageBox.critical(
+            None, "Database schema out of date",
+            f"{exc}\n\nContact your administrator before using this application — "
+            "starting now would risk showing incomplete or incorrect data.")
+        return 1
+
     container = Container()
     controller = AppController(container)  # noqa: F841 - keeps windows alive via references
     return app.exec()

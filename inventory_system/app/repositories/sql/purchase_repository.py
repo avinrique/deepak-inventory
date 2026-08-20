@@ -34,7 +34,11 @@ from app.core.exceptions import (
 )
 from app.database.session import get_session
 from app.domain.inventory import InventoryTransactionType
-from app.domain.purchasing import PurchaseOrderStatus, format_purchase_order_number
+from app.domain.purchasing import (
+    PurchaseOrderStatus,
+    can_transition,
+    format_purchase_order_number,
+)
 from app.models import (
     GoodsReceipt,
     GoodsReceiptItem,
@@ -209,9 +213,18 @@ class SqlPurchaseOrderRepository:
     def _transition(self, organization_id: uuid.UUID, purchase_order_id: uuid.UUID,
                     target: PurchaseOrderStatus) -> PurchaseOrderOut | None:
         with get_session() as db:
-            po = db.get(PurchaseOrder, purchase_order_id)
+            # Locked, and the transition re-validated under that lock: the
+            # service layer's own can_transition check reads via a
+            # separate, unlocked get_by_id, so without this a concurrent
+            # transition on the same PO (e.g. a receive_goods finalizing
+            # it while this call is in flight) could land between that
+            # check and this write. Same defense-in-depth convention as
+            # SqlSalesOrderRepository.confirm/cancel/update.
+            po = db.get(PurchaseOrder, purchase_order_id, with_for_update=True)
             if po is None or po.organization_id != organization_id:
                 return None
+            if not can_transition(po.status, target):
+                raise InvalidPurchaseOrderTransitionError(po.status, target)
             po.status = target
             db.flush()
             return _to_out(po)
@@ -224,9 +237,11 @@ class SqlPurchaseOrderRepository:
     def approve(self, organization_id: uuid.UUID, purchase_order_id: uuid.UUID,
               approved_by: uuid.UUID) -> PurchaseOrderOut | None:
         with get_session() as db:
-            po = db.get(PurchaseOrder, purchase_order_id)
+            po = db.get(PurchaseOrder, purchase_order_id, with_for_update=True)
             if po is None or po.organization_id != organization_id:
                 return None
+            if not can_transition(po.status, PurchaseOrderStatus.APPROVED):
+                raise InvalidPurchaseOrderTransitionError(po.status, PurchaseOrderStatus.APPROVED)
             previous_status = po.status
             po.status = PurchaseOrderStatus.APPROVED
             po.approved_by = approved_by
@@ -249,9 +264,12 @@ class SqlPurchaseOrderRepository:
     def cancel(self, organization_id: uuid.UUID, purchase_order_id: uuid.UUID,
               cancelled_by: uuid.UUID) -> PurchaseOrderOut | None:
         with get_session() as db:
-            po = db.get(PurchaseOrder, purchase_order_id)
+            po = db.get(PurchaseOrder, purchase_order_id, with_for_update=True)
             if po is None or po.organization_id != organization_id:
                 return None
+            if not can_transition(po.status, PurchaseOrderStatus.CANCELLED):
+                raise InvalidPurchaseOrderTransitionError(
+                    po.status, PurchaseOrderStatus.CANCELLED)
             previous_status = po.status
             po.status = PurchaseOrderStatus.CANCELLED
             db.flush()
@@ -273,7 +291,7 @@ class SqlPurchaseOrderRepository:
                       lines: list[GoodsReceiptLineInput], received_by: uuid.UUID,
                       notes: str | None = None) -> GoodsReceiptOut:
         with get_session() as db:
-            po = db.get(PurchaseOrder, purchase_order_id)
+            po = db.get(PurchaseOrder, purchase_order_id, with_for_update=True)
             if po is None or po.organization_id != organization_id:
                 raise PurchaseOrderNotFoundError(purchase_order_id)
             if po.status not in (PurchaseOrderStatus.APPROVED,

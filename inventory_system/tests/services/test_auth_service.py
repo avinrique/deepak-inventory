@@ -4,6 +4,7 @@ interplay without needing Postgres.
 """
 import uuid
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 import pytest
 
@@ -13,6 +14,9 @@ from app.core.exceptions import (
     InvalidCredentialsError,
     UserNotFoundError,
 )
+from app.domain.backup import BackupFrequency
+from app.domain.inventory import LowStockBehavior, StockValuationMethod
+from app.schemas.organization import OrganizationOut
 from app.schemas.user import MembershipOut, UserCredentials, UserOut
 from app.security.authorization import require_permission
 from app.security.passwords import hash_password
@@ -105,6 +109,23 @@ class FakeUserRepository:
 def _membership(user_id, org_id=ORG_ID, role_id=ROLE_ID, is_default=True):
     return MembershipOut(user_id=user_id, organization_id=org_id, role_id=role_id,
                          role_name="MANAGER", is_default=is_default)
+
+
+def _org(org_id, name) -> OrganizationOut:
+    now = datetime.now(timezone.utc)
+    return OrganizationOut(
+        id=org_id, name=name, legal_name=None, tax_id=None, address=None, phone=None,
+        email=None, website=None, is_active=True, logo_content_type=None, has_logo=False,
+        allow_negative_stock=False, default_warehouse_id=None,
+        low_stock_behavior=LowStockBehavior.WARN_ONLY,
+        stock_valuation_method=StockValuationMethod.WEIGHTED_AVERAGE,
+        invoice_number_prefix="INV-", default_tax_percent=Decimal("0"),
+        default_discount_percent=Decimal("0"), purchase_number_prefix="PO-",
+        session_timeout_minutes=30, password_min_length=8,
+        password_require_uppercase=False, password_require_number=False,
+        password_require_special_char=False, backup_directory=None,
+        backup_frequency=BackupFrequency.MANUAL, backup_retention_count=None,
+        created_at=now, updated_at=now)
 
 
 class FakeOrganizationRepository:
@@ -207,6 +228,45 @@ def test_login_ambiguous_organization_without_default_is_rejected():
     service, _, _, _ = _service(repo)
     with pytest.raises(AmbiguousOrganizationError):
         service.login("owner@acme.test", "s3cret!")
+
+
+def test_login_ambiguous_organization_error_carries_candidate_organizations():
+    """Regression test: AmbiguousOrganizationError used to carry no data at
+    all, so LoginWindow had no way to render an organization picker and a
+    multi-org account with no default was permanently stuck on the login
+    screen (see app.ui.login_window). AuthService.login must now populate
+    the exception with (organization_id, organization_name) pairs the UI
+    can build a picker from directly.
+    """
+    repo = FakeUserRepository()
+    user_id = repo.seed_user("owner@acme.test", "s3cret!")
+    repo.memberships[user_id] = [
+        _membership(user_id, org_id=ORG_ID, is_default=False),
+        _membership(user_id, org_id=OTHER_ORG_ID, is_default=False),
+    ]
+    organizations = FakeOrganizationRepository()
+    organizations.orgs[ORG_ID] = _org(ORG_ID, "Acme Retail")
+    organizations.orgs[OTHER_ORG_ID] = _org(OTHER_ORG_ID, "Acme Wholesale")
+    service, _, _, _ = _service(repo, organizations=organizations)
+
+    with pytest.raises(AmbiguousOrganizationError) as exc_info:
+        service.login("owner@acme.test", "s3cret!")
+
+    candidates = dict(exc_info.value.organizations)
+    assert candidates == {ORG_ID: "Acme Retail", OTHER_ORG_ID: "Acme Wholesale"}
+
+
+def test_login_with_explicit_organization_id_resolves_the_ambiguity():
+    repo = FakeUserRepository()
+    user_id = repo.seed_user("owner@acme.test", "s3cret!")
+    repo.memberships[user_id] = [
+        _membership(user_id, org_id=ORG_ID, is_default=False),
+        _membership(user_id, org_id=OTHER_ORG_ID, is_default=False),
+    ]
+    service, _, sessions, _ = _service(repo)
+    session = service.login("owner@acme.test", "s3cret!", organization_id=OTHER_ORG_ID)
+    assert session.organization_id == OTHER_ORG_ID
+    assert sessions.is_authenticated is True
 
 
 def test_login_picks_default_membership_when_multiple_orgs():

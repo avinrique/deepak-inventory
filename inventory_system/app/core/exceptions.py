@@ -7,6 +7,28 @@ class AppError(Exception):
     """Base class for expected application-level errors."""
 
 
+class SchemaVersionMismatchError(AppError):
+    """Raised at startup when the database's alembic_version doesn't match
+    the migration the running code expects. This has already caused a real
+    production incident: a deployed database was one migration behind the
+    code (missing invoices.overall_discount_amount), and the first user
+    action that touched the new column crashed with a raw
+    sqlalchemy.exc.ProgrammingError deep inside a repository call instead
+    of failing clearly at startup. See app.database.schema_check.
+    """
+    def __init__(self, expected: str, actual: str | None):
+        self.expected = expected
+        self.actual = actual
+        if actual is None:
+            super().__init__(
+                f"Database schema has no migrations applied (expected {expected!r}). "
+                "Run: alembic upgrade head")
+        else:
+            super().__init__(
+                f"Database schema is at revision {actual!r} but the running code expects "
+                f"{expected!r}. Run: alembic upgrade head")
+
+
 class DuplicateBillError(AppError):
     def __init__(self, bill_no: str):
         self.bill_no = bill_no
@@ -40,9 +62,16 @@ class AccountLockedError(AppError):
 
 class AmbiguousOrganizationError(AppError):
     """The user belongs to more than one organization and none is marked
-    as their default — the caller must specify organization_id."""
+    as their default — the caller must specify organization_id.
 
-    def __init__(self):
+    ``organizations`` (organization_id, organization_name) pairs — is
+    populated by AuthService.login so a UI caller (LoginWindow) can render
+    a picker directly from the exception instead of needing a second,
+    separately-authenticated lookup call it has no session to make yet.
+    """
+
+    def __init__(self, organizations: list[tuple] | None = None):
+        self.organizations = organizations or []
         super().__init__(
             "This account belongs to multiple organizations — specify which one to log into")
 
@@ -360,6 +389,19 @@ class RoleNotFoundError(AppError):
     def __init__(self, role_id):
         self.role_id = role_id
         super().__init__(f"Role {role_id!r} not found")
+
+
+class SelfDeactivationError(AppError):
+    """Raised when a user tries to deactivate their own account. Not a
+    security boundary (an admin harming only themselves isn't a privilege
+    issue) — an operational one: this is a desktop app with no separate
+    super-admin console, so a lone admin who deactivates themselves (a
+    misclick in a user list, most realistically) can lock their whole
+    organization out with no recovery path short of direct DB access.
+    """
+    def __init__(self, user_id):
+        self.user_id = user_id
+        super().__init__("You cannot deactivate your own account")
 
 
 class OwnerRoleNotAssignableError(AppError):

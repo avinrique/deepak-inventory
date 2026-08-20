@@ -40,6 +40,7 @@ from app.core.exceptions import (
     MembershipNotFoundError,
     OwnerProtectedError,
     RoleNotFoundError,
+    SelfDeactivationError,
     UserNotFoundError,
 )
 from app.domain.security_policy import PasswordPolicy
@@ -428,7 +429,8 @@ class UsersPage(QWidget):
     def _on_action_error(self, exc: Exception) -> None:
         _logger.exception("User action failed", exc_info=exc)
         if isinstance(exc, (OwnerProtectedError, UserNotFoundError,
-                            MembershipNotFoundError, RoleNotFoundError)):
+                            MembershipNotFoundError, RoleNotFoundError,
+                            SelfDeactivationError)):
             QMessageBox.warning(self, "Action Failed", str(exc))
         else:
             QMessageBox.warning(self, "Action Failed",
