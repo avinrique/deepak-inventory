@@ -1,12 +1,16 @@
 """Create Purchase Order dialog — a DRAFT order (supplier, warehouse, line
-items) via PurchaseService.create_purchase_order. Suppliers/products/
-warehouses are passed in already-fetched by the caller (PurchasesPage),
-same convention as every other form dialog in app.ui.widgets — see
-ProductFormDialog's docstring for why.
+items) via PurchaseService.create_purchase_order. Suppliers/warehouses are
+passed in already-fetched by the caller (PurchasesPage); products are
+searched live through ProductService, same convention as New Bill's
+BillItemsTable — see TransactionItemsTable's docstring for why this and
+SalesOrderFormDialog now share that one items-table widget instead of each
+rolling their own.
 
 No business logic here: line-item shape/positivity, supplier/warehouse/
 product existence, and the DRAFT-only edit rule all live in
-PurchaseService / app.domain.purchasing.
+PurchaseService / app.domain.purchasing. A purchase order created here is
+always a DRAFT — stock only increases later, when goods are actually
+received (PurchaseService.receive_goods), never at creation time.
 """
 from datetime import date, datetime
 from decimal import Decimal
@@ -21,7 +25,6 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
     QPushButton,
     QScrollArea,
     QTextEdit,
@@ -36,13 +39,14 @@ from app.core.exceptions import (
     WarehouseNotFoundError,
 )
 from app.schemas.inventory import WarehouseOut
-from app.schemas.product import ProductOut
 from app.schemas.purchasing import PurchaseOrderCreate, PurchaseOrderItemInput, SupplierOut
 from app.security.authorization import PermissionDeniedError
+from app.services.inventory_service import InventoryService
+from app.services.product_service import ProductService
 from app.services.purchase_service import PurchaseService
 from app.ui.theme import RED, STYLESHEET
 from app.ui.widgets.order_form_style import ORDER_FORM_STYLESHEET, apply_card_shadow, field_label
-from app.ui.widgets.order_items_editor import OrderItemsEditor
+from app.ui.widgets.transaction_items_table import TransactionItemsTable
 from app.workers.base_worker import Worker
 
 
@@ -51,8 +55,9 @@ def _money(value: Decimal) -> str:
 
 
 class PurchaseOrderFormDialog(QDialog):
-    def __init__(self, purchase_service: PurchaseService, suppliers: list[SupplierOut],
-                warehouses: list[WarehouseOut], products: list[ProductOut], parent=None):
+    def __init__(self, purchase_service: PurchaseService, product_service: ProductService,
+                inventory_service: InventoryService, suppliers: list[SupplierOut],
+                warehouses: list[WarehouseOut], parent=None):
         super().__init__(parent)
         self._purchase_service = purchase_service
         self.order = None
@@ -82,12 +87,11 @@ class PurchaseOrderFormDialog(QDialog):
         content_layout.setSpacing(16)
 
         content_layout.addWidget(self._build_order_info_card(suppliers, warehouses))
-        content_layout.addWidget(self._build_items_card(products))
+        content_layout.addWidget(self._build_items_card(product_service, inventory_service))
         content_layout.addWidget(self._build_notes_card())
 
-        if not suppliers or not warehouses or not products:
-            missing = "suppliers" if not suppliers else (
-                "warehouses" if not warehouses else "products")
+        if not suppliers or not warehouses:
+            missing = "suppliers" if not suppliers else "warehouses"
             notice = QLabel(f"No {missing} available yet — add one before creating a "
                             "purchase order.")
             notice.setObjectName("secondaryText")
@@ -103,8 +107,9 @@ class PurchaseOrderFormDialog(QDialog):
         scroll.setWidget(content)
         outer.addWidget(scroll, stretch=1)
 
-        outer.addLayout(self._build_footer(bool(suppliers), bool(warehouses), bool(products)))
+        outer.addLayout(self._build_footer(bool(suppliers), bool(warehouses)))
 
+        self._on_warehouse_changed()
         self._on_totals_changed()
 
     # -- order information ---------------------------------------------------#
@@ -128,6 +133,12 @@ class PurchaseOrderFormDialog(QDialog):
         grid.setColumnStretch(1, 1)
 
         self._supplier = QComboBox()
+        # Editable + NoInsert: lets the user type to filter/jump to a
+        # supplier by name instead of scrolling a flat list — same
+        # search-by-typing convention New Bill's Customer field already
+        # uses (QComboBox has no separate "search" mode of its own).
+        self._supplier.setEditable(True)
+        self._supplier.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         for s in sorted(suppliers, key=lambda s: s.name.lower()):
             self._supplier.addItem(s.name, s.id)
         grid.addWidget(field_label("Supplier *"), 0, 0)
@@ -136,6 +147,7 @@ class PurchaseOrderFormDialog(QDialog):
         self._warehouse = QComboBox()
         for w in sorted(warehouses, key=lambda w: w.name.lower()):
             self._warehouse.addItem(w.name, w.id)
+        self._warehouse.currentIndexChanged.connect(self._on_warehouse_changed)
         grid.addWidget(field_label("Deliver To *"), 0, 1)
         grid.addWidget(self._warehouse, 1, 1)
 
@@ -167,8 +179,13 @@ class PurchaseOrderFormDialog(QDialog):
     def _on_expected_date_toggled(self, checked: bool) -> None:
         self._expected_date_edit.setEnabled(checked)
 
+    def _on_warehouse_changed(self) -> None:
+        if hasattr(self, "_items_editor"):
+            self._items_editor.set_warehouse(self._warehouse.currentData())
+
     # -- items -----------------------------------------------------------------#
-    def _build_items_card(self, products: list[ProductOut]) -> QWidget:
+    def _build_items_card(self, product_service: ProductService,
+                          inventory_service: InventoryService) -> QWidget:
         card = QWidget()
         card.setObjectName("formCard")
         apply_card_shadow(card)
@@ -180,9 +197,9 @@ class PurchaseOrderFormDialog(QDialog):
         section_title.setObjectName("sectionTitle")
         layout.addWidget(section_title)
 
-        self._items_editor = OrderItemsEditor(products, include_discount=False,
-                                              price_label="Unit Cost",
-                                              price_field="purchase_price")
+        self._items_editor = TransactionItemsTable(
+            product_service, inventory_service, include_discount=False,
+            price_label="Rate", price_field="purchase_price")
         self._items_editor.totals_changed.connect(self._on_totals_changed)
         layout.addWidget(self._items_editor)
 
@@ -202,16 +219,24 @@ class PurchaseOrderFormDialog(QDialog):
         self._subtotal_value = self._totals_value()
         totals_grid.addWidget(self._subtotal_value, 0, 1)
 
-        totals_grid.addWidget(self._totals_caption("Tax"), 1, 0)
+        totals_grid.addWidget(self._totals_caption("Non-taxable Total"), 1, 0)
+        self._non_taxable_value = self._totals_value()
+        totals_grid.addWidget(self._non_taxable_value, 1, 1)
+
+        totals_grid.addWidget(self._totals_caption("Taxable Total"), 2, 0)
+        self._taxable_value = self._totals_value()
+        totals_grid.addWidget(self._taxable_value, 2, 1)
+
+        totals_grid.addWidget(self._totals_caption("Tax"), 3, 0)
         self._tax_value = self._totals_value()
-        totals_grid.addWidget(self._tax_value, 1, 1)
+        totals_grid.addWidget(self._tax_value, 3, 1)
 
         grand_label = QLabel("Grand Total")
         grand_label.setObjectName("grandTotalLabel")
-        totals_grid.addWidget(grand_label, 2, 0)
+        totals_grid.addWidget(grand_label, 4, 0)
         self._grand_total_value = QLabel(_money(Decimal("0")))
         self._grand_total_value.setObjectName("grandTotalValue")
-        totals_grid.addWidget(self._grand_total_value, 2, 1,
+        totals_grid.addWidget(self._grand_total_value, 4, 1,
                               Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
         totals_row.addLayout(totals_grid)
@@ -232,8 +257,11 @@ class PurchaseOrderFormDialog(QDialog):
         return label
 
     def _on_totals_changed(self) -> None:
-        _subtotal, _discount, tax_total, grand_total = self._items_editor.compute_totals()
-        self._subtotal_value.setText(_money(_subtotal))
+        subtotal, _discount, tax_total, grand_total = self._items_editor.compute_totals()
+        non_taxable, taxable = self._items_editor.compute_tax_split()
+        self._subtotal_value.setText(_money(subtotal))
+        self._non_taxable_value.setText(_money(non_taxable))
+        self._taxable_value.setText(_money(taxable))
         self._tax_value.setText(_money(tax_total))
         self._grand_total_value.setText(_money(grand_total))
 
@@ -258,8 +286,7 @@ class PurchaseOrderFormDialog(QDialog):
         return card
 
     # -- footer -------------------------------------------------------------------#
-    def _build_footer(self, has_suppliers: bool, has_warehouses: bool,
-                      has_products: bool) -> QHBoxLayout:
+    def _build_footer(self, has_suppliers: bool, has_warehouses: bool) -> QHBoxLayout:
         bar = QHBoxLayout()
         bar.setContentsMargins(0, 6, 0, 0)
         bar.addStretch()
@@ -270,17 +297,23 @@ class PurchaseOrderFormDialog(QDialog):
         cancel_button.clicked.connect(self.reject)
         bar.addWidget(cancel_button)
 
-        self._submit_button = QPushButton("Save Purchase Order")
+        # A purchase order created here is always a DRAFT (Submit/Approve/
+        # Receive Goods happen later, as separate row actions on the
+        # Purchases list) — labeled "Save Draft" rather than a generic
+        # "Save" so it's honest about what this button actually does, and
+        # so it reads the same as New Bill's own "Save Draft" action for
+        # the equivalent create-without-finalizing step.
+        self._submit_button = QPushButton("Save Draft")
         self._submit_button.setObjectName("orderPrimary")
         self._submit_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._submit_button.setEnabled(has_suppliers and has_warehouses and has_products)
+        self._submit_button.setEnabled(has_suppliers and has_warehouses)
         self._submit_button.clicked.connect(self._submit)
         bar.addWidget(self._submit_button)
         return bar
 
     def _set_busy(self, busy: bool) -> None:
         self._submit_button.setEnabled(not busy)
-        self._submit_button.setText("Saving…" if busy else "Save Purchase Order")
+        self._submit_button.setText("Saving…" if busy else "Save Draft")
 
     def _submit(self) -> None:
         self._error_label.hide()

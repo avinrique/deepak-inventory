@@ -114,7 +114,8 @@ class Container:
                            self.organization_repo)
 
     def product_service(self) -> ProductService:
-        return ProductService(self.product_repo, self.sessions, self.audit_log_repo)
+        return ProductService(self.product_repo, self.sessions, self.audit_log_repo,
+                              self.warehouse_repo, self.unit_repo)
 
     def catalog_service(self) -> CatalogService:
         return CatalogService(self.category_repo, self.brand_repo, self.unit_repo,

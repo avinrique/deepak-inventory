@@ -38,6 +38,7 @@ from app.ui.widgets.combo_utils import select_by_data
 from app.ui.widgets.confirm_dialog import confirm
 from app.ui.widgets.page_header import PageHeader
 from app.ui.widgets.pagination_bar import PaginationBar
+from app.ui.widgets.add_product_dialog import AddProductDialog
 from app.ui.widgets.product_form_dialog import ProductFormDialog
 from app.ui.widgets.states import EmptyStateWidget
 from app.workers.base_worker import Worker
@@ -54,12 +55,13 @@ _logger = logging.getLogger(__name__)
 
 class ProductsPage(QWidget):
     def __init__(self, product_service: ProductService, catalog_service: CatalogService,
-                sessions: SessionManager, organization_service=None):
+                sessions: SessionManager, organization_service=None, inventory_service=None):
         super().__init__()
         self._product_service = product_service
         self._catalog_service = catalog_service
         self._sessions = sessions
         self._organization_service = organization_service
+        self._inventory_service = inventory_service
         self._default_tax_percent = Decimal("0")
         if organization_service is not None:
             worker = Worker(organization_service.get_current_organization)
@@ -78,6 +80,7 @@ class ProductsPage(QWidget):
         self._categories: list = []
         self._brands: list = []
         self._units: list = []
+        self._warehouses: list = []
 
         self._page = 1
         self._sort_by = "name"
@@ -164,8 +167,11 @@ class ProductsPage(QWidget):
 
     def _load_catalog_options(self) -> None:
         def load():
+            warehouses = (self._inventory_service.list_warehouses()
+                         if self._inventory_service is not None else [])
             return (self._catalog_service.list_categories(),
-                    self._catalog_service.list_brands(), self._catalog_service.list_units())
+                    self._catalog_service.list_brands(), self._catalog_service.list_units(),
+                    warehouses)
 
         worker = Worker(load)
         worker.signals.finished.connect(self._on_catalog_options_loaded)
@@ -173,7 +179,7 @@ class ProductsPage(QWidget):
         QThreadPool.globalInstance().start(worker)
 
     def _on_catalog_options_loaded(self, result) -> None:
-        self._categories, self._brands, self._units = result
+        self._categories, self._brands, self._units, self._warehouses = result
 
         previous_category = self._category_filter.currentData()
         previous_brand = self._brand_filter.currentData()
@@ -323,9 +329,9 @@ class ProductsPage(QWidget):
 
     # -- dialogs -------------------------------------------------------- #
     def _open_add_dialog(self) -> None:
-        dialog = ProductFormDialog(self._product_service, self._categories, self._brands,
-                                   self._units, parent=self,
-                                   default_tax_percent=self._default_tax_percent)
+        dialog = AddProductDialog(self._product_service, self._categories, self._brands,
+                                  self._units, self._warehouses, parent=self,
+                                  default_tax_percent=self._default_tax_percent)
         if dialog.exec():
             self.refresh()
 

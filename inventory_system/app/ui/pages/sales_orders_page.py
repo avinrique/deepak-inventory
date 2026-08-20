@@ -193,8 +193,9 @@ class SalesOrdersPage(QWidget):
 
     # -- create ----------------------------------------------------------- #
     def _open_create_dialog(self) -> None:
-        dialog = SalesOrderFormDialog(self._sales_service, self._customers, self._warehouses,
-                                      self._products, parent=self)
+        dialog = SalesOrderFormDialog(self._sales_service, self._product_service,
+                                      self._inventory_service, self._customers,
+                                      self._warehouses, parent=self)
         if dialog.exec():
             self.refresh()
 

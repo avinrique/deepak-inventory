@@ -176,8 +176,9 @@ class PurchasesPage(QWidget):
 
     # -- create ------------------------------------------------------------#
     def _open_create_dialog(self) -> None:
-        dialog = PurchaseOrderFormDialog(self._purchase_service, self._suppliers,
-                                         self._warehouses, self._products, parent=self)
+        dialog = PurchaseOrderFormDialog(self._purchase_service, self._product_service,
+                                         self._inventory_service, self._suppliers,
+                                         self._warehouses, parent=self)
         if dialog.exec():
             self.refresh()
 

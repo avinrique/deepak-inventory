@@ -1,20 +1,25 @@
-"""The "New Bill" line-item table — # | Product | SKU | Qty | Unit Price |
-Discount | Tax | Amount | Action, with a debounced server-side product
-search (name/SKU/barcode) above it rather than a flat pre-loaded combo.
+"""The one items-table widget shared by New Bill, the Sales Order form, and
+the Purchase Order form — # | Product | SKU | Qty | Rate | [Discount %] |
+Tax % | Amount | Stock | Action, with a debounced server-side product
+search (name/SKU/barcode), live per-row and grand totals, and a
+per-organization warehouse-scoped stock column.
 
-This is a distinct widget from app.ui.widgets.order_items_editor.
-OrderItemsEditor (shared by PurchaseOrderFormDialog/SalesOrderFormDialog)
-deliberately isn't touched or reused here: it loads every product into a
-combo up front (fine for those dialogs' scale) and has no search, no
-stock display, and no live per-row/grand total — all of which "New Bill"
-explicitly needs. Building a second, purpose-built widget avoids changing
-OrderItemsEditor's behavior for the two dialogs that already depend on it.
+Replaces the two previously-separate implementations (app.ui.widgets.
+bill_items_table.BillItemsTable and app.ui.widgets.order_items_editor.
+OrderItemsEditor) that had drifted into different UX (search-and-add vs. a
+flat pre-loaded combo) and different column sets purely because nothing
+forced them to stay in sync — exactly the "three unrelated screens"
+problem the New Bill/Sale/Purchase form unification is meant to fix.
 
-Per-line math (line subtotal/discount/tax/total) reuses
-app.domain.sales.line_* — the exact same functions
-SalesOrderRepository.generate_invoice uses server-side — so what this
-table shows a cashier while they're building a bill can never silently
-disagree with what actually gets billed once saved.
+Per-line math reuses app.domain.pricing (no discount — what purchase
+orders support) / app.domain.sales (with discount — what sales orders and
+bills support), the exact same functions the service layer uses
+server-side, so this live preview can never silently disagree with what
+actually gets saved. No business logic lives here: this widget only
+collects and previews raw field values — the real
+PurchaseOrderItemInput/SalesOrderItemInput construction and the real
+validation (product exists, quantity/price shape, stock availability)
+happen in the calling form / the service layer.
 """
 import logging
 import uuid
@@ -35,6 +40,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.domain.pricing import line_subtotal, line_tax, line_total
 from app.domain.product import ProductStatus
 from app.domain.sales import line_discount, line_tax_after_discount, line_total_after_discount
 from app.schemas.inventory import InventoryLevel
@@ -54,26 +60,37 @@ _COL_PRODUCT = 1
 _COL_SKU = 2
 _COL_QTY = 3
 _COL_PRICE = 4
-_COL_DISCOUNT = 5
-_COL_TAX = 6
-_COL_AMOUNT = 7
-_COL_STOCK = 8
-_COL_ACTION = 9
-_COLUMN_LABELS = ["#", "Product", "SKU", "Qty", "Unit Price", "Discount %", "Tax %",
-                  "Amount", "Stock", ""]
 
 
-class BillItemsTable(QWidget):
+def _money(value: Decimal) -> str:
+    return f"{value:,.2f}"
+
+
+class TransactionItemsTable(QWidget):
     totals_changed = Signal()
 
     def __init__(self, product_service: ProductService, inventory_service: InventoryService,
-                parent=None):
+                *, include_discount: bool = True, price_label: str = "Rate",
+                price_field: str = "selling_price", parent=None):
         super().__init__(parent)
         self._product_service = product_service
         self._inventory_service = inventory_service
+        self._include_discount = include_discount
+        self._price_field = price_field
         self._warehouse_id: uuid.UUID | None = None
         self._rows: list[dict] = []  # parallel to table rows: {"product": ProductOut}
         self._search_results: list[ProductOut] = []
+
+        self._col_discount = _COL_PRICE + 1 if include_discount else None
+        self._col_tax = self._col_discount + 1 if include_discount else _COL_PRICE + 1
+        self._col_amount = self._col_tax + 1
+        self._col_stock = self._col_amount + 1
+        self._col_action = self._col_stock + 1
+
+        columns = ["#", "Item/Product", "SKU", "Qty", price_label]
+        if include_discount:
+            columns.append("Discount %")
+        columns += ["Tax %", "Amount", "Stock", "Action"]
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -81,8 +98,8 @@ class BillItemsTable(QWidget):
 
         layout.addLayout(self._build_search_bar())
 
-        self._table = QTableWidget(0, len(_COLUMN_LABELS))
-        self._table.setHorizontalHeaderLabels(_COLUMN_LABELS)
+        self._table = QTableWidget(0, len(columns))
+        self._table.setHorizontalHeaderLabels(columns)
         self._table.verticalHeader().setVisible(False)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -93,7 +110,7 @@ class BillItemsTable(QWidget):
         layout.addWidget(self._table, stretch=1)
 
         empty_hint = QLabel("Search for a product above and click “+ Add” to start "
-                           "this bill.")
+                           "this list.")
         empty_hint.setStyleSheet(f"color: {MUTED}; font-size: 12px; padding: 8px 2px;")
         self._empty_hint = empty_hint
         layout.addWidget(empty_hint)
@@ -117,8 +134,8 @@ class BillItemsTable(QWidget):
         self._results.setPlaceholderText("No matches yet")
         bar.addWidget(self._results, stretch=1)
 
-        add_button = QPushButton("+ Add")
-        add_button.setObjectName("ghost")
+        add_button = QPushButton("+ Add Item")
+        add_button.setObjectName("orderGhost")
         add_button.setCursor(Qt.CursorShape.PointingHandCursor)
         add_button.clicked.connect(self._add_selected_result)
         bar.addWidget(add_button)
@@ -144,7 +161,8 @@ class BillItemsTable(QWidget):
         self._search_results = page.items
         self._results.clear()
         for product in page.items:
-            label = f"{product.sku} — {product.name} ({_money(product.selling_price)})"
+            price = getattr(product, self._price_field)
+            label = f"{product.sku} — {product.name} ({_money(price)})"
             self._results.addItem(label, product.id)
         if not page.items:
             self._results.addItem("No matching products", None)
@@ -191,31 +209,32 @@ class BillItemsTable(QWidget):
         qty_edit.textChanged.connect(lambda: self._on_row_changed(row))
         self._table.setCellWidget(row, _COL_QTY, qty_edit)
 
-        price_edit = QLineEdit(str(product.selling_price))
+        price_edit = QLineEdit(str(getattr(product, self._price_field)))
         price_edit.textChanged.connect(lambda: self._on_row_changed(row))
         self._table.setCellWidget(row, _COL_PRICE, price_edit)
 
-        discount_edit = QLineEdit("0")
-        discount_edit.textChanged.connect(lambda: self._on_row_changed(row))
-        self._table.setCellWidget(row, _COL_DISCOUNT, discount_edit)
+        if self._col_discount is not None:
+            discount_edit = QLineEdit("0")
+            discount_edit.textChanged.connect(lambda: self._on_row_changed(row))
+            self._table.setCellWidget(row, self._col_discount, discount_edit)
 
         tax_edit = QLineEdit(str(product.tax_percent))
         tax_edit.textChanged.connect(lambda: self._on_row_changed(row))
-        self._table.setCellWidget(row, _COL_TAX, tax_edit)
+        self._table.setCellWidget(row, self._col_tax, tax_edit)
 
         amount_item = QTableWidgetItem("")
         amount_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self._table.setItem(row, _COL_AMOUNT, amount_item)
+        self._table.setItem(row, self._col_amount, amount_item)
 
         stock_item = QTableWidgetItem("—")
         stock_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._table.setItem(row, _COL_STOCK, stock_item)
+        self._table.setItem(row, self._col_stock, stock_item)
 
         remove_button = QPushButton("Remove")
         remove_button.setObjectName("flat")
         remove_button.setCursor(Qt.CursorShape.PointingHandCursor)
         remove_button.clicked.connect(lambda: self._remove_row_widget(remove_button))
-        self._table.setCellWidget(row, _COL_ACTION, remove_button)
+        self._table.setCellWidget(row, self._col_action, remove_button)
 
         self._recompute_row_amount(row)
         self._refresh_stock(row)
@@ -223,7 +242,7 @@ class BillItemsTable(QWidget):
 
     def _row_of_widget(self, widget: QWidget) -> int:
         for row in range(self._table.rowCount()):
-            if self._table.cellWidget(row, _COL_ACTION) is widget:
+            if self._table.cellWidget(row, self._col_action) is widget:
                 return row
         return -1
 
@@ -258,24 +277,33 @@ class BillItemsTable(QWidget):
         except InvalidOperation:
             return None
 
-    def _recompute_row_amount(self, row: int) -> None:
+    def _row_values(self, row: int) -> tuple[Decimal, Decimal, Decimal, Decimal] | None:
         quantity = self._row_decimal(row, _COL_QTY)
         price = self._row_decimal(row, _COL_PRICE)
-        discount = self._row_decimal(row, _COL_DISCOUNT)
-        tax = self._row_decimal(row, _COL_TAX)
-        amount_item = self._table.item(row, _COL_AMOUNT)
+        tax = self._row_decimal(row, self._col_tax)
+        discount = (self._row_decimal(row, self._col_discount)
+                   if self._col_discount is not None else Decimal("0"))
+        if None in (quantity, price, discount, tax):
+            return None
+        return quantity, price, discount, tax
+
+    def _recompute_row_amount(self, row: int) -> None:
+        amount_item = self._table.item(row, self._col_amount)
         if amount_item is None:
             return
-        if None in (quantity, price, discount, tax):
+        values = self._row_values(row)
+        if values is None:
             amount_item.setText("—")
             return
-        total = line_total_after_discount(quantity, price, discount, tax)
+        quantity, price, discount, tax = values
+        total = (line_total_after_discount(quantity, price, discount, tax)
+                 if self._include_discount else line_total(quantity, price, tax))
         amount_item.setText(_money(total))
 
     def _refresh_stock(self, row: int) -> None:
         if row >= len(self._rows):
             return
-        stock_item = self._table.item(row, _COL_STOCK)
+        stock_item = self._table.item(row, self._col_stock)
         if stock_item is None:
             return
         if self._warehouse_id is None:
@@ -293,7 +321,7 @@ class BillItemsTable(QWidget):
     def _on_stock_loaded(self, row: int, level: InventoryLevel) -> None:
         if row >= self._table.rowCount():
             return  # row was removed while the lookup was in flight
-        stock_item = self._table.item(row, _COL_STOCK)
+        stock_item = self._table.item(row, self._col_stock)
         if stock_item is None:
             return
         stock_item.setText(f"{level.quantity_available:g}")
@@ -304,9 +332,9 @@ class BillItemsTable(QWidget):
         return self._table.rowCount() == 0
 
     def collect_items(self) -> tuple[list[dict], list[str]]:
-        """Same shape as OrderItemsEditor.collect_items — (items, errors),
-        each item a dict of product_id/quantity/unit_price/tax_percent/
-        discount_percent ready to build a SalesOrderItemInput from.
+        """(items, errors). Each item dict has keys product_id/quantity/
+        unit_price/tax_percent, and (if include_discount) discount_percent
+        — ready to spread into the schema the caller needs.
         """
         items: list[dict] = []
         errors: list[str] = []
@@ -314,24 +342,28 @@ class BillItemsTable(QWidget):
             product = self._rows[row]["product"]
             quantity = self._row_decimal(row, _COL_QTY)
             price = self._row_decimal(row, _COL_PRICE)
-            discount = self._row_decimal(row, _COL_DISCOUNT)
-            tax = self._row_decimal(row, _COL_TAX)
+            discount = (self._row_decimal(row, self._col_discount)
+                       if self._col_discount is not None else Decimal("0"))
+            tax = self._row_decimal(row, self._col_tax)
             if quantity is None:
                 errors.append(f"Row {row + 1} ({product.name}): quantity must be a number.")
                 continue
             if price is None:
-                errors.append(f"Row {row + 1} ({product.name}): unit price must be a number.")
+                errors.append(f"Row {row + 1} ({product.name}): rate must be a number.")
                 continue
-            if discount is None:
+            if self._col_discount is not None and discount is None:
                 errors.append(f"Row {row + 1} ({product.name}): discount must be a number.")
                 continue
             if tax is None:
                 errors.append(f"Row {row + 1} ({product.name}): tax must be a number.")
                 continue
-            items.append({"product_id": product.id, "quantity": quantity, "unit_price": price,
-                         "discount_percent": discount, "tax_percent": tax})
+            item = {"product_id": product.id, "quantity": quantity, "unit_price": price,
+                   "tax_percent": tax}
+            if self._col_discount is not None:
+                item["discount_percent"] = discount
+            items.append(item)
         if not items and not errors:
-            errors.append("Add at least one product to the bill.")
+            errors.append("Add at least one product.")
         return items, errors
 
     def compute_totals(self) -> tuple[Decimal, Decimal, Decimal, Decimal]:
@@ -340,29 +372,44 @@ class BillItemsTable(QWidget):
         number are skipped for this *preview* total (collect_items() is
         what actually blocks Save with a real error for those).
         """
-        subtotal = Decimal("0")
-        discount_total = Decimal("0")
-        tax_total = Decimal("0")
-        grand_total = Decimal("0")
+        subtotal = discount_total = tax_total = grand_total = Decimal("0")
         for row in range(self._table.rowCount()):
-            quantity = self._row_decimal(row, _COL_QTY)
-            price = self._row_decimal(row, _COL_PRICE)
-            discount = self._row_decimal(row, _COL_DISCOUNT)
-            tax = self._row_decimal(row, _COL_TAX)
-            if None in (quantity, price, discount, tax):
+            values = self._row_values(row)
+            if values is None:
                 continue
-            subtotal += quantity * price
-            discount_total += line_discount(quantity, price, discount)
-            tax_total += line_tax_after_discount(quantity, price, discount, tax)
-            grand_total += line_total_after_discount(quantity, price, discount, tax)
+            quantity, price, discount, tax = values
+            subtotal += line_subtotal(quantity, price)
+            if self._include_discount:
+                discount_total += line_discount(quantity, price, discount)
+                tax_total += line_tax_after_discount(quantity, price, discount, tax)
+                grand_total += line_total_after_discount(quantity, price, discount, tax)
+            else:
+                tax_total += line_tax(quantity, price, tax)
+                grand_total += line_total(quantity, price, tax)
         return subtotal, discount_total, tax_total, grand_total
+
+    def compute_tax_split(self) -> tuple[Decimal, Decimal]:
+        """(non_taxable_total, taxable_total) — the post-discount line
+        subtotal split by whether that line carries any tax %, purely a
+        UI-level aggregation of already-collected per-line data (no new
+        field is persisted for this split).
+        """
+        non_taxable = taxable = Decimal("0")
+        for row in range(self._table.rowCount()):
+            values = self._row_values(row)
+            if values is None:
+                continue
+            quantity, price, discount, tax = values
+            line_amount = (line_subtotal(quantity, price) - line_discount(quantity, price, discount)
+                          if self._include_discount else line_subtotal(quantity, price))
+            if tax > 0:
+                taxable += line_amount
+            else:
+                non_taxable += line_amount
+        return non_taxable, taxable
 
     def clear_items(self) -> None:
         self._table.setRowCount(0)
         self._rows.clear()
         self._empty_hint.setVisible(True)
         self.totals_changed.emit()
-
-
-def _money(value: Decimal) -> str:
-    return f"{value:,.2f}"

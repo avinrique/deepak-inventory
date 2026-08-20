@@ -1,12 +1,18 @@
 """Create Sales Order dialog — a DRAFT order (customer, warehouse, line
-items) via SalesService.create_sales_order. Customers/products/warehouses
-are passed in already-fetched by the caller (SalesOrdersPage), same
-convention as every other form dialog in app.ui.widgets — see
-ProductFormDialog's docstring for why.
+items) via SalesService.create_sales_order. Customers/warehouses are
+passed in already-fetched by the caller (SalesOrdersPage); products are
+searched live through ProductService, same convention as New Bill's
+BillItemsTable — see TransactionItemsTable's docstring for why this and
+PurchaseOrderFormDialog now share that one items-table widget instead of
+each rolling their own.
 
 No business logic here: line-item shape/positivity, customer/warehouse/
 product existence, and the DRAFT-only edit rule all live in SalesService /
-app.domain.sales.
+app.domain.sales. A sales order created here is always a DRAFT — payment
+and invoicing happen later, via the Confirm/Fulfill/Generate Invoice/
+Record Payment actions already on the Sales list (or via the New Bill
+page, which does the full create-through-invoice flow in one step); this
+dialog deliberately doesn't duplicate that finalize logic.
 """
 from datetime import datetime
 from decimal import Decimal
@@ -33,14 +39,15 @@ from app.core.exceptions import (
     WarehouseNotFoundError,
 )
 from app.schemas.inventory import WarehouseOut
-from app.schemas.product import ProductOut
 from app.schemas.sales import CustomerBalance, CustomerOut, SalesOrderCreate, SalesOrderItemInput
 from app.security.authorization import PermissionDeniedError
+from app.services.inventory_service import InventoryService
+from app.services.product_service import ProductService
 from app.services.sales_service import SalesService
 from app.ui.theme import RED, STYLESHEET
 from app.ui.widgets.customer_form_dialog import CustomerFormDialog
 from app.ui.widgets.order_form_style import ORDER_FORM_STYLESHEET, apply_card_shadow, field_label
-from app.ui.widgets.order_items_editor import OrderItemsEditor
+from app.ui.widgets.transaction_items_table import TransactionItemsTable
 from app.workers.base_worker import Worker
 
 
@@ -49,8 +56,9 @@ def _money(value: Decimal) -> str:
 
 
 class SalesOrderFormDialog(QDialog):
-    def __init__(self, sales_service: SalesService, customers: list[CustomerOut],
-                warehouses: list[WarehouseOut], products: list[ProductOut], parent=None):
+    def __init__(self, sales_service: SalesService, product_service: ProductService,
+                inventory_service: InventoryService, customers: list[CustomerOut],
+                warehouses: list[WarehouseOut], parent=None):
         super().__init__(parent)
         self._sales_service = sales_service
         self._customers = list(customers)
@@ -81,12 +89,11 @@ class SalesOrderFormDialog(QDialog):
         content_layout.setSpacing(16)
 
         content_layout.addWidget(self._build_order_info_card(warehouses))
-        content_layout.addWidget(self._build_items_card(products))
+        content_layout.addWidget(self._build_items_card(product_service, inventory_service))
         content_layout.addWidget(self._build_notes_card())
 
-        if not customers or not warehouses or not products:
-            missing = "customers" if not customers else (
-                "warehouses" if not warehouses else "products")
+        if not customers or not warehouses:
+            missing = "customers" if not customers else "warehouses"
             notice = QLabel(f"No {missing} available yet — add one before creating a "
                             "sales order.")
             notice.setObjectName("secondaryText")
@@ -102,10 +109,11 @@ class SalesOrderFormDialog(QDialog):
         scroll.setWidget(content)
         outer.addWidget(scroll, stretch=1)
 
-        outer.addLayout(self._build_footer(bool(customers), bool(warehouses), bool(products)))
+        outer.addLayout(self._build_footer(bool(customers), bool(warehouses)))
 
         self._populate_customers()
         self._on_customer_changed()
+        self._on_warehouse_changed()
         self._on_totals_changed()
 
     # -- order information ---------------------------------------------------#
@@ -130,6 +138,11 @@ class SalesOrderFormDialog(QDialog):
         customer_row = QHBoxLayout()
         customer_row.setSpacing(8)
         self._customer = QComboBox()
+        # Editable + NoInsert: type-to-filter a customer by name instead of
+        # scrolling a flat list, same convention New Bill's Customer field
+        # already uses.
+        self._customer.setEditable(True)
+        self._customer.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self._customer.currentIndexChanged.connect(self._on_customer_changed)
         customer_row.addWidget(self._customer, stretch=1)
         self._new_customer_button = QPushButton("+ New")
@@ -143,6 +156,7 @@ class SalesOrderFormDialog(QDialog):
         self._warehouse = QComboBox()
         for w in sorted(warehouses, key=lambda w: w.name.lower()):
             self._warehouse.addItem(w.name, w.id)
+        self._warehouse.currentIndexChanged.connect(self._on_warehouse_changed)
         grid.addWidget(field_label("Ship From *"), 0, 1)
         grid.addWidget(self._warehouse, 1, 1)
 
@@ -151,10 +165,15 @@ class SalesOrderFormDialog(QDialog):
         self._customer_balance_label.setWordWrap(True)
         grid.addWidget(self._customer_balance_label, 2, 0, 1, 2)
 
+        invoice_number_value = QLabel("Assigned when invoiced")
+        invoice_number_value.setObjectName("readOnlyValue")
+        grid.addWidget(field_label("Invoice Number"), 3, 0)
+        grid.addWidget(invoice_number_value, 4, 0)
+
         order_date_value = QLabel(datetime.now().strftime("%Y-%m-%d"))
         order_date_value.setObjectName("readOnlyValue")
-        grid.addWidget(field_label("Order Date"), 3, 0)
-        grid.addWidget(order_date_value, 4, 0)
+        grid.addWidget(field_label("Order Date"), 3, 1)
+        grid.addWidget(order_date_value, 4, 1)
 
         layout.addLayout(grid)
         return card
@@ -183,6 +202,10 @@ class SalesOrderFormDialog(QDialog):
             f"Outstanding: {_money(balance.outstanding_balance)}  •  "
             f"Available credit: {credit}")
 
+    def _on_warehouse_changed(self) -> None:
+        if hasattr(self, "_items_editor"):
+            self._items_editor.set_warehouse(self._warehouse.currentData())
+
     def _open_new_customer_dialog(self) -> None:
         existing_ids = {c.id for c in self._customers}
         dialog = CustomerFormDialog(self._sales_service, parent=self)
@@ -210,7 +233,8 @@ class SalesOrderFormDialog(QDialog):
         self._submit_button.setEnabled(True)
 
     # -- items -----------------------------------------------------------------#
-    def _build_items_card(self, products: list[ProductOut]) -> QWidget:
+    def _build_items_card(self, product_service: ProductService,
+                          inventory_service: InventoryService) -> QWidget:
         card = QWidget()
         card.setObjectName("formCard")
         apply_card_shadow(card)
@@ -222,9 +246,9 @@ class SalesOrderFormDialog(QDialog):
         section_title.setObjectName("sectionTitle")
         layout.addWidget(section_title)
 
-        self._items_editor = OrderItemsEditor(products, include_discount=True,
-                                              price_label="Unit Price",
-                                              price_field="selling_price")
+        self._items_editor = TransactionItemsTable(
+            product_service, inventory_service, include_discount=True,
+            price_label="Rate", price_field="selling_price")
         self._items_editor.totals_changed.connect(self._on_totals_changed)
         layout.addWidget(self._items_editor)
 
@@ -248,16 +272,24 @@ class SalesOrderFormDialog(QDialog):
         self._discount_value = self._totals_value()
         totals_grid.addWidget(self._discount_value, 1, 1)
 
-        totals_grid.addWidget(self._totals_caption("Tax"), 2, 0)
+        totals_grid.addWidget(self._totals_caption("Non-taxable Total"), 2, 0)
+        self._non_taxable_value = self._totals_value()
+        totals_grid.addWidget(self._non_taxable_value, 2, 1)
+
+        totals_grid.addWidget(self._totals_caption("Taxable Total"), 3, 0)
+        self._taxable_value = self._totals_value()
+        totals_grid.addWidget(self._taxable_value, 3, 1)
+
+        totals_grid.addWidget(self._totals_caption("Tax"), 4, 0)
         self._tax_value = self._totals_value()
-        totals_grid.addWidget(self._tax_value, 2, 1)
+        totals_grid.addWidget(self._tax_value, 4, 1)
 
         grand_label = QLabel("Grand Total")
         grand_label.setObjectName("grandTotalLabel")
-        totals_grid.addWidget(grand_label, 3, 0)
+        totals_grid.addWidget(grand_label, 5, 0)
         self._grand_total_value = QLabel(_money(Decimal("0")))
         self._grand_total_value.setObjectName("grandTotalValue")
-        totals_grid.addWidget(self._grand_total_value, 3, 1,
+        totals_grid.addWidget(self._grand_total_value, 5, 1,
                               Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
         totals_row.addLayout(totals_grid)
@@ -279,8 +311,11 @@ class SalesOrderFormDialog(QDialog):
 
     def _on_totals_changed(self) -> None:
         subtotal, discount_total, tax_total, grand_total = self._items_editor.compute_totals()
+        non_taxable, taxable = self._items_editor.compute_tax_split()
         self._subtotal_value.setText(_money(subtotal))
         self._discount_value.setText(_money(discount_total))
+        self._non_taxable_value.setText(_money(non_taxable))
+        self._taxable_value.setText(_money(taxable))
         self._tax_value.setText(_money(tax_total))
         self._grand_total_value.setText(_money(grand_total))
 
@@ -305,8 +340,7 @@ class SalesOrderFormDialog(QDialog):
         return card
 
     # -- footer -------------------------------------------------------------------#
-    def _build_footer(self, has_customers: bool, has_warehouses: bool,
-                      has_products: bool) -> QHBoxLayout:
+    def _build_footer(self, has_customers: bool, has_warehouses: bool) -> QHBoxLayout:
         bar = QHBoxLayout()
         bar.setContentsMargins(0, 6, 0, 0)
         bar.addStretch()
@@ -317,17 +351,23 @@ class SalesOrderFormDialog(QDialog):
         cancel_button.clicked.connect(self.reject)
         bar.addWidget(cancel_button)
 
-        self._submit_button = QPushButton("Save Sales Order")
+        # A sales order created here is always a DRAFT (Confirm/Fulfill/
+        # Generate Invoice/Record Payment happen later, as separate row
+        # actions on the Sales list — or use New Bill for the full
+        # create-through-invoice flow in one step) — labeled "Save Draft"
+        # to be honest about what this button does and to read the same
+        # as New Bill's own "Save Draft" action for the equivalent step.
+        self._submit_button = QPushButton("Save Draft")
         self._submit_button.setObjectName("orderPrimary")
         self._submit_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._submit_button.setEnabled(has_customers and has_warehouses and has_products)
+        self._submit_button.setEnabled(has_customers and has_warehouses)
         self._submit_button.clicked.connect(self._submit)
         bar.addWidget(self._submit_button)
         return bar
 
     def _set_busy(self, busy: bool) -> None:
         self._submit_button.setEnabled(not busy)
-        self._submit_button.setText("Saving…" if busy else "Save Sales Order")
+        self._submit_button.setText("Saving…" if busy else "Save Draft")
 
     def _submit(self) -> None:
         self._error_label.hide()

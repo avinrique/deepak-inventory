@@ -106,6 +106,12 @@ class WarehouseNotFoundError(AppError):
         super().__init__(f"Warehouse {warehouse_id!r} not found")
 
 
+class UnitNotFoundError(AppError):
+    def __init__(self, unit_id):
+        self.unit_id = unit_id
+        super().__init__(f"Unit {unit_id!r} not found")
+
+
 class DuplicateWarehouseCodeError(AppError):
     def __init__(self, code: str):
         self.code = code

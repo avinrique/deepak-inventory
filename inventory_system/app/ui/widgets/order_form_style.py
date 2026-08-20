@@ -1,13 +1,15 @@
-"""Design tokens + QSS for the Purchase/Sales order *creation* dialogs only
-(PurchaseOrderFormDialog, SalesOrderFormDialog, and the OrderItemsEditor
-they both embed). Deliberately kept out of app.ui.theme so this palette
-never leaks into the Purchases/Sales listing pages or any other part of
-the app — those keep using theme.STYLESHEET exactly as before.
+"""Design tokens + QSS for the three transaction forms — New Bill,
+PurchaseOrderFormDialog, and SalesOrderFormDialog — and the shared
+TransactionItemsTable they all embed. Deliberately kept out of app.ui.theme
+so this palette never leaks into the Purchases/Sales/Inventory listing
+pages or any other part of the app — those keep using theme.STYLESHEET
+exactly as before.
 
-Dialogs apply this on top of the app-wide stylesheet
+Each form applies this on top of the app-wide stylesheet
 (``self.setStyleSheet(STYLESHEET + ORDER_FORM_STYLESHEET)``), so anything
 not overridden here (fonts, QMessageBox, etc.) still falls back to the
-normal app look.
+normal app look. New Bill is a QWidget page rather than a QDialog, so the
+QDialog-only rule below simply doesn't match there — harmless.
 """
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QGraphicsDropShadowEffect, QLabel, QWidget

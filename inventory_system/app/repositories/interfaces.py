@@ -205,6 +205,11 @@ class UnitRepository(Protocol):
 class ProductRepository(Protocol):
     def create(self, organization_id: uuid.UUID, data: ProductCreate) -> ProductOut: ...
 
+    def create_with_opening_stock(
+            self, organization_id: uuid.UUID, data: ProductCreate,
+            warehouse_id: uuid.UUID | None, opening_quantity: Decimal,
+            performed_by: uuid.UUID) -> tuple[ProductOut, InventoryTransactionOut | None]: ...
+
     def update(self, organization_id: uuid.UUID, product_id: uuid.UUID,
               data: ProductUpdate) -> ProductOut | None: ...
 

@@ -298,7 +298,8 @@ def _build_page(key: str, container: Container) -> QWidget:
     if key == "products":
         from app.ui.pages.products_page import ProductsPage
         return ProductsPage(container.product_service(), container.catalog_service(),
-                            container.sessions, container.organization_service())
+                            container.sessions, container.organization_service(),
+                            container.inventory_service())
     if key == "warehouses":
         from app.ui.pages.warehouses_page import WarehousesPage
         return WarehousesPage(container.inventory_service(), container.sessions)

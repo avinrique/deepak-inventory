@@ -1,8 +1,10 @@
 """New Bill — build a sale from a blank slate: pick a customer and
-warehouse, add real products via BillItemsTable, and either park it as a
-DRAFT (touches nothing but the SalesOrder itself) or finalize it into a
-real sale (confirm + fulfill + invoice + optional payment, all inside one
-database transaction — see SalesOrderRepository.finalize_new_bill).
+warehouse, add real products via the shared TransactionItemsTable (the
+same items-table widget the Sales/Purchase Order forms use — see its
+docstring), and either park it as a DRAFT (touches nothing but the
+SalesOrder itself) or finalize it into a real sale (confirm + fulfill +
+invoice + optional payment, all inside one database transaction — see
+SalesOrderRepository.finalize_new_bill).
 
 Every calculation shown here (line amounts, subtotal, item discount, tax,
 grand total) is a live *preview* using the same app.domain.sales functions
@@ -68,63 +70,23 @@ from app.services.inventory_service import InventoryService
 from app.services.product_service import ProductService
 from app.services.sales_service import SalesService
 from app.ui import permission_hints
-from app.ui.theme import GREEN, MUTED, RADIUS
-from app.ui.widgets.bill_items_table import BillItemsTable
+from app.ui.theme import GREEN, MUTED, STYLESHEET
 from app.ui.widgets.customer_form_dialog import CustomerFormDialog
 from app.ui.widgets.invoice_preview_dialog import InvoicePreviewDialog
+from app.ui.widgets.order_form_style import (
+    ORDER_FORM_STYLESHEET,
+    TEXT_SECONDARY,
+    apply_card_shadow,
+    field_label,
+)
 from app.ui.widgets.page_header import PageHeader
 from app.ui.widgets.record_payment_dialog import RecordPaymentDialog
+from app.ui.widgets.transaction_items_table import TransactionItemsTable
 from app.workers.base_worker import Worker
 
 _logger = logging.getLogger(__name__)
 
 _NO_PAYMENT_NOW = "— No payment now —"
-
-# Light-gray input styling for the bill-details card (Due Date, Customer,
-# Warehouse, Notes) — QComboBox/QDateEdit/QTextEdit have no styling in the
-# app-wide QSS (only QLineEdit does), so they'd otherwise fall back to
-# native/dark rendering. Scoped to that card only, via group.setStyleSheet,
-# so no other page's combo/date/text widgets are affected.
-_INPUT_BG = "#F3F4F6"
-_INPUT_BORDER = "#D1D5DB"
-_INPUT_TEXT = "#172033"
-_INPUT_PLACEHOLDER = "#6B7280"
-_INPUT_FOCUS_BORDER = "#2196F3"
-
-_BILL_DETAILS_STYLE = f"""
-QComboBox, QDateEdit, QTextEdit {{
-    background: {_INPUT_BG};
-    color: {_INPUT_TEXT};
-    border: 1px solid {_INPUT_BORDER};
-    border-radius: {RADIUS}px;
-    padding: 9px 12px;
-    font-size: 13px;
-}}
-QComboBox:focus, QDateEdit:focus, QTextEdit:focus {{
-    border: 1px solid {_INPUT_FOCUS_BORDER};
-}}
-QComboBox:disabled, QDateEdit:disabled {{
-    color: {_INPUT_PLACEHOLDER};
-}}
-QComboBox::drop-down, QDateEdit::drop-down {{
-    border: none;
-    width: 22px;
-}}
-QComboBox QAbstractItemView {{
-    background: #FFFFFF;
-    color: {_INPUT_TEXT};
-    border: 1px solid {_INPUT_BORDER};
-    outline: none;
-    selection-background-color: {_INPUT_FOCUS_BORDER};
-    selection-color: #FFFFFF;
-}}
-QComboBox QLineEdit {{
-    background: {_INPUT_BG};
-    color: {_INPUT_TEXT};
-    border: none;
-    padding: 0;
-}}
-"""
 
 
 def _money(value: Decimal) -> str:
@@ -157,6 +119,13 @@ class NewBillPage(QWidget):
         self._invoice_id: uuid.UUID | None = None
         self._invoice_number: str | None = None
         self._busy = False
+
+        # Same design-token stylesheet as PurchaseOrderFormDialog/
+        # SalesOrderFormDialog (see order_form_style's docstring) — inputs,
+        # cards, section titles, and buttons render identically across all
+        # three transaction forms. QDialog-only rules in it simply don't
+        # match here since this is a QWidget page, not a dialog.
+        self.setStyleSheet(STYLESHEET + ORDER_FORM_STYLESHEET)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -206,40 +175,54 @@ class NewBillPage(QWidget):
         layout.addWidget(self._build_bill_details_group())
 
         products_card = QWidget()
-        products_card.setObjectName("card")
+        products_card.setObjectName("formCard")
+        apply_card_shadow(products_card)
         products_layout = QVBoxLayout(products_card)
         products_layout.setContentsMargins(20, 18, 20, 18)
         products_layout.setSpacing(10)
 
-        items_label = QLabel("Products")
+        items_label = QLabel("Order Items")
         items_label.setObjectName("sectionTitle")
         products_layout.addWidget(items_label)
 
-        self._items_table = BillItemsTable(self._product_service, self._inventory_service)
+        self._items_table = TransactionItemsTable(
+            self._product_service, self._inventory_service, include_discount=True,
+            price_label="Rate", price_field="selling_price")
         self._items_table.totals_changed.connect(self._on_totals_changed)
         self._items_table.setSizePolicy(QSizePolicy.Policy.Expanding,
                                         QSizePolicy.Policy.Expanding)
         products_layout.addWidget(self._items_table, stretch=1)
         layout.addWidget(products_card, stretch=1)
 
+        layout.addWidget(self._build_notes_card())
+
         scroll.setWidget(content)
         return scroll
 
     def _build_bill_details_group(self) -> QWidget:
         group = QWidget()
-        group.setObjectName("card")
-        form = QFormLayout(group)
-        form.setContentsMargins(20, 18, 20, 18)
+        group.setObjectName("formCard")
+        apply_card_shadow(group)
+        outer = QVBoxLayout(group)
+        outer.setContentsMargins(20, 18, 20, 18)
+        outer.setSpacing(12)
+
+        section_title = QLabel("Order Information")
+        section_title.setObjectName("sectionTitle")
+        outer.addWidget(section_title)
+
+        form = QFormLayout()
         form.setSpacing(10)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        outer.addLayout(form)
 
         self._bill_number_label = QLabel("Assigned on save")
-        self._bill_number_label.setStyleSheet(f"color: {MUTED};")
-        form.addRow("Bill Number", self._bill_number_label)
+        self._bill_number_label.setObjectName("readOnlyValue")
+        form.addRow(field_label("Bill Number"), self._bill_number_label)
 
         self._bill_date_label = QLabel(datetime.now().strftime("%Y-%m-%d"))
-        self._bill_date_label.setStyleSheet(f"color: {MUTED};")
-        form.addRow("Bill Date", self._bill_date_label)
+        self._bill_date_label.setObjectName("readOnlyValue")
+        form.addRow(field_label("Bill Date"), self._bill_date_label)
 
         due_row = QHBoxLayout()
         self._due_date_check = QCheckBox("Set due date")
@@ -249,7 +232,7 @@ class NewBillPage(QWidget):
         self._due_date_edit.setCalendarPopup(True)
         self._due_date_edit.setEnabled(False)
         due_row.addWidget(self._due_date_edit, stretch=1)
-        form.addRow("Due Date", due_row)
+        form.addRow(field_label("Due Date"), due_row)
 
         customer_row = QHBoxLayout()
         self._customer_combo = QComboBox()
@@ -258,32 +241,44 @@ class NewBillPage(QWidget):
         self._customer_combo.currentIndexChanged.connect(self._on_customer_changed)
         customer_row.addWidget(self._customer_combo, stretch=1)
         self._new_customer_button = QPushButton("+ New")
-        self._new_customer_button.setObjectName("ghost")
+        self._new_customer_button.setObjectName("orderGhost")
         self._new_customer_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self._new_customer_button.clicked.connect(self._open_new_customer_dialog)
         customer_row.addWidget(self._new_customer_button)
-        form.addRow("Customer *", customer_row)
+        form.addRow(field_label("Customer *"), customer_row)
 
         self._customer_balance_label = QLabel("")
-        self._customer_balance_label.setStyleSheet(f"color: {MUTED}; font-size: 12px;")
+        self._customer_balance_label.setObjectName("secondaryText")
         self._customer_balance_label.setWordWrap(True)
         form.addRow("", self._customer_balance_label)
 
         self._warehouse_combo = QComboBox()
-        form.addRow("Warehouse *", self._warehouse_combo)
+        form.addRow(field_label("Warehouse *"), self._warehouse_combo)
         self._warehouse_combo.currentIndexChanged.connect(self._on_warehouse_changed)
+
+        return group
+
+    def _build_notes_card(self) -> QWidget:
+        card = QWidget()
+        card.setObjectName("formCard")
+        apply_card_shadow(card)
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(10)
+
+        section_title = QLabel("Notes")
+        section_title.setObjectName("sectionTitle")
+        layout.addWidget(section_title)
 
         self._notes_edit = QTextEdit()
         self._notes_edit.setPlaceholderText("Notes for this bill (optional)")
-        self._notes_edit.setMaximumHeight(64)
-        form.addRow("Notes", self._notes_edit)
+        self._notes_edit.setMaximumHeight(72)
+        layout.addWidget(self._notes_edit)
 
         notes_palette = self._notes_edit.palette()
-        notes_palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(_INPUT_PLACEHOLDER))
+        notes_palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(TEXT_SECONDARY))
         self._notes_edit.setPalette(notes_palette)
-
-        group.setStyleSheet(_BILL_DETAILS_STYLE)
-        return group
+        return card
 
     def _on_due_date_toggled(self, checked: bool) -> None:
         self._due_date_edit.setEnabled(checked)
@@ -301,7 +296,8 @@ class NewBillPage(QWidget):
         outer_layout.setSpacing(18)
 
         card = QWidget()
-        card.setObjectName("card")
+        card.setObjectName("formCard")
+        apply_card_shadow(card)
         layout = QVBoxLayout(card)
         layout.setContentsMargins(20, 18, 20, 18)
         layout.setSpacing(14)
@@ -314,29 +310,38 @@ class NewBillPage(QWidget):
         form.setSpacing(8)
 
         self._subtotal_label = QLabel(_money(Decimal("0")))
-        form.addRow("Subtotal", self._subtotal_label)
+        form.addRow(field_label("Subtotal"), self._subtotal_label)
 
         self._item_discount_label = QLabel(_money(Decimal("0")))
-        form.addRow("Item Discount", self._item_discount_label)
+        form.addRow(field_label("Discount"), self._item_discount_label)
 
         self._overall_discount_edit = QLineEdit("0")
         self._overall_discount_edit.textChanged.connect(self._on_totals_changed)
-        form.addRow("Overall Discount", self._overall_discount_edit)
+        form.addRow(field_label("Overall Discount"), self._overall_discount_edit)
+
+        self._non_taxable_label = QLabel(_money(Decimal("0")))
+        form.addRow(field_label("Non-taxable Total"), self._non_taxable_label)
+
+        self._taxable_label = QLabel(_money(Decimal("0")))
+        form.addRow(field_label("Taxable Total"), self._taxable_label)
 
         self._tax_label = QLabel(_money(Decimal("0")))
-        form.addRow("Tax", self._tax_label)
+        form.addRow(field_label("Tax / VAT"), self._tax_label)
 
         self._other_charges_edit = QLineEdit("0")
         self._other_charges_edit.textChanged.connect(self._on_totals_changed)
-        form.addRow("Other Charges", self._other_charges_edit)
+        form.addRow(field_label("Other Charges"), self._other_charges_edit)
 
+        grand_label = QLabel("Grand Total")
+        grand_label.setObjectName("grandTotalLabel")
         self._grand_total_label = QLabel(_money(Decimal("0")))
-        self._grand_total_label.setStyleSheet("font-weight: 600; font-size: 15px;")
-        form.addRow("Grand Total", self._grand_total_label)
+        self._grand_total_label.setObjectName("grandTotalValue")
+        form.addRow(grand_label, self._grand_total_label)
 
         layout.addLayout(form)
 
         divider = QFrame()
+        divider.setObjectName("divider")
         divider.setFrameShape(QFrame.Shape.HLine)
         layout.addWidget(divider)
 
@@ -352,15 +357,19 @@ class NewBillPage(QWidget):
         for method in PaymentMethod:
             self._payment_method_combo.addItem(method.value.replace("_", " ").title(), method)
         self._payment_method_combo.currentIndexChanged.connect(self._on_totals_changed)
-        payment_form.addRow("Method", self._payment_method_combo)
+        payment_form.addRow(field_label("Method"), self._payment_method_combo)
 
         self._payment_amount_edit = QLineEdit("0")
         self._payment_amount_edit.textChanged.connect(self._on_totals_changed)
-        payment_form.addRow("Amount Received", self._payment_amount_edit)
+        payment_form.addRow(field_label("Paid Amount"), self._payment_amount_edit)
 
         self._balance_due_label = QLabel(_money(Decimal("0")))
         self._balance_due_label.setStyleSheet("font-weight: 600;")
-        payment_form.addRow("Balance Due", self._balance_due_label)
+        payment_form.addRow(field_label("Balance"), self._balance_due_label)
+
+        self._payment_status_label = QLabel("Unpaid")
+        self._payment_status_label.setStyleSheet("font-weight: 600;")
+        payment_form.addRow(field_label("Payment Status"), self._payment_status_label)
 
         layout.addLayout(payment_form)
 
@@ -370,12 +379,15 @@ class NewBillPage(QWidget):
 
     def _on_totals_changed(self) -> None:
         subtotal, item_discount, tax_total, _line_total_sum = self._items_table.compute_totals()
+        non_taxable, taxable = self._items_table.compute_tax_split()
         overall_discount = _parse_decimal(self._overall_discount_edit.text()) or Decimal("0")
         other_charges = _parse_decimal(self._other_charges_edit.text()) or Decimal("0")
         grand_total = subtotal - item_discount - overall_discount + tax_total + other_charges
 
         self._subtotal_label.setText(_money(subtotal))
         self._item_discount_label.setText(_money(item_discount))
+        self._non_taxable_label.setText(_money(non_taxable))
+        self._taxable_label.setText(_money(taxable))
         self._tax_label.setText(_money(tax_total))
         self._grand_total_label.setText(_money(grand_total))
 
@@ -387,14 +399,27 @@ class NewBillPage(QWidget):
         self._balance_due_label.setStyleSheet(
             f"font-weight: 600; color: {GREEN if balance_due <= 0 else MUTED};")
 
+        if payment_amount <= 0:
+            status, color = "Unpaid", MUTED
+        elif balance_due <= 0:
+            status, color = "Paid", GREEN
+        else:
+            status, color = "Partially Paid", MUTED
+        self._payment_status_label.setText(status)
+        self._payment_status_label.setStyleSheet(f"font-weight: 600; color: {color};")
+
     # -- actions bar --------------------------------------------------------#
     def _build_actions_bar(self) -> QHBoxLayout:
         bar = QHBoxLayout()
         bar.setContentsMargins(28, 8, 28, 20)
         bar.setSpacing(10)
 
-        self._clear_button = QPushButton("Clear")
-        self._clear_button.setObjectName("ghost")
+        # Clear plays the role of this form's "Cancel" — New Bill is a page,
+        # not a modal, so there's nothing to reject; Clear resets it to a
+        # blank, unsaved bill instead. Same secondary button styling as
+        # Purchase/Sales Order's Cancel button.
+        self._clear_button = QPushButton("Cancel")
+        self._clear_button.setObjectName("orderSecondary")
         self._clear_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self._clear_button.clicked.connect(self._on_clear)
         bar.addWidget(self._clear_button)
@@ -402,31 +427,31 @@ class NewBillPage(QWidget):
         bar.addStretch()
 
         self._record_payment_button = QPushButton("Record Payment")
-        self._record_payment_button.setObjectName("ghost")
+        self._record_payment_button.setObjectName("orderGhost")
         self._record_payment_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self._record_payment_button.clicked.connect(self._on_record_payment)
         bar.addWidget(self._record_payment_button)
 
         self._generate_pdf_button = QPushButton("Generate PDF")
-        self._generate_pdf_button.setObjectName("ghost")
+        self._generate_pdf_button.setObjectName("orderGhost")
         self._generate_pdf_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self._generate_pdf_button.clicked.connect(lambda: self._on_finalize(then_open=True))
         bar.addWidget(self._generate_pdf_button)
 
         self._save_print_button = QPushButton("Save && Print")
-        self._save_print_button.setObjectName("ghost")
+        self._save_print_button.setObjectName("orderGhost")
         self._save_print_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self._save_print_button.clicked.connect(lambda: self._on_finalize(then_open=True))
         bar.addWidget(self._save_print_button)
 
         self._save_draft_button = QPushButton("Save Draft")
-        self._save_draft_button.setObjectName("ghost")
+        self._save_draft_button.setObjectName("orderGhost")
         self._save_draft_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self._save_draft_button.clicked.connect(self._on_save_draft)
         bar.addWidget(self._save_draft_button)
 
         self._save_sale_button = QPushButton("Save as Sale")
-        self._save_sale_button.setObjectName("primary")
+        self._save_sale_button.setObjectName("orderPrimary")
         self._save_sale_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self._save_sale_button.clicked.connect(lambda: self._on_finalize(then_open=False))
         bar.addWidget(self._save_sale_button)
@@ -704,7 +729,6 @@ class NewBillPage(QWidget):
         self._invoice_id = result.invoice.id
         self._invoice_number = result.invoice.invoice_number
         self._bill_number_label.setText(result.invoice.invoice_number)
-        self._bill_number_label.setStyleSheet("")
         self._update_status_banner()
         self._update_button_states()
         self._on_customer_changed()  # outstanding balance now includes this bill
@@ -758,7 +782,6 @@ class NewBillPage(QWidget):
         self._due_date_check.setChecked(False)
         self._notes_edit.clear()
         self._bill_number_label.setText("Assigned on save")
-        self._bill_number_label.setStyleSheet(f"color: {MUTED};")
         self._bill_date_label.setText(datetime.now().strftime("%Y-%m-%d"))
         self._on_totals_changed()
         self._update_status_banner()
