@@ -23,6 +23,7 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 
 from PySide6.QtCore import QDate, QThreadPool, Qt
+from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -67,7 +68,7 @@ from app.services.inventory_service import InventoryService
 from app.services.product_service import ProductService
 from app.services.sales_service import SalesService
 from app.ui import permission_hints
-from app.ui.theme import GREEN, MUTED
+from app.ui.theme import GREEN, MUTED, RADIUS
 from app.ui.widgets.bill_items_table import BillItemsTable
 from app.ui.widgets.customer_form_dialog import CustomerFormDialog
 from app.ui.widgets.invoice_preview_dialog import InvoicePreviewDialog
@@ -78,6 +79,52 @@ from app.workers.base_worker import Worker
 _logger = logging.getLogger(__name__)
 
 _NO_PAYMENT_NOW = "— No payment now —"
+
+# Light-gray input styling for the bill-details card (Due Date, Customer,
+# Warehouse, Notes) — QComboBox/QDateEdit/QTextEdit have no styling in the
+# app-wide QSS (only QLineEdit does), so they'd otherwise fall back to
+# native/dark rendering. Scoped to that card only, via group.setStyleSheet,
+# so no other page's combo/date/text widgets are affected.
+_INPUT_BG = "#F3F4F6"
+_INPUT_BORDER = "#D1D5DB"
+_INPUT_TEXT = "#172033"
+_INPUT_PLACEHOLDER = "#6B7280"
+_INPUT_FOCUS_BORDER = "#2196F3"
+
+_BILL_DETAILS_STYLE = f"""
+QComboBox, QDateEdit, QTextEdit {{
+    background: {_INPUT_BG};
+    color: {_INPUT_TEXT};
+    border: 1px solid {_INPUT_BORDER};
+    border-radius: {RADIUS}px;
+    padding: 9px 12px;
+    font-size: 13px;
+}}
+QComboBox:focus, QDateEdit:focus, QTextEdit:focus {{
+    border: 1px solid {_INPUT_FOCUS_BORDER};
+}}
+QComboBox:disabled, QDateEdit:disabled {{
+    color: {_INPUT_PLACEHOLDER};
+}}
+QComboBox::drop-down, QDateEdit::drop-down {{
+    border: none;
+    width: 22px;
+}}
+QComboBox QAbstractItemView {{
+    background: #FFFFFF;
+    color: {_INPUT_TEXT};
+    border: 1px solid {_INPUT_BORDER};
+    outline: none;
+    selection-background-color: {_INPUT_FOCUS_BORDER};
+    selection-color: #FFFFFF;
+}}
+QComboBox QLineEdit {{
+    background: {_INPUT_BG};
+    color: {_INPUT_TEXT};
+    border: none;
+    padding: 0;
+}}
+"""
 
 
 def _money(value: Decimal) -> str:
@@ -231,6 +278,11 @@ class NewBillPage(QWidget):
         self._notes_edit.setMaximumHeight(64)
         form.addRow("Notes", self._notes_edit)
 
+        notes_palette = self._notes_edit.palette()
+        notes_palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(_INPUT_PLACEHOLDER))
+        self._notes_edit.setPalette(notes_palette)
+
+        group.setStyleSheet(_BILL_DETAILS_STYLE)
         return group
 
     def _on_due_date_toggled(self, checked: bool) -> None:
