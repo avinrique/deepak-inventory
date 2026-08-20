@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QVBoxLayout,
 )
@@ -142,8 +143,12 @@ class SalesReturnDialog(QDialog):
         worker.signals.error.connect(self._on_error)
         QThreadPool.globalInstance().start(worker)
 
-    def _on_success(self, _result) -> None:
+    def _on_success(self, result) -> None:
         self._set_busy(False)
+        QMessageBox.information(
+            self, "Return recorded",
+            f"{result.quantity:g} unit(s) returned to stock. "
+            f"{result.credit_amount:,.2f} credited to the customer's balance.")
         self.accept()
 
     def _on_error(self, exc: Exception) -> None:

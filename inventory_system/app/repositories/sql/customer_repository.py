@@ -31,6 +31,72 @@ from app.schemas.sales import (
 )
 
 
+def compute_customer_balance(db, organization_id: uuid.UUID, customer: Customer) -> CustomerBalance:
+    """Shared by SqlCustomerRepository.get_balance (its own, unlocked,
+    read-only session) and SqlSalesOrderRepository.create (which locks
+    ``customer`` FOR UPDATE first, in the SAME transaction as the order
+    insert, specifically to close the credit-limit TOCTOU race two
+    concurrent order creations for the same customer would otherwise hit —
+    see that method's docstring). Takes an already-open session and an
+    already-loaded Customer row rather than opening its own, so a caller
+    that needs the lock held across both the read and the following write
+    can do so.
+    """
+    invoiced = (db.query(func.coalesce(func.sum(Invoice.total_amount), 0))
+               .join(SalesOrder, Invoice.sales_order_id == SalesOrder.id)
+               .filter(SalesOrder.organization_id == organization_id,
+                      SalesOrder.customer_id == customer.id).scalar())
+    paid = (db.query(func.coalesce(func.sum(Payment.amount), 0))
+           .join(Invoice, Payment.invoice_id == Invoice.id)
+           .join(SalesOrder, Invoice.sales_order_id == SalesOrder.id)
+           .filter(SalesOrder.organization_id == organization_id,
+                  SalesOrder.customer_id == customer.id).scalar())
+    invoiced_total = Decimal(invoiced)
+    paid_total = Decimal(paid)
+
+    # Every non-CANCELLED order that doesn't have an Invoice yet —
+    # DRAFT/CONFIRMED, or FULFILLED but not yet invoiced — is real
+    # credit exposure the moment it's created, not only once
+    # Billing generates the invoice. Summed via the same per-line
+    # formula an invoice/order total is always computed with (see
+    # app.domain.sales.line_total_after_discount), never a
+    # separately-invented total.
+    pending_orders = (
+        db.query(SalesOrder)
+        .outerjoin(Invoice, Invoice.sales_order_id == SalesOrder.id)
+        .filter(SalesOrder.organization_id == organization_id,
+               SalesOrder.customer_id == customer.id,
+               SalesOrder.status != SalesOrderStatus.CANCELLED,
+               Invoice.id.is_(None))
+        .all())
+    pending_orders_total = sum(
+        (line_total_after_discount(item.quantity_ordered, item.unit_price,
+                                   item.discount_percent, item.tax_percent)
+        for so in pending_orders for item in so.items), Decimal("0"))
+
+    # Returns credit the customer back for goods no longer kept —
+    # netted against exposure the same way a payment is, so a
+    # return actually reduces outstanding_balance instead of only
+    # restoring stock. See SalesReturn.credit_amount.
+    returns_credit = (db.query(func.coalesce(func.sum(SalesReturn.credit_amount), 0))
+                     .filter(SalesReturn.organization_id == organization_id,
+                            SalesReturn.sales_order_id.in_(
+                                db.query(SalesOrder.id)
+                                .filter_by(organization_id=organization_id,
+                                          customer_id=customer.id)))
+                     .scalar())
+    returns_credit_total = Decimal(returns_credit)
+
+    outstanding = (customer.opening_balance + invoiced_total + pending_orders_total
+                  - paid_total - returns_credit_total)
+
+    return CustomerBalance(
+        customer_id=customer.id, opening_balance=customer.opening_balance,
+        invoiced_total=invoiced_total, pending_orders_total=pending_orders_total,
+        paid_total=paid_total, returns_credit_total=returns_credit_total,
+        outstanding_balance=outstanding, credit_limit=customer.credit_limit)
+
+
 def _to_out(customer: Customer) -> CustomerOut:
     return CustomerOut(id=customer.id, customer_code=customer.customer_code,
                        name=customer.name, customer_type=customer.customer_type,
@@ -99,47 +165,7 @@ class SqlCustomerRepository:
             customer = db.get(Customer, customer_id)
             if customer is None or customer.organization_id != organization_id:
                 return None
-
-            invoiced = (db.query(func.coalesce(func.sum(Invoice.total_amount), 0))
-                       .join(SalesOrder, Invoice.sales_order_id == SalesOrder.id)
-                       .filter(SalesOrder.organization_id == organization_id,
-                              SalesOrder.customer_id == customer_id).scalar())
-            paid = (db.query(func.coalesce(func.sum(Payment.amount), 0))
-                   .join(Invoice, Payment.invoice_id == Invoice.id)
-                   .join(SalesOrder, Invoice.sales_order_id == SalesOrder.id)
-                   .filter(SalesOrder.organization_id == organization_id,
-                          SalesOrder.customer_id == customer_id).scalar())
-            invoiced_total = Decimal(invoiced)
-            paid_total = Decimal(paid)
-
-            # Every non-CANCELLED order that doesn't have an Invoice yet —
-            # DRAFT/CONFIRMED, or FULFILLED but not yet invoiced — is real
-            # credit exposure the moment it's created, not only once
-            # Billing generates the invoice. Summed via the same per-line
-            # formula an invoice/order total is always computed with (see
-            # app.domain.sales.line_total_after_discount), never a
-            # separately-invented total.
-            pending_orders = (
-                db.query(SalesOrder)
-                .outerjoin(Invoice, Invoice.sales_order_id == SalesOrder.id)
-                .filter(SalesOrder.organization_id == organization_id,
-                       SalesOrder.customer_id == customer_id,
-                       SalesOrder.status != SalesOrderStatus.CANCELLED,
-                       Invoice.id.is_(None))
-                .all())
-            pending_orders_total = sum(
-                (line_total_after_discount(item.quantity_ordered, item.unit_price,
-                                           item.discount_percent, item.tax_percent)
-                for so in pending_orders for item in so.items), Decimal("0"))
-
-            outstanding = (customer.opening_balance + invoiced_total + pending_orders_total
-                          - paid_total)
-
-            return CustomerBalance(
-                customer_id=customer_id, opening_balance=customer.opening_balance,
-                invoiced_total=invoiced_total, pending_orders_total=pending_orders_total,
-                paid_total=paid_total, outstanding_balance=outstanding,
-                credit_limit=customer.credit_limit)
+            return compute_customer_balance(db, organization_id, customer)
 
     def get_history(self, organization_id: uuid.UUID, customer_id: uuid.UUID,
                     limit: int = 100) -> list[CustomerTransaction]:
@@ -178,7 +204,7 @@ class SqlCustomerRepository:
             for ret in returns:
                 rows.append(CustomerTransaction(
                     kind="return", id=ret.id, reference=ret.reason,
-                    amount=None, status=None, occurred_at=ret.returned_at))
+                    amount=-ret.credit_amount, status=None, occurred_at=ret.returned_at))
 
             rows.sort(key=lambda r: r.occurred_at, reverse=True)
             return rows[:limit]

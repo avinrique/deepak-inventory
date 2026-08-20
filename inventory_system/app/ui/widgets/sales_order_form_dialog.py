@@ -8,15 +8,22 @@ No business logic here: line-item shape/positivity, customer/warehouse/
 product existence, and the DRAFT-only edit rule all live in SalesService /
 app.domain.sales.
 """
+from datetime import datetime
+from decimal import Decimal
+
 from PySide6.QtCore import QThreadPool, Qt
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
-    QFormLayout,
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
     QLabel,
-    QLineEdit,
     QPushButton,
+    QScrollArea,
+    QTextEdit,
     QVBoxLayout,
+    QWidget,
 )
 
 from app.core.exceptions import (
@@ -27,12 +34,18 @@ from app.core.exceptions import (
 )
 from app.schemas.inventory import WarehouseOut
 from app.schemas.product import ProductOut
-from app.schemas.sales import CustomerOut, SalesOrderCreate, SalesOrderItemInput
+from app.schemas.sales import CustomerBalance, CustomerOut, SalesOrderCreate, SalesOrderItemInput
 from app.security.authorization import PermissionDeniedError
 from app.services.sales_service import SalesService
 from app.ui.theme import RED, STYLESHEET
+from app.ui.widgets.customer_form_dialog import CustomerFormDialog
+from app.ui.widgets.order_form_style import ORDER_FORM_STYLESHEET, apply_card_shadow, field_label
 from app.ui.widgets.order_items_editor import OrderItemsEditor
 from app.workers.base_worker import Worker
+
+
+def _money(value: Decimal) -> str:
+    return f"{value:,.2f}"
 
 
 class SalesOrderFormDialog(QDialog):
@@ -40,67 +53,281 @@ class SalesOrderFormDialog(QDialog):
                 warehouses: list[WarehouseOut], products: list[ProductOut], parent=None):
         super().__init__(parent)
         self._sales_service = sales_service
+        self._customers = list(customers)
         self.order = None
         self.setWindowTitle("Create Sales Order")
-        self.setMinimumWidth(560)
-        self.setStyleSheet(STYLESHEET)
+        self.setMinimumWidth(760)
+        self.resize(800, 680)
+        self.setStyleSheet(STYLESHEET + ORDER_FORM_STYLESHEET)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(10)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(24, 22, 24, 22)
+        outer.setSpacing(14)
 
-        form = QFormLayout()
-        form.setSpacing(8)
+        title = QLabel("New Sales Order")
+        title.setObjectName("formTitle")
+        outer.addWidget(title)
+        subtitle = QLabel("Create a draft order for a customer — inventory isn't "
+                          "touched until it's confirmed and fulfilled.")
+        subtitle.setObjectName("formSubtitle")
+        outer.addWidget(subtitle)
 
-        self._customer = QComboBox()
-        for c in sorted(customers, key=lambda c: c.name.lower()):
-            self._customer.addItem(c.name, c.id)
-        form.addRow("Customer *", self._customer)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 4, 6, 0)
+        content_layout.setSpacing(16)
 
-        self._warehouse = QComboBox()
-        for w in sorted(warehouses, key=lambda w: w.name.lower()):
-            self._warehouse.addItem(w.name, w.id)
-        form.addRow("Ship From *", self._warehouse)
-
-        self._notes = QLineEdit()
-        self._notes.setPlaceholderText("Optional")
-        form.addRow("Notes", self._notes)
-
-        layout.addLayout(form)
-
-        layout.addWidget(QLabel("Line Items"))
-        self._items_editor = OrderItemsEditor(products, include_discount=True,
-                                              price_label="Unit Price")
-        layout.addWidget(self._items_editor)
+        content_layout.addWidget(self._build_order_info_card(warehouses))
+        content_layout.addWidget(self._build_items_card(products))
+        content_layout.addWidget(self._build_notes_card())
 
         if not customers or not warehouses or not products:
             missing = "customers" if not customers else (
                 "warehouses" if not warehouses else "products")
-            notice = QLabel(f"No {missing} available — add one before creating an order.")
+            notice = QLabel(f"No {missing} available yet — add one before creating a "
+                            "sales order.")
+            notice.setObjectName("secondaryText")
             notice.setWordWrap(True)
-            layout.addWidget(notice)
+            content_layout.addWidget(notice)
 
         self._error_label = QLabel("")
         self._error_label.setWordWrap(True)
         self._error_label.setStyleSheet(f"color: {RED}; font-size: 12px;")
         self._error_label.hide()
-        layout.addWidget(self._error_label)
+        content_layout.addWidget(self._error_label)
 
-        self._submit_button = QPushButton("Create Sales Order")
-        self._submit_button.setObjectName("primary")
-        self._submit_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._submit_button.setEnabled(bool(customers) and bool(warehouses) and bool(products))
-        self._submit_button.clicked.connect(self._submit)
-        layout.addWidget(self._submit_button)
+        scroll.setWidget(content)
+        outer.addWidget(scroll, stretch=1)
+
+        outer.addLayout(self._build_footer(bool(customers), bool(warehouses), bool(products)))
+
+        self._populate_customers()
+        self._on_customer_changed()
+        self._on_totals_changed()
+
+    # -- order information ---------------------------------------------------#
+    def _build_order_info_card(self, warehouses: list[WarehouseOut]) -> QWidget:
+        card = QWidget()
+        card.setObjectName("formCard")
+        apply_card_shadow(card)
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(12)
+
+        section_title = QLabel("Order Information")
+        section_title.setObjectName("sectionTitle")
+        layout.addWidget(section_title)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(16)
+        grid.setVerticalSpacing(6)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+
+        customer_row = QHBoxLayout()
+        customer_row.setSpacing(8)
+        self._customer = QComboBox()
+        self._customer.currentIndexChanged.connect(self._on_customer_changed)
+        customer_row.addWidget(self._customer, stretch=1)
+        self._new_customer_button = QPushButton("+ New")
+        self._new_customer_button.setObjectName("orderGhost")
+        self._new_customer_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._new_customer_button.clicked.connect(self._open_new_customer_dialog)
+        customer_row.addWidget(self._new_customer_button)
+        grid.addWidget(field_label("Customer *"), 0, 0)
+        grid.addLayout(customer_row, 1, 0)
+
+        self._warehouse = QComboBox()
+        for w in sorted(warehouses, key=lambda w: w.name.lower()):
+            self._warehouse.addItem(w.name, w.id)
+        grid.addWidget(field_label("Ship From *"), 0, 1)
+        grid.addWidget(self._warehouse, 1, 1)
+
+        self._customer_balance_label = QLabel("")
+        self._customer_balance_label.setObjectName("secondaryText")
+        self._customer_balance_label.setWordWrap(True)
+        grid.addWidget(self._customer_balance_label, 2, 0, 1, 2)
+
+        order_date_value = QLabel(datetime.now().strftime("%Y-%m-%d"))
+        order_date_value.setObjectName("readOnlyValue")
+        grid.addWidget(field_label("Order Date"), 3, 0)
+        grid.addWidget(order_date_value, 4, 0)
+
+        layout.addLayout(grid)
+        return card
+
+    def _populate_customers(self) -> None:
+        self._customer.blockSignals(True)
+        self._customer.clear()
+        for c in sorted(self._customers, key=lambda c: c.name.lower()):
+            self._customer.addItem(c.name, c.id)
+        self._customer.blockSignals(False)
+
+    def _on_customer_changed(self) -> None:
+        customer_id = self._customer.currentData()
+        if customer_id is None:
+            self._customer_balance_label.setText("")
+            return
+        worker = Worker(self._sales_service.get_customer_balance, customer_id)
+        worker.signals.finished.connect(self._on_customer_balance_loaded)
+        worker.signals.error.connect(lambda _exc: self._customer_balance_label.setText(""))
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_customer_balance_loaded(self, balance: CustomerBalance) -> None:
+        credit = ("no limit" if balance.available_credit is None
+                 else _money(balance.available_credit))
+        self._customer_balance_label.setText(
+            f"Outstanding: {_money(balance.outstanding_balance)}  •  "
+            f"Available credit: {credit}")
+
+    def _open_new_customer_dialog(self) -> None:
+        existing_ids = {c.id for c in self._customers}
+        dialog = CustomerFormDialog(self._sales_service, parent=self)
+        if not dialog.exec():
+            return
+
+        def load():
+            return self._sales_service.list_customers()
+
+        worker = Worker(load)
+        worker.signals.finished.connect(
+            lambda customers: self._on_customer_created(customers, existing_ids))
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_customer_created(self, customers: list[CustomerOut],
+                             existing_ids: set) -> None:
+        self._customers = customers
+        self._populate_customers()
+        new_customer = next((c for c in customers if c.id not in existing_ids), None)
+        if new_customer is not None:
+            index = self._customer.findData(new_customer.id)
+            if index >= 0:
+                self._customer.setCurrentIndex(index)
+        self._on_customer_changed()
+        self._submit_button.setEnabled(True)
+
+    # -- items -----------------------------------------------------------------#
+    def _build_items_card(self, products: list[ProductOut]) -> QWidget:
+        card = QWidget()
+        card.setObjectName("formCard")
+        apply_card_shadow(card)
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(12)
+
+        section_title = QLabel("Order Items")
+        section_title.setObjectName("sectionTitle")
+        layout.addWidget(section_title)
+
+        self._items_editor = OrderItemsEditor(products, include_discount=True,
+                                              price_label="Unit Price",
+                                              price_field="selling_price")
+        self._items_editor.totals_changed.connect(self._on_totals_changed)
+        layout.addWidget(self._items_editor)
+
+        divider = QFrame()
+        divider.setObjectName("divider")
+        divider.setFrameShape(QFrame.Shape.HLine)
+        layout.addWidget(divider)
+
+        totals_row = QHBoxLayout()
+        totals_row.addStretch()
+
+        totals_grid = QGridLayout()
+        totals_grid.setHorizontalSpacing(24)
+        totals_grid.setVerticalSpacing(4)
+
+        totals_grid.addWidget(self._totals_caption("Subtotal"), 0, 0)
+        self._subtotal_value = self._totals_value()
+        totals_grid.addWidget(self._subtotal_value, 0, 1)
+
+        totals_grid.addWidget(self._totals_caption("Discount"), 1, 0)
+        self._discount_value = self._totals_value()
+        totals_grid.addWidget(self._discount_value, 1, 1)
+
+        totals_grid.addWidget(self._totals_caption("Tax"), 2, 0)
+        self._tax_value = self._totals_value()
+        totals_grid.addWidget(self._tax_value, 2, 1)
+
+        grand_label = QLabel("Grand Total")
+        grand_label.setObjectName("grandTotalLabel")
+        totals_grid.addWidget(grand_label, 3, 0)
+        self._grand_total_value = QLabel(_money(Decimal("0")))
+        self._grand_total_value.setObjectName("grandTotalValue")
+        totals_grid.addWidget(self._grand_total_value, 3, 1,
+                              Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+        totals_row.addLayout(totals_grid)
+        layout.addLayout(totals_row)
+        return card
+
+    @staticmethod
+    def _totals_caption(text: str) -> QLabel:
+        label = QLabel(text)
+        label.setObjectName("secondaryText")
+        return label
+
+    @staticmethod
+    def _totals_value() -> QLabel:
+        label = QLabel(_money(Decimal("0")))
+        label.setStyleSheet("font-size: 13px; font-weight: 600;")
+        label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        return label
+
+    def _on_totals_changed(self) -> None:
+        subtotal, discount_total, tax_total, grand_total = self._items_editor.compute_totals()
+        self._subtotal_value.setText(_money(subtotal))
+        self._discount_value.setText(_money(discount_total))
+        self._tax_value.setText(_money(tax_total))
+        self._grand_total_value.setText(_money(grand_total))
+
+    # -- notes -------------------------------------------------------------------#
+    def _build_notes_card(self) -> QWidget:
+        card = QWidget()
+        card.setObjectName("formCard")
+        apply_card_shadow(card)
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(10)
+
+        section_title = QLabel("Notes")
+        section_title.setObjectName("sectionTitle")
+        layout.addWidget(section_title)
+
+        self._notes = QTextEdit()
+        self._notes.setPlaceholderText("Optional — delivery instructions, special "
+                                       "terms, etc.")
+        self._notes.setMaximumHeight(72)
+        layout.addWidget(self._notes)
+        return card
+
+    # -- footer -------------------------------------------------------------------#
+    def _build_footer(self, has_customers: bool, has_warehouses: bool,
+                      has_products: bool) -> QHBoxLayout:
+        bar = QHBoxLayout()
+        bar.setContentsMargins(0, 6, 0, 0)
+        bar.addStretch()
 
         cancel_button = QPushButton("Cancel")
-        cancel_button.setObjectName("flat")
+        cancel_button.setObjectName("orderSecondary")
+        cancel_button.setCursor(Qt.CursorShape.PointingHandCursor)
         cancel_button.clicked.connect(self.reject)
-        layout.addWidget(cancel_button)
+        bar.addWidget(cancel_button)
+
+        self._submit_button = QPushButton("Save Sales Order")
+        self._submit_button.setObjectName("orderPrimary")
+        self._submit_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._submit_button.setEnabled(has_customers and has_warehouses and has_products)
+        self._submit_button.clicked.connect(self._submit)
+        bar.addWidget(self._submit_button)
+        return bar
 
     def _set_busy(self, busy: bool) -> None:
         self._submit_button.setEnabled(not busy)
-        self._submit_button.setText("Creating…" if busy else "Create Sales Order")
+        self._submit_button.setText("Saving…" if busy else "Save Sales Order")
 
     def _submit(self) -> None:
         self._error_label.hide()
@@ -119,7 +346,7 @@ class SalesOrderFormDialog(QDialog):
                                      tax_percent=r["tax_percent"],
                                      discount_percent=r["discount_percent"]) for r in rows]
         data = SalesOrderCreate(customer_id=customer_id, warehouse_id=warehouse_id,
-                                notes=self._notes.text().strip() or None, items=items)
+                                notes=self._notes.toPlainText().strip() or None, items=items)
 
         self._set_busy(True)
         worker = Worker(self._sales_service.create_sales_order, data)

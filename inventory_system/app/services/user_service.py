@@ -50,6 +50,7 @@ from app.core.exceptions import (
     DuplicateUsernameError,
     MembershipNotFoundError,
     OwnerProtectedError,
+    OwnerRoleNotAssignableError,
     PasswordPolicyViolationError,
     RoleNotFoundError,
     UserNotFoundError,
@@ -328,6 +329,9 @@ class UserService:
             raise OwnerProtectedError(target_user_id)
         if not self._users.role_exists(new_role_id):
             raise RoleNotFoundError(new_role_id)
+        new_role = next((r for r in self._users.list_roles() if r.id == new_role_id), None)
+        if new_role is not None and new_role.name == _OWNER_ROLE_NAME:
+            raise OwnerRoleNotAssignableError(target_user_id)
 
         updated = self._users.update_membership_role(target_user_id, organization_id,
                                                       new_role_id)

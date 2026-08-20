@@ -243,6 +243,13 @@ class SalesReturn(UUIDPKMixin, Base):
     inventory_transaction_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("inventory_transactions.id", ondelete="RESTRICT"),
         nullable=False, unique=True)
+    # Monetary value credited to the customer for this return — priced with
+    # the same app.domain.sales.line_total_after_discount formula the
+    # order line was originally invoiced with, at record_return time.
+    # SqlCustomerRepository.get_balance nets this against outstanding
+    # exposure so a return actually reduces what the customer owes.
+    credit_amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False,
+                                                    default=Decimal("0"))
     returned_at: Mapped[datetime] = mapped_column(DateTime(timezone=True),
                                                    server_default=func.now())
 

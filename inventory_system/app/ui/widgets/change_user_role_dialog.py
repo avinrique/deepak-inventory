@@ -7,7 +7,11 @@ small, focused dialog rather than folding role into the profile-edit form.
 from PySide6.QtCore import QThreadPool, Qt
 from PySide6.QtWidgets import QComboBox, QDialog, QLabel, QPushButton, QVBoxLayout
 
-from app.core.exceptions import OwnerProtectedError, RoleNotFoundError
+from app.core.exceptions import (
+    OwnerProtectedError,
+    OwnerRoleNotAssignableError,
+    RoleNotFoundError,
+)
 from app.schemas.user import RoleOut, UserSummaryOut
 from app.services.user_service import UserService
 from app.ui.theme import RED, STYLESHEET
@@ -32,8 +36,14 @@ class ChangeUserRoleDialog(QDialog):
         layout.addWidget(QLabel(f"Change role for {user.full_name!r}"))
 
         self._role = QComboBox()
+        # OWNER is never a legal target here — there is exactly one Owner
+        # per organization, assigned at org creation, not reassignable
+        # through this action (see UserService.change_user_role /
+        # OwnerRoleNotAssignableError). Filtering it out of the dropdown is
+        # a UX convenience; the service enforces this regardless.
         for role in roles:
-            self._role.addItem(role.name, role.id)
+            if role.name != "OWNER":
+                self._role.addItem(role.name, role.id)
         select_by_data(self._role, user.role_id)
         layout.addWidget(self._role)
 
@@ -78,6 +88,8 @@ class ChangeUserRoleDialog(QDialog):
         self._set_busy(False)
         if isinstance(exc, OwnerProtectedError):
             self._show_error("This user is the organization's Owner and cannot be demoted.")
+        elif isinstance(exc, OwnerRoleNotAssignableError):
+            self._show_error("The Owner role can't be assigned to another user this way.")
         elif isinstance(exc, RoleNotFoundError):
             self._show_error(str(exc))
         else:

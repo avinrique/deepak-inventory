@@ -20,6 +20,22 @@ import pandas as pd
 from app.schemas.reporting import ReportResult
 
 
+_FORMULA_TRIGGER_CHARS = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _neutralize_formula(value: str) -> str:
+    """Defuses CSV/Excel formula injection (CWE-1236): a cell value that
+    starts with =, +, -, @, tab, or CR is interpreted as a formula by
+    Excel/LibreOffice on open. Report cells often echo free-text user input
+    (customer/supplier/product names, notes), so any of those must be
+    neutralized before writing, not just PDF/HTML cells (already safe via
+    html.escape).
+    """
+    if value.startswith(_FORMULA_TRIGGER_CHARS):
+        return "'" + value
+    return value
+
+
 def _format_cell(value) -> str:
     if value is None:
         return ""
@@ -39,7 +55,11 @@ def to_dataframe(result: ReportResult) -> pd.DataFrame:
     purely for display, not further financial computation.
     """
     def _coerce(value):
-        return float(value) if isinstance(value, Decimal) else value
+        if isinstance(value, Decimal):
+            return float(value)
+        if isinstance(value, str):
+            return _neutralize_formula(value)
+        return value
 
     if not result.rows:
         return pd.DataFrame(columns=result.columns)

@@ -120,28 +120,47 @@ class PurchasesPage(QWidget):
 
         bar.addStretch()
 
+        self._create_button = None
         if self._can("purchases.create"):
-            create_button = QPushButton("+ Create Purchase Order")
-            create_button.setObjectName("primary")
-            create_button.setCursor(Qt.CursorShape.PointingHandCursor)
-            create_button.clicked.connect(self._open_create_dialog)
-            bar.addWidget(create_button)
+            self._create_button = QPushButton("+ Create Purchase Order")
+            self._create_button.setObjectName("primary")
+            self._create_button.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._create_button.clicked.connect(self._open_create_dialog)
+            # Suppliers/warehouses/products load asynchronously (see
+            # _load_reference_data) — disabled until that finishes so a
+            # click landing before the load completes can't open the
+            # Create dialog with stale-empty lists (every field would show
+            # "No suppliers/warehouses/products available" even when real
+            # data exists, just not fetched yet).
+            self._create_button.setEnabled(False)
+            self._create_button.setToolTip("Loading suppliers, warehouses, and products…")
+            bar.addWidget(self._create_button)
         return bar
 
-    def _load_reference_data(self) -> None:
-        def load():
-            suppliers = self._purchase_service.list_suppliers()
-            warehouses = self._inventory_service.list_warehouses()
-            products = self._product_service.search_products(
-                ProductFilter(status=ProductStatus.ACTIVE, page_size=500)).items
-            return suppliers, warehouses, products
+    def _fetch_reference_data(self):
+        # Inactive suppliers/warehouses are excluded — same "archived
+        # things don't populate new-transaction pickers" rule already
+        # applied to products just below (ProductStatus.ACTIVE). Extracted
+        # from _load_reference_data so it's directly unit-testable without
+        # going through QThreadPool — see tests/ui/test_purchases_page.py.
+        suppliers = [s for s in self._purchase_service.list_suppliers() if s.is_active]
+        warehouses = [w for w in self._inventory_service.list_warehouses() if w.is_active]
+        products = self._product_service.search_products(
+            ProductFilter(status=ProductStatus.ACTIVE, page_size=500)).items
+        return suppliers, warehouses, products
 
-        worker = Worker(load)
+    def _load_reference_data(self) -> None:
+        worker = Worker(self._fetch_reference_data)
         worker.signals.finished.connect(self._on_reference_data_loaded)
-        worker.signals.error.connect(
-            lambda exc: _logger.exception("Failed to load purchase reference data",
-                                          exc_info=exc))
+        worker.signals.error.connect(self._on_reference_data_error)
         QThreadPool.globalInstance().start(worker)
+
+    def _on_reference_data_error(self, exc: Exception) -> None:
+        _logger.exception("Failed to load purchase reference data", exc_info=exc)
+        if self._create_button is not None:
+            self._create_button.setEnabled(True)
+            self._create_button.setToolTip("Couldn't load suppliers/warehouses/products — "
+                                           "the form may be missing options. Try again.")
 
     def _on_reference_data_loaded(self, result) -> None:
         self._suppliers, self._warehouses, self._products = result
@@ -151,6 +170,9 @@ class PurchasesPage(QWidget):
         table = self._async_area.currentWidget()
         if isinstance(table, QTableWidget):
             self._render_table_contents(table)
+        if self._create_button is not None:
+            self._create_button.setEnabled(True)
+            self._create_button.setToolTip("")
 
     # -- create ------------------------------------------------------------#
     def _open_create_dialog(self) -> None:

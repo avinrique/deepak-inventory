@@ -465,11 +465,20 @@ class NewBillPage(QWidget):
                 "Unsaved — nothing is recorded until you Save Draft or Save as Sale.")
 
     # -- reference data ------------------------------------------------------#
-    def _load_reference_data(self) -> None:
-        def load():
-            return self._sales_service.list_customers(), self._inventory_service.list_warehouses()
+    def _fetch_reference_data(self):
+        # Inactive customers/warehouses are excluded from the picker — a
+        # deactivated customer/warehouse must not be selectable for a
+        # brand new bill (see CustomersPage._deactivate's promise that a
+        # deactivated customer "won't be selectable for new sales orders'
+        # filters going forward"). Extracted from _load_reference_data so
+        # it's directly unit-testable without going through QThreadPool —
+        # see tests/ui/test_new_bill_page.py.
+        customers = [c for c in self._sales_service.list_customers() if c.is_active]
+        warehouses = [w for w in self._inventory_service.list_warehouses() if w.is_active]
+        return customers, warehouses
 
-        worker = Worker(load)
+    def _load_reference_data(self) -> None:
+        worker = Worker(self._fetch_reference_data)
         worker.signals.finished.connect(self._on_reference_data_loaded)
         worker.signals.error.connect(self._on_reference_data_error)
         QThreadPool.globalInstance().start(worker)

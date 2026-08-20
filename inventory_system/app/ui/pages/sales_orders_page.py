@@ -128,26 +128,45 @@ class SalesOrdersPage(QWidget):
 
         bar.addStretch()
 
+        self._create_button = None
         if self._can("sales.create"):
-            create_button = QPushButton("+ Create Sales Order")
-            create_button.setObjectName("primary")
-            create_button.setCursor(Qt.CursorShape.PointingHandCursor)
-            create_button.clicked.connect(self._open_create_dialog)
-            bar.addWidget(create_button)
+            self._create_button = QPushButton("+ Create Sales Order")
+            self._create_button.setObjectName("primary")
+            self._create_button.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._create_button.clicked.connect(self._open_create_dialog)
+            # Customers/warehouses/products load asynchronously (see
+            # _load_filter_options) — disabled until that finishes so a
+            # click landing before the load completes can't open the
+            # Create dialog with stale-empty lists (every field would show
+            # "No customers/warehouses/products available" even when real
+            # data exists, just not fetched yet).
+            self._create_button.setEnabled(False)
+            self._create_button.setToolTip("Loading customers, warehouses, and products…")
+            bar.addWidget(self._create_button)
         return bar
 
-    def _load_filter_options(self) -> None:
-        def load():
-            customers = self._sales_service.list_customers()
-            warehouses = self._inventory_service.list_warehouses()
-            products = self._product_service.search_products(
-                ProductFilter(status=ProductStatus.ACTIVE, page_size=500)).items
-            return customers, warehouses, products
+    def _fetch_filter_options(self):
+        # Inactive customers/warehouses are excluded — same "archived
+        # things don't populate new-transaction pickers" rule already
+        # applied to products just below (ProductStatus.ACTIVE). Extracted
+        # from _load_filter_options so it's directly unit-testable without
+        # going through QThreadPool — see tests/ui/test_sales_orders_page.py.
+        customers = [c for c in self._sales_service.list_customers() if c.is_active]
+        warehouses = [w for w in self._inventory_service.list_warehouses() if w.is_active]
+        products = self._product_service.search_products(
+            ProductFilter(status=ProductStatus.ACTIVE, page_size=500)).items
+        return customers, warehouses, products
 
-        worker = Worker(load)
+    def _load_filter_options(self) -> None:
+        worker = Worker(self._fetch_filter_options)
         worker.signals.finished.connect(self._on_filter_options_loaded)
         worker.signals.error.connect(self._on_filter_options_error)
         QThreadPool.globalInstance().start(worker)
+
+    def _on_filter_options_ready(self) -> None:
+        if self._create_button is not None:
+            self._create_button.setEnabled(True)
+            self._create_button.setToolTip("")
 
     def _on_filter_options_loaded(self, result) -> None:
         customers, warehouses, products = result
@@ -163,9 +182,14 @@ class SalesOrdersPage(QWidget):
         table = self._async_area.currentWidget()
         if isinstance(table, QTableWidget):
             self._render_table_contents(table)
+        self._on_filter_options_ready()
 
     def _on_filter_options_error(self, exc: Exception) -> None:
         _logger.exception("Failed to load sales page filter options", exc_info=exc)
+        if self._create_button is not None:
+            self._create_button.setEnabled(True)
+            self._create_button.setToolTip("Couldn't load customers/warehouses/products — "
+                                           "the form may be missing options. Try again.")
 
     # -- create ----------------------------------------------------------- #
     def _open_create_dialog(self) -> None:

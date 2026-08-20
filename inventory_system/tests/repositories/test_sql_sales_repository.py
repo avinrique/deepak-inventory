@@ -114,6 +114,21 @@ def test_update_replaces_items_wholesale(world):
     assert updated.items[0].quantity_ordered == Decimal("3")
 
 
+def test_update_preserves_line_discount_percent(world):
+    """Regression test: update() used to omit discount_percent when
+    rebuilding items, silently resetting every line's discount to 0 —
+    unlike create(), which always persisted it. See SalesOrderItem
+    construction in SqlSalesOrderRepository.update.
+    """
+    repo = _repo()
+    so = _create_so(world, quantity=Decimal("5"))
+    updated = repo.update(world["org_id"], so.id, SalesOrderUpdate(
+        items=[SalesOrderItemInput(product_id=world["product2_id"], quantity_ordered=Decimal("3"),
+                                   unit_price=Decimal("30"), tax_percent=Decimal("0"),
+                                   discount_percent=Decimal("10"))]))
+    assert updated.items[0].discount_percent == Decimal("10")
+
+
 # -- status transitions ----------------------------------------------------#
 
 def test_confirm_sets_confirmed_by_and_at(world):
@@ -655,6 +670,48 @@ def test_concurrent_payments_cannot_jointly_overpay_an_invoice(world):
     assert doc.amount_paid == Decimal("700")  # exactly one payment landed
 
 
+def test_concurrent_order_creation_cannot_jointly_exceed_credit_limit(world):
+    # Customer has credit_limit=1000, no prior exposure (available=1000).
+    # Two threads each try to create an order totaling 800 at the same
+    # moment (1600 combined > 1000). The Customer-row lock in create() must
+    # serialize them: the second to acquire the lock sees the first order's
+    # effect (via compute_customer_balance's pending_orders_total) and gets
+    # rejected, rather than both succeeding — closes the TOCTOU race an
+    # unlocked balance-then-insert would have.
+    with get_session() as session:
+        customer = session.get(Customer, world["customer_id"])
+        customer.credit_limit = Decimal("1000")
+
+    repo = _repo()
+    results = []
+    barrier = threading.Barrier(2)
+
+    def attempt():
+        barrier.wait()
+        try:
+            repo.create(world["org_id"], SalesOrderCreate(
+                customer_id=world["customer_id"], warehouse_id=world["warehouse_id"],
+                items=[SalesOrderItemInput(product_id=world["product_id"],
+                                          quantity_ordered=Decimal("8"),
+                                          unit_price=Decimal("100"),
+                                          tax_percent=Decimal("0"),
+                                          discount_percent=Decimal("0"))]),
+                       world["user_id"])
+            results.append("ok")
+        except Exception:  # CreditLimitExceededError
+            results.append("rejected")
+
+    threads = [threading.Thread(target=attempt) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert sorted(results) == ["ok", "rejected"]
+    balance = SqlCustomerRepository().get_balance(world["org_id"], world["customer_id"])
+    assert balance.outstanding_balance == Decimal("800.00")  # exactly one order landed
+
+
 # -- sales returns ----------------------------------------------------------#
 
 def test_record_return_puts_stock_back_and_reduces_net_fulfilled(world):
@@ -696,6 +753,41 @@ def test_record_return_creates_return_in_ledger_entry(world):
         tx = session.get(InventoryTransaction, result.inventory_transaction_id)
         assert tx.transaction_type.value == "RETURN_IN"
         assert tx.quantity_change == Decimal("2")
+
+
+def test_record_return_computes_credit_amount_from_the_original_line_pricing(world):
+    repo = _repo()
+    # unit_price 100, 13% tax, 10% discount -> per-unit credit = 100*0.9*1.13 = 101.70
+    so = _fulfilled_so(world, quantity=Decimal("10"), unit_price=Decimal("100"),
+                       tax_percent=Decimal("13"), discount_percent=Decimal("10"))
+
+    result = repo.record_return(world["org_id"], so.id, so.items[0].id, Decimal("2"),
+                                "wrong size", world["user_id"])
+
+    assert result.credit_amount == Decimal("203.40")
+
+
+def test_record_return_reduces_customer_outstanding_balance(world):
+    """A return isn't just a stock movement — it must reduce what the
+    customer owes, the same as a payment would (CRITICAL BUSINESS RULE:
+    returns/refunds must correctly update inventory AND financial records).
+    """
+    repo = _repo()
+    customer_repo = SqlCustomerRepository()
+    so = _fulfilled_so(world, quantity=Decimal("10"), unit_price=Decimal("100"),
+                       tax_percent=Decimal("0"))
+    repo.generate_invoice(world["org_id"], so.id, world["user_id"])
+
+    before = customer_repo.get_balance(world["org_id"], world["customer_id"])
+    assert before.outstanding_balance == Decimal("1000.00")
+
+    result = repo.record_return(world["org_id"], so.id, so.items[0].id, Decimal("3"),
+                                "damaged", world["user_id"])
+    assert result.credit_amount == Decimal("300.00")
+
+    after = customer_repo.get_balance(world["org_id"], world["customer_id"])
+    assert after.returns_credit_total == Decimal("300.00")
+    assert after.outstanding_balance == Decimal("700.00")
 
 
 def test_record_return_records_audit_log_entry(world):

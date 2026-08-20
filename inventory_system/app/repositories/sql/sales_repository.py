@@ -45,6 +45,7 @@ from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 
 from app.core.exceptions import (
+    CreditLimitExceededError,
     DuplicateInvoiceError,
     InvalidSalesOrderTransitionError,
     InvoiceNotFoundError,
@@ -78,6 +79,7 @@ from app.models import (
     User,
 )
 from app.repositories.sql.audit_log_repository import record_audit_log
+from app.repositories.sql.customer_repository import compute_customer_balance
 from app.repositories.sql.inventory_repository import _apply
 from app.schemas.sales import (
     FinalizeSaleRequest,
@@ -135,7 +137,7 @@ def _return_to_out(r: SalesReturn) -> SalesReturnOut:
                           warehouse_id=r.warehouse_id, product_id=r.product_id,
                           quantity=r.quantity, reason=r.reason, returned_by=r.returned_by,
                           inventory_transaction_id=r.inventory_transaction_id,
-                          returned_at=r.returned_at)
+                          credit_amount=r.credit_amount, returned_at=r.returned_at)
 
 
 def _lock_or_create_invoice_sequence(db, organization_id: uuid.UUID) -> InvoiceSequence:
@@ -305,7 +307,29 @@ def _record_payment_on_invoice(db, organization_id: uuid.UUID, invoice: Invoice,
 class SqlSalesOrderRepository:
     def create(self, organization_id: uuid.UUID, data: SalesOrderCreate,
               created_by: uuid.UUID) -> SalesOrderOut:
+        """SalesService.create_sales_order already runs an unlocked credit
+        check before calling this (fast-fail for the common case, and what
+        the fake-repository service-layer tests exercise). That check alone
+        has a TOCTOU race: two concurrent calls for the same customer can
+        both read the same balance, both pass, and jointly exceed the
+        limit. The lock below is the authoritative, race-free check for the
+        real database — mirrors how record_payment locks the Invoice row
+        rather than trusting an earlier unlocked balance read.
+        """
         with get_session() as db:
+            customer = (db.query(Customer)
+                       .filter_by(id=data.customer_id, organization_id=organization_id)
+                       .with_for_update().first())
+            if customer is not None and customer.credit_limit is not None:
+                order_total = sum(
+                    (line_total_after_discount(item.quantity_ordered, item.unit_price,
+                                               item.discount_percent, item.tax_percent)
+                    for item in data.items), Decimal("0"))
+                balance = compute_customer_balance(db, organization_id, customer)
+                available = balance.credit_limit - balance.outstanding_balance
+                if order_total > available:
+                    raise CreditLimitExceededError(available, order_total)
+
             so = SalesOrder(organization_id=organization_id, customer_id=data.customer_id,
                             warehouse_id=data.warehouse_id, status=SalesOrderStatus.DRAFT,
                             notes=data.notes, created_by=created_by)
@@ -336,7 +360,8 @@ class SqlSalesOrderRepository:
                     db.add(SalesOrderItem(sales_order_id=so.id, product_id=item.product_id,
                                          quantity_ordered=item.quantity_ordered,
                                          unit_price=item.unit_price,
-                                         tax_percent=item.tax_percent))
+                                         tax_percent=item.tax_percent,
+                                         discount_percent=item.discount_percent))
                 db.flush()
                 # See PurchaseOrderRepository.update — the already-loaded
                 # so.items collection is stale relative to what was just
@@ -597,11 +622,19 @@ class SqlSalesOrderRepository:
                        quantity_change=quantity, performed_by=returned_by,
                        reference_type="sales_order_item", reference_id=item.id, notes=reason)
 
+            # Priced with the same formula the line was originally invoiced
+            # with — not a fresh price lookup — so a return of part of a
+            # discounted/taxed line credits back exactly its share, no
+            # more, no less.
+            credit_amount = line_total_after_discount(
+                quantity, item.unit_price, item.discount_percent, item.tax_percent)
+
             sales_return = SalesReturn(
                 organization_id=organization_id, sales_order_id=so.id,
                 sales_order_item_id=item.id, warehouse_id=so.warehouse_id,
                 product_id=item.product_id, quantity=quantity, reason=reason,
-                returned_by=returned_by, inventory_transaction_id=tx.id)
+                returned_by=returned_by, inventory_transaction_id=tx.id,
+                credit_amount=credit_amount)
             db.add(sales_return)
             db.flush()
 

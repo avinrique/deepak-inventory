@@ -79,25 +79,30 @@ class CustomerBalance(BaseModel):
     """Read-only, derived — never stored.
 
     outstanding_balance = opening_balance + invoiced_total +
-    pending_orders_total - paid_total. Two different kinds of exposure are
-    tracked separately on purpose: invoiced_total is what's on generated
-    Invoices (frozen financial documents); pending_orders_total is every
-    non-CANCELLED SalesOrder that hasn't been invoiced yet (DRAFT/
-    CONFIRMED, or FULFILLED-but-not-yet-invoiced) — a customer's credit
-    exposure the moment they commit to an order, not only once Billing
-    gets around to invoicing it. Without pending_orders_total, credit
-    control could be walked around entirely by stacking multiple
-    uninvoiced draft orders. Every figure here is summed from what
-    SalesOrder/Invoice/Payment already recorded (via the same
-    app.domain.sales line-total formula every order/invoice line already
-    uses) — see SqlCustomerRepository.get_balance, which never computes a
-    price or tax amount from scratch, only totals what Billing recorded.
+    pending_orders_total - paid_total - returns_credit_total. Two different
+    kinds of exposure are tracked separately on purpose: invoiced_total is
+    what's on generated Invoices (frozen financial documents);
+    pending_orders_total is every non-CANCELLED SalesOrder that hasn't been
+    invoiced yet (DRAFT/CONFIRMED, or FULFILLED-but-not-yet-invoiced) — a
+    customer's credit exposure the moment they commit to an order, not only
+    once Billing gets around to invoicing it. Without pending_orders_total,
+    credit control could be walked around entirely by stacking multiple
+    uninvoiced draft orders. returns_credit_total is the sum of
+    SalesReturn.credit_amount — goods a customer returned reduce what they
+    owe, the same as a payment would, even though no Payment row exists for
+    it (a return is a credit, not cash received). Every figure here is
+    summed from what SalesOrder/Invoice/Payment/SalesReturn already
+    recorded (via the same app.domain.sales line-total formula every
+    order/invoice line already uses) — see SqlCustomerRepository.get_balance,
+    which never computes a price or tax amount from scratch, only totals
+    what Billing recorded.
     """
     customer_id: uuid.UUID
     opening_balance: Decimal
     invoiced_total: Decimal
     pending_orders_total: Decimal
     paid_total: Decimal
+    returns_credit_total: Decimal = Decimal("0")
     outstanding_balance: Decimal
     credit_limit: Decimal | None
 
@@ -365,4 +370,11 @@ class SalesReturnOut(BaseModel):
     reason: str
     returned_by: uuid.UUID
     inventory_transaction_id: uuid.UUID
+    # The monetary value credited back to the customer for this return —
+    # quantity priced at the original order line's unit_price/discount/tax,
+    # via the same app.domain.sales.line_total_after_discount formula the
+    # line was originally invoiced with. Netted against the customer's
+    # outstanding_balance in SqlCustomerRepository.get_balance so a return
+    # actually reduces what they owe, not just their stock count.
+    credit_amount: Decimal
     returned_at: datetime

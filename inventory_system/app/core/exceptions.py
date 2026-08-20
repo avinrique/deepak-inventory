@@ -360,3 +360,17 @@ class RoleNotFoundError(AppError):
     def __init__(self, role_id):
         self.role_id = role_id
         super().__init__(f"Role {role_id!r} not found")
+
+
+class OwnerRoleNotAssignableError(AppError):
+    """Raised when change_user_role is asked to assign the OWNER role —
+    same one-Owner-per-organization invariant as OwnerProtectedError, from
+    the other direction: nothing may be *promoted* to Owner through the
+    generic role-change action either, only demoted/deactivated away from
+    it. There is exactly one Owner per organization, set at organization
+    creation; this endpoint isn't how ownership transfers.
+    """
+    def __init__(self, target_user_id):
+        self.target_user_id = target_user_id
+        super().__init__(f"User {target_user_id!r} cannot be assigned the OWNER role "
+                         "through this action")

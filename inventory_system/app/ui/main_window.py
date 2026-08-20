@@ -65,15 +65,16 @@ MODULES = [
 
 # Module key -> the permission code(s) that make it relevant; having any
 # ONE is enough (e.g. products.view). A module with no entry here (Home,
-# Warehouses/Suppliers/Customers — currently placeholders with nothing to
-# gate, and Settings — whose own read side has no permission requirement,
-# only editing does, via SettingsPage._can_edit) is visible to everyone
-# who's logged in.
+# and Settings — whose own read side has no permission requirement, only
+# editing does, via SettingsPage._can_edit) is visible to everyone who's
+# logged in.
 _MODULE_PERMISSIONS: dict[str, frozenset[str]] = {
     "new_bill": frozenset({"sales.create"}),
     "products": frozenset({"products.view"}),
     "inventory": frozenset({"inventory.view"}),
+    "warehouses": frozenset({"inventory.view"}),
     "purchases": frozenset({"purchases.view"}),
+    "suppliers": frozenset({"purchases.view"}),
     "sales": frozenset({"sales.view"}),
     "customers": frozenset({"customers.view"}),
     "reports": frozenset({"reports.view"}),
@@ -114,13 +115,19 @@ class MainWindow(QMainWindow):
                      ("Superuser" if session and session.is_superuser else "Member"))
 
         visible_modules = _visible_modules(container.sessions)
+        try:
+            default_tax_percent = (container.organization_service()
+                                   .get_current_organization().default_tax_percent)
+        except Exception:
+            _logger.exception("Could not load organization tax setting for sidebar footer")
+            default_tax_percent = None
 
         central = QWidget()
         root = QHBoxLayout(central)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        self._sidebar = Sidebar(visible_modules)
+        self._sidebar = Sidebar(visible_modules, default_tax_percent)
         root.addWidget(self._sidebar)
 
         right = QWidget()
@@ -294,10 +301,10 @@ def _build_page(key: str, container: Container) -> QWidget:
                             container.sessions, container.organization_service())
     if key == "warehouses":
         from app.ui.pages.warehouses_page import WarehousesPage
-        return WarehousesPage()
+        return WarehousesPage(container.inventory_service(), container.sessions)
     if key == "suppliers":
         from app.ui.pages.suppliers_page import SuppliersPage
-        return SuppliersPage()
+        return SuppliersPage(container.purchase_service(), container.sessions)
     if key == "customers":
         from app.ui.pages.customers_page import CustomersPage
         return CustomersPage(container.sales_service(), container.sessions)

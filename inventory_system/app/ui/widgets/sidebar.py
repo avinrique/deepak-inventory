@@ -21,11 +21,12 @@ class SidebarModule:
 class Sidebar(QWidget):
     module_selected = Signal(str)
 
-    def __init__(self, modules: list[SidebarModule]):
+    def __init__(self, modules: list[SidebarModule], default_tax_percent=None):
         super().__init__()
         self.setFixedWidth(220)
         self.setStyleSheet(f"background: {SIDEBAR_BG};")
         self._keys: list[str] = [m.key for m in modules]
+        self._default_tax_percent = default_tax_percent
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -50,7 +51,9 @@ class Sidebar(QWidget):
         self._list.currentRowChanged.connect(self._on_row_changed)
         layout.addWidget(self._list, stretch=1)
 
-        footer = QLabel("  VAT 13% default")
+        footer_text = (f"  VAT {default_tax_percent:g}% default"
+                      if default_tax_percent is not None else "  ")
+        footer = QLabel(footer_text)
         footer.setStyleSheet(f"color: {SIDEBAR_MUTED}; font-size: 10px; padding: 16px 22px;")
         layout.addWidget(footer)
 
