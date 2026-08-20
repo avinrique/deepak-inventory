@@ -54,7 +54,7 @@ def test_validate_product_rejects_tax_percent_out_of_range():
 
 def test_validate_product_rejects_negative_minimum_stock_level():
     errors = validate_product(**_valid_kwargs(minimum_stock_level=Decimal("-1")))
-    assert "Minimum stock level cannot be negative." in errors
+    assert "Minimum stock level (re-order point) cannot be negative." in errors
 
 
 def test_validate_product_reports_multiple_errors_at_once():

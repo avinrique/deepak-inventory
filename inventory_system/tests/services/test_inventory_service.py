@@ -204,9 +204,13 @@ class FakeInventoryRepository:
 def _product(product_id=None) -> ProductOut:
     now = datetime.now(timezone.utc)
     return ProductOut(id=product_id or uuid.uuid4(), sku="SKU-1", barcode=None, name="Widget",
-                      description=None, category=None, brand=None, unit=UNIT,
+                      description=None, product_type="goods", category=None, brand=None,
+                      unit=UNIT, sub_unit=None, sub_unit_conversion_factor=None,
+                      tertiary_unit=None, tertiary_unit_conversion_factor=None,
                       purchase_price=Decimal("10"), selling_price=Decimal("15"),
-                      tax_percent=Decimal("13"), minimum_stock_level=Decimal("0"),
+                      tax_percent=Decimal("13"), is_taxable=True,
+                      minimum_stock_level=Decimal("0"), hsn_code=None, size=None, color=None,
+                      flavour=None, dftqc_no=None, country_of_origin=None, expiry_date=None,
                       status="active", created_at=now, updated_at=now)
 
 

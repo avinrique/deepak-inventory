@@ -59,7 +59,7 @@ def _now():
 
 
 def _product(name="Widget", sku="SKU-1") -> ProductOut:
-    from app.domain.product import ProductStatus
+    from app.domain.product import ProductStatus, ProductType
     from app.schemas.product import UnitOut
     unit = UnitOut(id=uuid.uuid4(), name="Piece", abbreviation="pc")
     return ProductOut(id=uuid.uuid4(), sku=sku, barcode=None, name=name, description=None,

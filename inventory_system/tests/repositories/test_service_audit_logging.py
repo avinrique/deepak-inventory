@@ -24,6 +24,7 @@ from app.repositories.sql.audit_log_repository import SqlAuditLogRepository
 from app.repositories.sql.organization_repository import SqlOrganizationRepository
 from app.repositories.sql.warehouse_repository import SqlWarehouseRepository
 from app.repositories.sql.product_repository import SqlProductRepository
+from app.repositories.sql.unit_repository import SqlUnitRepository
 from app.schemas.organization import OrganizationUpdate
 from app.schemas.product import ProductCreate, ProductUpdate
 from app.security.session import SessionManager
@@ -69,9 +70,10 @@ def _product_data(**overrides):
 def test_create_product_records_audit_log_entry(world):
     sessions = _sessions(world["org_id"], world["admin_id"], {"products.create"})
     actor_id = sessions.peek().user_id
-    service = ProductService(SqlProductRepository(), sessions, SqlAuditLogRepository())
+    service = ProductService(SqlProductRepository(), sessions, SqlAuditLogRepository(),
+                         SqlWarehouseRepository(), SqlUnitRepository())
 
-    created = service.create_product(_product_data(unit_id=world["unit_id"]))
+    created, _transaction = service.create_product(_product_data(unit_id=world["unit_id"]))
 
     with get_session() as session:
         entries = (session.query(AuditLog)
@@ -84,8 +86,9 @@ def test_create_product_records_audit_log_entry(world):
 
 def test_update_product_records_audit_log_entry_with_before_after(world):
     sessions = _sessions(world["org_id"], world["admin_id"], {"products.create", "products.update"})
-    service = ProductService(SqlProductRepository(), sessions, SqlAuditLogRepository())
-    created = service.create_product(_product_data(unit_id=world["unit_id"]))
+    service = ProductService(SqlProductRepository(), sessions, SqlAuditLogRepository(),
+                         SqlWarehouseRepository(), SqlUnitRepository())
+    created, _transaction = service.create_product(_product_data(unit_id=world["unit_id"]))
 
     service.update_product(created.id, ProductUpdate(selling_price=Decimal("20")))
 
@@ -99,8 +102,9 @@ def test_update_product_records_audit_log_entry_with_before_after(world):
 
 def test_update_product_with_no_actual_changes_does_not_record_audit_log(world):
     sessions = _sessions(world["org_id"], world["admin_id"], {"products.create", "products.update"})
-    service = ProductService(SqlProductRepository(), sessions, SqlAuditLogRepository())
-    created = service.create_product(_product_data(unit_id=world["unit_id"]))
+    service = ProductService(SqlProductRepository(), sessions, SqlAuditLogRepository(),
+                         SqlWarehouseRepository(), SqlUnitRepository())
+    created, _transaction = service.create_product(_product_data(unit_id=world["unit_id"]))
 
     service.update_product(created.id, ProductUpdate(selling_price=Decimal("15")))  # unchanged
 
@@ -112,8 +116,9 @@ def test_update_product_with_no_actual_changes_does_not_record_audit_log(world):
 
 def test_archive_and_restore_product_record_audit_log_entries(world):
     sessions = _sessions(world["org_id"], world["admin_id"], {"products.create", "products.delete", "products.update"})
-    service = ProductService(SqlProductRepository(), sessions, SqlAuditLogRepository())
-    created = service.create_product(_product_data(unit_id=world["unit_id"]))
+    service = ProductService(SqlProductRepository(), sessions, SqlAuditLogRepository(),
+                         SqlWarehouseRepository(), SqlUnitRepository())
+    created, _transaction = service.create_product(_product_data(unit_id=world["unit_id"]))
 
     service.archive_product(created.id)
     service.restore_product(created.id)
