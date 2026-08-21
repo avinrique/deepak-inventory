@@ -53,6 +53,7 @@ class FakeProductRepository:
             tertiary_unit_conversion_factor=data.tertiary_unit_conversion_factor,
             purchase_price=data.purchase_price, selling_price=data.selling_price,
             tax_percent=data.tax_percent, is_taxable=data.is_taxable,
+            excise_percent=data.excise_percent,
             minimum_stock_level=data.minimum_stock_level, hsn_code=data.hsn_code,
             size=data.size, color=data.color, flavour=data.flavour, dftqc_no=data.dftqc_no,
             country_of_origin=data.country_of_origin, expiry_date=data.expiry_date,

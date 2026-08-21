@@ -209,6 +209,7 @@ def _product(product_id=None) -> ProductOut:
                       tertiary_unit=None, tertiary_unit_conversion_factor=None,
                       purchase_price=Decimal("10"), selling_price=Decimal("15"),
                       tax_percent=Decimal("13"), is_taxable=True,
+                      excise_percent=Decimal("0"),
                       minimum_stock_level=Decimal("0"), hsn_code=None, size=None, color=None,
                       flavour=None, dftqc_no=None, country_of_origin=None, expiry_date=None,
                       status="active", created_at=now, updated_at=now)

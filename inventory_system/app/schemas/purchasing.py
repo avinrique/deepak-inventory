@@ -80,6 +80,7 @@ class PurchaseOrderCreate(BaseModel):
     warehouse_id: uuid.UUID
     expected_date: date | None = None
     notes: str | None = None
+    custom_fields: dict[str, str] | None = None
     items: list[PurchaseOrderItemInput]
 
 
@@ -91,6 +92,7 @@ class PurchaseOrderUpdate(BaseModel):
     warehouse_id: uuid.UUID | None = None
     expected_date: date | None = None
     notes: str | None = None
+    custom_fields: dict[str, str] | None = None
     items: list[PurchaseOrderItemInput] | None = None
 
 
@@ -102,6 +104,7 @@ class PurchaseOrderOut(BaseModel):
     status: PurchaseOrderStatus
     expected_date: date | None
     notes: str | None
+    custom_fields: dict[str, str] | None
     created_by: uuid.UUID
     approved_by: uuid.UUID | None
     approved_at: datetime | None

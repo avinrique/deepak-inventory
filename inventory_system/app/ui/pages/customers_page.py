@@ -42,7 +42,7 @@ from app.schemas.sales import CustomerOut
 from app.security.session import SessionManager
 from app.services.sales_service import SalesService
 from app.ui import permission_hints
-from app.ui.theme import GREEN_DARK, MUTED, RED
+from app.ui.theme import GREEN_DARK, RED
 from app.ui.widgets.async_content import AsyncContentArea
 from app.ui.widgets.confirm_dialog import confirm
 from app.ui.widgets.customer_form_dialog import CustomerFormDialog
@@ -255,7 +255,7 @@ class CustomersPage(QWidget):
         button.setText("Actions ▾")
         button.setCursor(Qt.CursorShape.PointingHandCursor)
         button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        button.setStyleSheet(f"border: none; color: {MUTED}; font-size: 12px; padding: 4px 6px;")
+        button.setObjectName("rowActions")
 
         menu = QMenu(button)
         if self._can("customers.view"):

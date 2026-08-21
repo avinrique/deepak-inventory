@@ -73,6 +73,8 @@ class Product(UUIDPKMixin, TimestampMixin, Base):
         CheckConstraint("selling_price >= 0", name="ck_products_selling_price_non_negative"),
         CheckConstraint("tax_percent >= 0 AND tax_percent <= 100",
                         name="ck_products_tax_percent_range"),
+        CheckConstraint("excise_percent >= 0 AND excise_percent <= 100",
+                        name="ck_products_excise_percent_range"),
         CheckConstraint("minimum_stock_level >= 0",
                         name="ck_products_minimum_stock_level_non_negative"),
         CheckConstraint("is_taxable OR tax_percent = 0",
@@ -143,6 +145,10 @@ class Product(UUIDPKMixin, TimestampMixin, Base):
     tax_percent: Mapped[Decimal] = mapped_column(Numeric(5, 2), nullable=False,
                                                  default=Decimal("0"))
     is_taxable: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # Independent of is_taxable/tax_percent — a government levy distinct
+    # from sales tax, so a non-taxable product can still carry excise duty.
+    excise_percent: Mapped[Decimal] = mapped_column(Numeric(5, 2), nullable=False,
+                                                     default=Decimal("0"))
     minimum_stock_level: Mapped[Decimal] = mapped_column(Numeric(12, 3), nullable=False,
                                                          default=Decimal("0"))
     status: Mapped[ProductStatus] = mapped_column(

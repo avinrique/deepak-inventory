@@ -36,7 +36,7 @@ from sqlalchemy import (
     Text,
     func,
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.domain.sales import PaymentMethod, SalesOrderStatus
@@ -48,6 +48,8 @@ class SalesOrder(UUIDPKMixin, TimestampMixin, Base):
     __table_args__ = (
         Index("ix_sales_orders_org_status", "organization_id", "status"),
         Index("ix_sales_orders_org_customer", "organization_id", "customer_id"),
+        Index("ix_sales_orders_org_reference_number", "organization_id", "reference_number",
+             unique=True, postgresql_where="reference_number IS NOT NULL"),
     )
 
     organization_id: Mapped[uuid.UUID] = mapped_column(
@@ -63,6 +65,16 @@ class SalesOrder(UUIDPKMixin, TimestampMixin, Base):
         Enum(SalesOrderStatus, name="sales_order_status", native_enum=True),
         nullable=False, default=SalesOrderStatus.DRAFT)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Distinct from due_date on Invoice (payment due) — when the goods are
+    # expected to physically reach the customer.
+    delivery_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    # Customer/external-supplied reference (e.g. their PO number) — unique
+    # per organization when set, separate from the system-generated,
+    # sequential Invoice.invoice_number.
+    reference_number: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    # Ad-hoc key/value pairs, no field-type system or org-level schema —
+    # same shape as AuditLog.changes.
+    custom_fields: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     created_by: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
     confirmed_by: Mapped[uuid.UUID | None] = mapped_column(
@@ -98,6 +110,8 @@ class SalesOrderItem(UUIDPKMixin, TimestampMixin, Base):
                         name="ck_so_items_tax_percent_range"),
         CheckConstraint("discount_percent >= 0 AND discount_percent <= 100",
                         name="ck_so_items_discount_percent_range"),
+        CheckConstraint("excise_percent >= 0 AND excise_percent <= 100",
+                        name="ck_so_items_excise_percent_range"),
         Index("ix_so_items_sales_order_id", "sales_order_id"),
         Index("ix_so_items_product_id", "product_id"),
     )
@@ -121,6 +135,12 @@ class SalesOrderItem(UUIDPKMixin, TimestampMixin, Base):
     # Purchasing has no equivalent field: a supplier's price is what it is.
     discount_percent: Mapped[Decimal] = mapped_column(Numeric(5, 2), nullable=False,
                                                        default=Decimal("0"))
+    # Applied to the same post-discount base as tax, independently of tax
+    # (neither compounds on the other) — see
+    # app.domain.sales.line_excise_after_discount. Purchasing has no
+    # equivalent field, same rationale as discount_percent above.
+    excise_percent: Mapped[Decimal] = mapped_column(Numeric(5, 2), nullable=False,
+                                                     default=Decimal("0"))
 
     sales_order: Mapped["SalesOrder"] = relationship(back_populates="items")
     product: Mapped["Product"] = relationship()
@@ -139,6 +159,7 @@ class Invoice(UUIDPKMixin, Base):
         CheckConstraint("subtotal >= 0", name="ck_invoices_subtotal_non_negative"),
         CheckConstraint("discount_amount >= 0", name="ck_invoices_discount_amount_non_negative"),
         CheckConstraint("tax_amount >= 0", name="ck_invoices_tax_amount_non_negative"),
+        CheckConstraint("excise_amount >= 0", name="ck_invoices_excise_amount_non_negative"),
         CheckConstraint("total_amount >= 0", name="ck_invoices_total_amount_non_negative"),
         CheckConstraint("overall_discount_amount >= 0",
                         name="ck_invoices_overall_discount_amount_non_negative"),
@@ -159,17 +180,21 @@ class Invoice(UUIDPKMixin, Base):
     # amount is an *additional* whole-invoice discount applied on top of
     # that (e.g. a negotiated bulk-order deduction — a separate concept
     # from any single line's discount); tax_amount is computed on the
-    # discounted line prices; other_charges is a flat addition (e.g.
-    # delivery/handling) that isn't taxed itself. total_amount = subtotal
-    # - discount_amount - overall_discount_amount + tax_amount +
-    # other_charges. All frozen at generation time, same rationale as the
-    # class docstring.
+    # discounted line prices; excise_amount is a government levy computed
+    # on the same post-discount base as tax, independently of it (see
+    # app.domain.sales.line_excise_after_discount); other_charges is a flat
+    # addition (e.g. delivery/handling) that isn't taxed itself.
+    # total_amount = subtotal - discount_amount - overall_discount_amount +
+    # tax_amount + excise_amount + other_charges. All frozen at generation
+    # time, same rationale as the class docstring.
     subtotal: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     discount_amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False,
                                                       default=Decimal("0"))
     overall_discount_amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False,
                                                               default=Decimal("0"))
     tax_amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    excise_amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False,
+                                                    default=Decimal("0"))
     other_charges: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False,
                                                     default=Decimal("0"))
     total_amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)

@@ -130,6 +130,7 @@ class FakePurchaseOrderRepository:
                               supplier_id=data.supplier_id,
                               warehouse_id=data.warehouse_id, status=PurchaseOrderStatus.DRAFT,
                               expected_date=data.expected_date, notes=data.notes,
+                              custom_fields=data.custom_fields,
                               created_by=created_by, approved_by=None, approved_at=None,
                               items=items, created_at=now, updated_at=now)
         self.orders[po.id] = po
@@ -228,6 +229,7 @@ def _product(product_id=None) -> ProductOut:
                       tertiary_unit=None, tertiary_unit_conversion_factor=None,
                       purchase_price=Decimal("10"), selling_price=Decimal("15"),
                       tax_percent=Decimal("13"), is_taxable=True,
+                      excise_percent=Decimal("0"),
                       minimum_stock_level=Decimal("0"), hsn_code=None, size=None, color=None,
                       flavour=None, dftqc_no=None, country_of_origin=None, expiry_date=None,
                       status="active", created_at=now, updated_at=now)

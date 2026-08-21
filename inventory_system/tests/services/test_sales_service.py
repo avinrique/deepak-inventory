@@ -172,11 +172,15 @@ class FakeSalesOrderRepository:
                                    quantity_ordered=i.quantity_ordered,
                                    quantity_fulfilled=Decimal("0"), unit_price=i.unit_price,
                                    tax_percent=i.tax_percent,
-                                   discount_percent=i.discount_percent)
+                                   discount_percent=i.discount_percent,
+                                   excise_percent=i.excise_percent)
                 for i in data.items]
         so = SalesOrderOut(id=uuid.uuid4(), customer_id=data.customer_id,
                            warehouse_id=data.warehouse_id, status=SalesOrderStatus.DRAFT,
-                           notes=data.notes, created_by=created_by, confirmed_by=None,
+                           notes=data.notes, delivery_date=data.delivery_date,
+                           reference_number=data.reference_number,
+                           custom_fields=data.custom_fields, created_by=created_by,
+                           confirmed_by=None,
                            confirmed_at=None, items=items, created_at=now, updated_at=now)
         self.orders[so.id] = so
         return so
@@ -192,7 +196,8 @@ class FakeSalesOrderRepository:
                                        quantity_ordered=i.quantity_ordered,
                                        quantity_fulfilled=Decimal("0"),
                                        unit_price=i.unit_price, tax_percent=i.tax_percent,
-                                       discount_percent=i.discount_percent)
+                                       discount_percent=i.discount_percent,
+                                       excise_percent=i.excise_percent)
                     for i in data.items]
         updated = existing.model_copy(update={**updates, "items": items})
         self.orders[sales_order_id] = updated
@@ -200,6 +205,10 @@ class FakeSalesOrderRepository:
 
     def get_by_id(self, organization_id, sales_order_id):
         return self.orders.get(sales_order_id)
+
+    def reference_number_exists(self, organization_id, reference_number, exclude_id=None):
+        return any(o.reference_number == reference_number and o.id != exclude_id
+                  for o in self.orders.values())
 
     def search(self, organization_id, filter):
         raise NotImplementedError  # not exercised by these tests
@@ -236,7 +245,8 @@ class FakeSalesOrderRepository:
                              invoice_number=f"INV-{self._next_invoice_seq:06d}",
                              subtotal=subtotal, discount_amount=Decimal("0"),
                              overall_discount_amount=Decimal("0"),
-                             tax_amount=Decimal("0"), other_charges=Decimal("0"),
+                             tax_amount=Decimal("0"), excise_amount=Decimal("0"),
+                             other_charges=Decimal("0"),
                              total_amount=subtotal, due_date=None, generated_by=generated_by,
                              generated_at=datetime.now(timezone.utc))
         self._next_invoice_seq += 1
@@ -312,6 +322,7 @@ def _product(product_id=None) -> ProductOut:
                       tertiary_unit=None, tertiary_unit_conversion_factor=None,
                       purchase_price=Decimal("10"), selling_price=Decimal("15"),
                       tax_percent=Decimal("13"), is_taxable=True,
+                      excise_percent=Decimal("0"),
                       minimum_stock_level=Decimal("0"), hsn_code=None, size=None, color=None,
                       flavour=None, dftqc_no=None, country_of_origin=None, expiry_date=None,
                       status="active", created_at=now, updated_at=now)

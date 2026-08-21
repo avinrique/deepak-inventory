@@ -1,8 +1,10 @@
 """The one items-table widget shared by New Bill, the Sales Order form, and
-the Purchase Order form — # | Product | SKU | Qty | Rate | [Discount %] |
-Tax % | Amount | Stock | Action, with a debounced server-side product
-search (name/SKU/barcode), live per-row and grand totals, and a
-per-organization warehouse-scoped stock column.
+the Purchase Order form — # | Product | SKU | HSN Code | Qty | Rate |
+[Discount %] | [Excise %] | Tax % | Amount | Stock | Action (excise only
+where discount is, i.e. Sales/New Bill — Purchase Orders carry neither),
+with a debounced server-side product search (name/SKU/barcode), live
+per-row and grand totals, and a per-organization warehouse-scoped stock
+column.
 
 Replaces the two previously-separate implementations (app.ui.widgets.
 bill_items_table.BillItemsTable and app.ui.widgets.order_items_editor.
@@ -42,7 +44,12 @@ from PySide6.QtWidgets import (
 
 from app.domain.pricing import line_subtotal, line_tax, line_total
 from app.domain.product import ProductStatus
-from app.domain.sales import line_discount, line_tax_after_discount, line_total_after_discount
+from app.domain.sales import (
+    line_discount,
+    line_excise_after_discount,
+    line_tax_after_discount,
+    line_total_after_discount,
+)
 from app.schemas.inventory import InventoryLevel
 from app.schemas.product import ProductFilter, ProductOut
 from app.services.inventory_service import InventoryService
@@ -58,8 +65,9 @@ _SEARCH_PAGE_SIZE = 15
 _COL_ROW_NUM = 0
 _COL_PRODUCT = 1
 _COL_SKU = 2
-_COL_QTY = 3
-_COL_PRICE = 4
+_COL_HSN = 3
+_COL_QTY = 4
+_COL_PRICE = 5
 
 
 def _money(value: Decimal) -> str:
@@ -82,14 +90,15 @@ class TransactionItemsTable(QWidget):
         self._search_results: list[ProductOut] = []
 
         self._col_discount = _COL_PRICE + 1 if include_discount else None
-        self._col_tax = self._col_discount + 1 if include_discount else _COL_PRICE + 1
+        self._col_excise = self._col_discount + 1 if include_discount else None
+        self._col_tax = self._col_excise + 1 if include_discount else _COL_PRICE + 1
         self._col_amount = self._col_tax + 1
         self._col_stock = self._col_amount + 1
         self._col_action = self._col_stock + 1
 
-        columns = ["#", "Item/Product", "SKU", "Qty", price_label]
+        columns = ["#", "Item/Product", "SKU", "HSN Code", "Qty", price_label]
         if include_discount:
-            columns.append("Discount %")
+            columns += ["Discount %", "Excise %"]
         columns += ["Tax %", "Amount", "Stock", "Action"]
 
         layout = QVBoxLayout(self)
@@ -134,7 +143,7 @@ class TransactionItemsTable(QWidget):
         self._results.setPlaceholderText("No matches yet")
         bar.addWidget(self._results, stretch=1)
 
-        add_button = QPushButton("+ Add Item")
+        add_button = QPushButton("+ Add Product")
         add_button.setObjectName("orderGhost")
         add_button.setCursor(Qt.CursorShape.PointingHandCursor)
         add_button.clicked.connect(self._add_selected_result)
@@ -204,6 +213,7 @@ class TransactionItemsTable(QWidget):
         self._table.setItem(row, _COL_ROW_NUM, num_item)
         self._table.setItem(row, _COL_PRODUCT, QTableWidgetItem(product.name))
         self._table.setItem(row, _COL_SKU, QTableWidgetItem(product.sku))
+        self._table.setItem(row, _COL_HSN, QTableWidgetItem(product.hsn_code or "—"))
 
         qty_edit = QLineEdit("1")
         qty_edit.textChanged.connect(lambda: self._on_row_changed(row))
@@ -217,6 +227,11 @@ class TransactionItemsTable(QWidget):
             discount_edit = QLineEdit("0")
             discount_edit.textChanged.connect(lambda: self._on_row_changed(row))
             self._table.setCellWidget(row, self._col_discount, discount_edit)
+
+        if self._col_excise is not None:
+            excise_edit = QLineEdit(str(product.excise_percent))
+            excise_edit.textChanged.connect(lambda: self._on_row_changed(row))
+            self._table.setCellWidget(row, self._col_excise, excise_edit)
 
         tax_edit = QLineEdit(str(product.tax_percent))
         tax_edit.textChanged.connect(lambda: self._on_row_changed(row))
@@ -277,15 +292,17 @@ class TransactionItemsTable(QWidget):
         except InvalidOperation:
             return None
 
-    def _row_values(self, row: int) -> tuple[Decimal, Decimal, Decimal, Decimal] | None:
+    def _row_values(self, row: int) -> tuple[Decimal, Decimal, Decimal, Decimal, Decimal] | None:
         quantity = self._row_decimal(row, _COL_QTY)
         price = self._row_decimal(row, _COL_PRICE)
         tax = self._row_decimal(row, self._col_tax)
         discount = (self._row_decimal(row, self._col_discount)
                    if self._col_discount is not None else Decimal("0"))
-        if None in (quantity, price, discount, tax):
+        excise = (self._row_decimal(row, self._col_excise)
+                 if self._col_excise is not None else Decimal("0"))
+        if None in (quantity, price, discount, excise, tax):
             return None
-        return quantity, price, discount, tax
+        return quantity, price, discount, excise, tax
 
     def _recompute_row_amount(self, row: int) -> None:
         amount_item = self._table.item(row, self._col_amount)
@@ -295,8 +312,9 @@ class TransactionItemsTable(QWidget):
         if values is None:
             amount_item.setText("—")
             return
-        quantity, price, discount, tax = values
-        total = (line_total_after_discount(quantity, price, discount, tax)
+        quantity, price, discount, excise, tax = values
+        total = (line_total_after_discount(quantity, price, discount, tax,
+                                           excise_percent=excise)
                  if self._include_discount else line_total(quantity, price, tax))
         amount_item.setText(_money(total))
 
@@ -333,8 +351,8 @@ class TransactionItemsTable(QWidget):
 
     def collect_items(self) -> tuple[list[dict], list[str]]:
         """(items, errors). Each item dict has keys product_id/quantity/
-        unit_price/tax_percent, and (if include_discount) discount_percent
-        — ready to spread into the schema the caller needs.
+        unit_price/tax_percent, and (if include_discount) discount_percent/
+        excise_percent — ready to spread into the schema the caller needs.
         """
         items: list[dict] = []
         errors: list[str] = []
@@ -344,6 +362,8 @@ class TransactionItemsTable(QWidget):
             price = self._row_decimal(row, _COL_PRICE)
             discount = (self._row_decimal(row, self._col_discount)
                        if self._col_discount is not None else Decimal("0"))
+            excise = (self._row_decimal(row, self._col_excise)
+                     if self._col_excise is not None else Decimal("0"))
             tax = self._row_decimal(row, self._col_tax)
             if quantity is None:
                 errors.append(f"Row {row + 1} ({product.name}): quantity must be a number.")
@@ -354,6 +374,9 @@ class TransactionItemsTable(QWidget):
             if self._col_discount is not None and discount is None:
                 errors.append(f"Row {row + 1} ({product.name}): discount must be a number.")
                 continue
+            if self._col_excise is not None and excise is None:
+                errors.append(f"Row {row + 1} ({product.name}): excise duty must be a number.")
+                continue
             if tax is None:
                 errors.append(f"Row {row + 1} ({product.name}): tax must be a number.")
                 continue
@@ -361,32 +384,38 @@ class TransactionItemsTable(QWidget):
                    "tax_percent": tax}
             if self._col_discount is not None:
                 item["discount_percent"] = discount
+            if self._col_excise is not None:
+                item["excise_percent"] = excise
             items.append(item)
         if not items and not errors:
             errors.append("Add at least one product.")
         return items, errors
 
-    def compute_totals(self) -> tuple[Decimal, Decimal, Decimal, Decimal]:
-        """(subtotal, item_discount_total, tax_total, grand_total) computed
-        from whatever rows currently parse cleanly — rows with an invalid
-        number are skipped for this *preview* total (collect_items() is
-        what actually blocks Save with a real error for those).
+    def compute_totals(self) -> tuple[Decimal, Decimal, Decimal, Decimal, Decimal]:
+        """(subtotal, item_discount_total, tax_total, excise_total,
+        grand_total) computed from whatever rows currently parse cleanly —
+        rows with an invalid number are skipped for this *preview* total
+        (collect_items() is what actually blocks Save with a real error for
+        those). excise_total is always 0 when include_discount is False
+        (Purchase Orders don't carry excise duty).
         """
-        subtotal = discount_total = tax_total = grand_total = Decimal("0")
+        subtotal = discount_total = tax_total = excise_total = grand_total = Decimal("0")
         for row in range(self._table.rowCount()):
             values = self._row_values(row)
             if values is None:
                 continue
-            quantity, price, discount, tax = values
+            quantity, price, discount, excise, tax = values
             subtotal += line_subtotal(quantity, price)
             if self._include_discount:
                 discount_total += line_discount(quantity, price, discount)
                 tax_total += line_tax_after_discount(quantity, price, discount, tax)
-                grand_total += line_total_after_discount(quantity, price, discount, tax)
+                excise_total += line_excise_after_discount(quantity, price, discount, excise)
+                grand_total += line_total_after_discount(quantity, price, discount, tax,
+                                                         excise_percent=excise)
             else:
                 tax_total += line_tax(quantity, price, tax)
                 grand_total += line_total(quantity, price, tax)
-        return subtotal, discount_total, tax_total, grand_total
+        return subtotal, discount_total, tax_total, excise_total, grand_total
 
     def compute_tax_split(self) -> tuple[Decimal, Decimal]:
         """(non_taxable_total, taxable_total) — the post-discount line
@@ -399,7 +428,7 @@ class TransactionItemsTable(QWidget):
             values = self._row_values(row)
             if values is None:
                 continue
-            quantity, price, discount, tax = values
+            quantity, price, discount, _excise, tax = values
             line_amount = (line_subtotal(quantity, price) - line_discount(quantity, price, discount)
                           if self._include_discount else line_subtotal(quantity, price))
             if tax > 0:

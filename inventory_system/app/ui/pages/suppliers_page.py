@@ -32,7 +32,7 @@ from app.schemas.purchasing import SupplierOut, SupplierUpdate
 from app.security.session import SessionManager
 from app.services.purchase_service import PurchaseService
 from app.ui import permission_hints
-from app.ui.theme import GREEN_DARK, MUTED, RED
+from app.ui.theme import GREEN_DARK, RED
 from app.ui.widgets.async_content import AsyncContentArea
 from app.ui.widgets.confirm_dialog import confirm
 from app.ui.widgets.page_header import PageHeader
@@ -147,7 +147,7 @@ class SuppliersPage(QWidget):
         button.setText("Actions ▾")
         button.setCursor(Qt.CursorShape.PointingHandCursor)
         button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        button.setStyleSheet(f"border: none; color: {MUTED}; font-size: 12px; padding: 4px 6px;")
+        button.setObjectName("rowActions")
 
         menu = QMenu(button)
         menu.addAction("View").triggered.connect(

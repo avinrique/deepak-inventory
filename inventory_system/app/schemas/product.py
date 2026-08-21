@@ -57,6 +57,7 @@ class ProductCreate(BaseModel):
     selling_price: Decimal = Decimal("0")
     tax_percent: Decimal = Decimal("0")
     is_taxable: bool = True
+    excise_percent: Decimal = Decimal("0")
     minimum_stock_level: Decimal = Decimal("0")
     hsn_code: str | None = None
     size: str | None = None
@@ -85,6 +86,7 @@ class ProductUpdate(BaseModel):
     selling_price: Decimal | None = None
     tax_percent: Decimal | None = None
     is_taxable: bool | None = None
+    excise_percent: Decimal | None = None
     minimum_stock_level: Decimal | None = None
     hsn_code: str | None = None
     size: str | None = None
@@ -113,6 +115,7 @@ class ProductOut(BaseModel):
     selling_price: Decimal
     tax_percent: Decimal
     is_taxable: bool
+    excise_percent: Decimal
     minimum_stock_level: Decimal
     hsn_code: str | None
     size: str | None

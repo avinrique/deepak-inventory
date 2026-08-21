@@ -68,6 +68,7 @@ def _product(name="Widget", sku="SKU-1") -> ProductOut:
                       tertiary_unit_conversion_factor=None,
                       purchase_price=Decimal("10"), selling_price=Decimal("15"),
                       tax_percent=Decimal("13"), is_taxable=True,
+                      excise_percent=Decimal("0"),
                       minimum_stock_level=Decimal("0"), hsn_code=None, size=None, color=None,
                       flavour=None, dftqc_no=None, country_of_origin=None, expiry_date=None,
                       status=ProductStatus.ACTIVE, created_at=_now(), updated_at=_now())

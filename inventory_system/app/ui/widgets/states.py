@@ -58,7 +58,7 @@ class LoadingStateWidget(_CenteredState):
                 item.widget().deleteLater()
         bar = QProgressBar()
         bar.setRange(0, 0)  # indeterminate
-        bar.setFixedWidth(160)
+        bar.setFixedSize(160, 6)
         bar.setTextVisible(False)
         layout.addWidget(bar, alignment=Qt.AlignmentFlag.AlignHCenter)
         label = QLabel(message)

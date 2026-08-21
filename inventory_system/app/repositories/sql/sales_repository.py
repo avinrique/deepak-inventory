@@ -47,6 +47,7 @@ from sqlalchemy.exc import IntegrityError
 from app.core.exceptions import (
     CreditLimitExceededError,
     DuplicateInvoiceError,
+    DuplicateReferenceNumberError,
     InvalidSalesOrderTransitionError,
     InvoiceNotFoundError,
     OverpaymentError,
@@ -63,6 +64,7 @@ from app.domain.sales import (
     compute_payment_status,
     format_invoice_number,
     line_discount,
+    line_excise_after_discount,
     line_tax_after_discount,
     line_total_after_discount,
 )
@@ -79,6 +81,7 @@ from app.models import (
     User,
 )
 from app.repositories.sql.audit_log_repository import record_audit_log
+from app.repositories.sql.constraint_utils import constraint_name
 from app.repositories.sql.customer_repository import compute_customer_balance
 from app.repositories.sql.inventory_repository import _apply
 from app.schemas.sales import (
@@ -104,13 +107,15 @@ def _item_to_out(item: SalesOrderItem) -> SalesOrderItemOut:
                              quantity_ordered=item.quantity_ordered,
                              quantity_fulfilled=item.quantity_fulfilled,
                              unit_price=item.unit_price, tax_percent=item.tax_percent,
-                             discount_percent=item.discount_percent)
+                             discount_percent=item.discount_percent,
+                             excise_percent=item.excise_percent)
 
 
 def _to_out(so: SalesOrder) -> SalesOrderOut:
     return SalesOrderOut(
         id=so.id, customer_id=so.customer_id, warehouse_id=so.warehouse_id, status=so.status,
-        notes=so.notes, created_by=so.created_by, confirmed_by=so.confirmed_by,
+        notes=so.notes, delivery_date=so.delivery_date, reference_number=so.reference_number,
+        custom_fields=so.custom_fields, created_by=so.created_by, confirmed_by=so.confirmed_by,
         confirmed_at=so.confirmed_at, items=[_item_to_out(i) for i in so.items],
         created_at=so.created_at, updated_at=so.updated_at)
 
@@ -120,7 +125,8 @@ def _invoice_to_out(invoice: Invoice) -> InvoiceOut:
                       invoice_number=invoice.invoice_number, subtotal=invoice.subtotal,
                       discount_amount=invoice.discount_amount,
                       overall_discount_amount=invoice.overall_discount_amount,
-                      tax_amount=invoice.tax_amount, other_charges=invoice.other_charges,
+                      tax_amount=invoice.tax_amount, excise_amount=invoice.excise_amount,
+                      other_charges=invoice.other_charges,
                       total_amount=invoice.total_amount, due_date=invoice.due_date,
                       generated_by=invoice.generated_by, generated_at=invoice.generated_at)
 
@@ -229,8 +235,12 @@ def _generate_invoice(db, organization_id: uuid.UUID, so: SalesOrder, generated_
     tax_amount = sum((line_tax_after_discount(i.quantity_ordered, i.unit_price,
                                                i.discount_percent, i.tax_percent)
                      for i in so.items), Decimal("0"))
+    excise_amount = sum((line_excise_after_discount(i.quantity_ordered, i.unit_price,
+                                                     i.discount_percent, i.excise_percent)
+                        for i in so.items), Decimal("0"))
     line_totals = sum((line_total_after_discount(i.quantity_ordered, i.unit_price,
-                                                  i.discount_percent, i.tax_percent)
+                                                  i.discount_percent, i.tax_percent,
+                                                  excise_percent=i.excise_percent)
                       for i in so.items), Decimal("0"))
     total_amount = line_totals - overall_discount_amount + other_charges
 
@@ -243,6 +253,7 @@ def _generate_invoice(db, organization_id: uuid.UUID, so: SalesOrder, generated_
                      invoice_number=number, subtotal=subtotal,
                      discount_amount=discount_amount,
                      overall_discount_amount=overall_discount_amount, tax_amount=tax_amount,
+                     excise_amount=excise_amount,
                      other_charges=other_charges, total_amount=total_amount,
                      due_date=due_date, generated_by=generated_by)
     db.add(invoice)
@@ -323,7 +334,8 @@ class SqlSalesOrderRepository:
             if customer is not None and customer.credit_limit is not None:
                 order_total = sum(
                     (line_total_after_discount(item.quantity_ordered, item.unit_price,
-                                               item.discount_percent, item.tax_percent)
+                                               item.discount_percent, item.tax_percent,
+                                               excise_percent=item.excise_percent)
                     for item in data.items), Decimal("0"))
                 balance = compute_customer_balance(db, organization_id, customer)
                 available = balance.credit_limit - balance.outstanding_balance
@@ -332,15 +344,23 @@ class SqlSalesOrderRepository:
 
             so = SalesOrder(organization_id=organization_id, customer_id=data.customer_id,
                             warehouse_id=data.warehouse_id, status=SalesOrderStatus.DRAFT,
-                            notes=data.notes, created_by=created_by)
+                            notes=data.notes, delivery_date=data.delivery_date,
+                            reference_number=data.reference_number,
+                            custom_fields=data.custom_fields, created_by=created_by)
             db.add(so)
-            db.flush()
+            try:
+                db.flush()
+            except IntegrityError as exc:
+                if constraint_name(exc) == "ix_sales_orders_org_reference_number":
+                    raise DuplicateReferenceNumberError(data.reference_number) from exc
+                raise
             for item in data.items:
                 db.add(SalesOrderItem(sales_order_id=so.id, product_id=item.product_id,
                                      quantity_ordered=item.quantity_ordered,
                                      unit_price=item.unit_price,
                                      tax_percent=item.tax_percent,
-                                     discount_percent=item.discount_percent))
+                                     discount_percent=item.discount_percent,
+                                     excise_percent=item.excise_percent))
             db.flush()
             return _to_out(so)
 
@@ -371,8 +391,19 @@ class SqlSalesOrderRepository:
                                          quantity_ordered=item.quantity_ordered,
                                          unit_price=item.unit_price,
                                          tax_percent=item.tax_percent,
-                                         discount_percent=item.discount_percent))
+                                         discount_percent=item.discount_percent,
+                                         excise_percent=item.excise_percent))
+            # Explicit flush even when only non-item fields changed — without
+            # it, a reference_number collision would only surface as a raw
+            # IntegrityError at get_session()'s implicit commit, bypassing
+            # the DuplicateReferenceNumberError translation below.
+            try:
                 db.flush()
+            except IntegrityError as exc:
+                if constraint_name(exc) == "ix_sales_orders_org_reference_number":
+                    raise DuplicateReferenceNumberError(so.reference_number) from exc
+                raise
+            if data.items is not None:
                 # See PurchaseOrderRepository.update — the already-loaded
                 # so.items collection is stale relative to what was just
                 # deleted/inserted directly, so it must be expired before
@@ -406,6 +437,15 @@ class SqlSalesOrderRepository:
 
             return SalesOrderPage(items=[_to_out(s) for s in rows], total=total, page=page,
                                   page_size=page_size)
+
+    def reference_number_exists(self, organization_id: uuid.UUID, reference_number: str,
+                                exclude_id: uuid.UUID | None = None) -> bool:
+        with get_session() as db:
+            query = db.query(SalesOrder).filter_by(organization_id=organization_id,
+                                                    reference_number=reference_number)
+            if exclude_id is not None:
+                query = query.filter(SalesOrder.id != exclude_id)
+            return db.query(query.exists()).scalar()
 
     def _transition(self, organization_id: uuid.UUID, sales_order_id: uuid.UUID,
                     target: SalesOrderStatus) -> SalesOrderOut | None:
@@ -520,13 +560,17 @@ class SqlSalesOrderRepository:
                                          item.discount_percent)
                 tax = line_tax_after_discount(item.quantity_ordered, item.unit_price,
                                               item.discount_percent, item.tax_percent)
+                excise = line_excise_after_discount(item.quantity_ordered, item.unit_price,
+                                                    item.discount_percent, item.excise_percent)
                 total = line_total_after_discount(item.quantity_ordered, item.unit_price,
-                                                  item.discount_percent, item.tax_percent)
+                                                  item.discount_percent, item.tax_percent,
+                                                  excise_percent=item.excise_percent)
                 lines.append(InvoiceDocumentLine(
                     sku=product.sku, product_name=product.name, quantity=item.quantity_ordered,
                     unit_price=item.unit_price, discount_percent=item.discount_percent,
-                    tax_percent=item.tax_percent, line_subtotal=subtotal, line_discount=discount,
-                    line_tax=tax, line_total=total))
+                    tax_percent=item.tax_percent, excise_percent=item.excise_percent,
+                    line_subtotal=subtotal, line_discount=discount,
+                    line_tax=tax, line_excise=excise, line_total=total))
 
             paid = (db.query(func.coalesce(func.sum(Payment.amount), 0))
                    .filter(Payment.invoice_id == invoice.id).scalar())
@@ -547,6 +591,7 @@ class SqlSalesOrderRepository:
                 customer_tax_id=customer.tax_id,
                 items=lines, subtotal=invoice.subtotal, discount_total=invoice.discount_amount,
                 overall_discount=invoice.overall_discount_amount, tax_total=invoice.tax_amount,
+                excise_total=invoice.excise_amount,
                 other_charges=invoice.other_charges, total=invoice.total_amount,
                 amount_paid=paid, amount_due=amount_due, payment_status=status, notes=so.notes)
 
@@ -653,7 +698,8 @@ class SqlSalesOrderRepository:
             # discounted/taxed line credits back exactly its share, no
             # more, no less.
             credit_amount = line_total_after_discount(
-                quantity, item.unit_price, item.discount_percent, item.tax_percent)
+                quantity, item.unit_price, item.discount_percent, item.tax_percent,
+                excise_percent=item.excise_percent)
 
             sales_return = SalesReturn(
                 organization_id=organization_id, sales_order_id=so.id,

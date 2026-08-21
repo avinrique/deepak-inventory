@@ -17,16 +17,26 @@ from app.schemas.sales import InvoiceDocumentData, InvoiceDocumentLine
 
 
 def _line(sku="SKU-1", name="Widget", quantity=Decimal("2"), unit_price=Decimal("50"),
-         discount_percent=Decimal("0"), tax_percent=Decimal("13")) -> InvoiceDocumentLine:
-    from app.domain.sales import line_discount, line_tax_after_discount, line_total_after_discount
+         discount_percent=Decimal("0"), tax_percent=Decimal("13"),
+         excise_percent=Decimal("0")) -> InvoiceDocumentLine:
+    from app.domain.sales import (
+        line_discount,
+        line_excise_after_discount,
+        line_tax_after_discount,
+        line_total_after_discount,
+    )
     from app.domain.pricing import line_subtotal
     return InvoiceDocumentLine(
         sku=sku, product_name=name, quantity=quantity, unit_price=unit_price,
         discount_percent=discount_percent, tax_percent=tax_percent,
+        excise_percent=excise_percent,
         line_subtotal=line_subtotal(quantity, unit_price),
         line_discount=line_discount(quantity, unit_price, discount_percent),
         line_tax=line_tax_after_discount(quantity, unit_price, discount_percent, tax_percent),
-        line_total=line_total_after_discount(quantity, unit_price, discount_percent, tax_percent))
+        line_excise=line_excise_after_discount(quantity, unit_price, discount_percent,
+                                               excise_percent),
+        line_total=line_total_after_discount(quantity, unit_price, discount_percent, tax_percent,
+                                             excise_percent=excise_percent))
 
 
 def _data(items=None, payment_status=InvoicePaymentStatus.UNPAID, amount_paid=Decimal("0"),
@@ -35,6 +45,7 @@ def _data(items=None, payment_status=InvoicePaymentStatus.UNPAID, amount_paid=De
     subtotal = sum((i.line_subtotal for i in items), Decimal("0"))
     discount_total = sum((i.line_discount for i in items), Decimal("0"))
     tax_total = sum((i.line_tax for i in items), Decimal("0"))
+    excise_total = sum((i.line_excise for i in items), Decimal("0"))
     total = sum((i.line_total for i in items), Decimal("0"))
     kwargs = dict(
         company_name="Acme Traders", company_legal_name="Acme Traders Pvt. Ltd.",
@@ -47,7 +58,8 @@ def _data(items=None, payment_status=InvoicePaymentStatus.UNPAID, amount_paid=De
         customer_phone="+1-555-0200", customer_email="jane@buyer.example",
         customer_tax_id="TAX-999",
         items=items, subtotal=subtotal, discount_total=discount_total,
-        overall_discount=Decimal("0"), tax_total=tax_total, other_charges=Decimal("0"),
+        overall_discount=Decimal("0"), tax_total=tax_total, excise_total=excise_total,
+        other_charges=Decimal("0"),
         total=total, amount_paid=amount_paid, amount_due=total - amount_paid,
         payment_status=payment_status, notes=notes, due_date=None)
     kwargs.update(overrides)

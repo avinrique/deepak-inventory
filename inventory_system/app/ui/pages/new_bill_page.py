@@ -25,7 +25,6 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 
 from PySide6.QtCore import QDate, QThreadPool, Qt
-from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -48,6 +47,7 @@ from PySide6.QtWidgets import (
 from app.core.exceptions import (
     CreditLimitExceededError,
     CustomerNotFoundError,
+    DuplicateReferenceNumberError,
     InsufficientStockError,
     SalesOrderValidationError,
     WarehouseNotFoundError,
@@ -71,11 +71,11 @@ from app.services.product_service import ProductService
 from app.services.sales_service import SalesService
 from app.ui import permission_hints
 from app.ui.theme import GREEN, MUTED, STYLESHEET
+from app.ui.widgets.custom_fields_section import CustomFieldsSection
 from app.ui.widgets.customer_form_dialog import CustomerFormDialog
 from app.ui.widgets.invoice_preview_dialog import InvoicePreviewDialog
 from app.ui.widgets.order_form_style import (
     ORDER_FORM_STYLESHEET,
-    TEXT_SECONDARY,
     apply_card_shadow,
     field_label,
 )
@@ -196,6 +196,9 @@ class NewBillPage(QWidget):
 
         layout.addWidget(self._build_notes_card())
 
+        self._custom_fields = CustomFieldsSection()
+        layout.addWidget(self._custom_fields)
+
         scroll.setWidget(content)
         return scroll
 
@@ -233,6 +236,21 @@ class NewBillPage(QWidget):
         self._due_date_edit.setEnabled(False)
         due_row.addWidget(self._due_date_edit, stretch=1)
         form.addRow(field_label("Due Date"), due_row)
+
+        delivery_row = QHBoxLayout()
+        self._delivery_date_check = QCheckBox("Set delivery date")
+        self._delivery_date_check.toggled.connect(self._on_delivery_date_toggled)
+        delivery_row.addWidget(self._delivery_date_check)
+        self._delivery_date_edit = QDateEdit(QDate.currentDate())
+        self._delivery_date_edit.setCalendarPopup(True)
+        self._delivery_date_edit.setEnabled(False)
+        delivery_row.addWidget(self._delivery_date_edit, stretch=1)
+        form.addRow(field_label("Delivery Date"), delivery_row)
+
+        self._reference_number_edit = QLineEdit()
+        self._reference_number_edit.setPlaceholderText(
+            "Customer PO / reference number (optional)")
+        form.addRow(field_label("Reference Number"), self._reference_number_edit)
 
         customer_row = QHBoxLayout()
         self._customer_combo = QComboBox()
@@ -274,14 +292,13 @@ class NewBillPage(QWidget):
         self._notes_edit.setPlaceholderText("Notes for this bill (optional)")
         self._notes_edit.setMaximumHeight(72)
         layout.addWidget(self._notes_edit)
-
-        notes_palette = self._notes_edit.palette()
-        notes_palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(TEXT_SECONDARY))
-        self._notes_edit.setPalette(notes_palette)
         return card
 
     def _on_due_date_toggled(self, checked: bool) -> None:
         self._due_date_edit.setEnabled(checked)
+
+    def _on_delivery_date_toggled(self, checked: bool) -> None:
+        self._delivery_date_edit.setEnabled(checked)
 
     def _on_warehouse_changed(self) -> None:
         warehouse_id = self._warehouse_combo.currentData()
@@ -327,6 +344,9 @@ class NewBillPage(QWidget):
 
         self._tax_label = QLabel(_money(Decimal("0")))
         form.addRow(field_label("Tax / VAT"), self._tax_label)
+
+        self._excise_label = QLabel(_money(Decimal("0")))
+        form.addRow(field_label("Total Excise Duty"), self._excise_label)
 
         self._other_charges_edit = QLineEdit("0")
         self._other_charges_edit.textChanged.connect(self._on_totals_changed)
@@ -378,17 +398,20 @@ class NewBillPage(QWidget):
         return panel
 
     def _on_totals_changed(self) -> None:
-        subtotal, item_discount, tax_total, _line_total_sum = self._items_table.compute_totals()
+        (subtotal, item_discount, tax_total, excise_total,
+         _line_total_sum) = self._items_table.compute_totals()
         non_taxable, taxable = self._items_table.compute_tax_split()
         overall_discount = _parse_decimal(self._overall_discount_edit.text()) or Decimal("0")
         other_charges = _parse_decimal(self._other_charges_edit.text()) or Decimal("0")
-        grand_total = subtotal - item_discount - overall_discount + tax_total + other_charges
+        grand_total = (subtotal - item_discount - overall_discount + tax_total + excise_total
+                      + other_charges)
 
         self._subtotal_label.setText(_money(subtotal))
         self._item_discount_label.setText(_money(item_discount))
         self._non_taxable_label.setText(_money(non_taxable))
         self._taxable_label.setText(_money(taxable))
         self._tax_label.setText(_money(tax_total))
+        self._excise_label.setText(_money(excise_total))
         self._grand_total_label.setText(_money(grand_total))
 
         payment_amount = Decimal("0")
@@ -593,7 +616,8 @@ class NewBillPage(QWidget):
         items = [SalesOrderItemInput(
             product_id=raw["product_id"], quantity_ordered=raw["quantity"],
             unit_price=raw["unit_price"], tax_percent=raw["tax_percent"],
-            discount_percent=raw["discount_percent"]) for raw in raw_items]
+            discount_percent=raw["discount_percent"],
+            excise_percent=raw["excise_percent"]) for raw in raw_items]
         return items, errors
 
     def _validate_common(self) -> list[str]:
@@ -603,6 +627,14 @@ class NewBillPage(QWidget):
         if self._warehouse_combo.currentData() is None:
             errors.append("Select a warehouse for this bill.")
         return errors
+
+    def _delivery_date(self) -> date | None:
+        if self._delivery_date_check.isChecked():
+            return self._delivery_date_edit.date().toPython()
+        return None
+
+    def _reference_number(self) -> str | None:
+        return self._reference_number_edit.text().strip() or None
 
     # -- save draft --------------------------------------------------------- #
     def _on_save_draft(self) -> None:
@@ -619,11 +651,15 @@ class NewBillPage(QWidget):
         self._set_busy(True)
         if self._sales_order_id is None:
             data = SalesOrderCreate(customer_id=customer_id, warehouse_id=warehouse_id,
-                                    notes=notes, items=items)
+                                    notes=notes, delivery_date=self._delivery_date(),
+                                    reference_number=self._reference_number(),
+                                    custom_fields=self._custom_fields.get_values(), items=items)
             worker = Worker(self._sales_service.create_sales_order, data)
         else:
             data = SalesOrderUpdate(customer_id=customer_id, warehouse_id=warehouse_id,
-                                    notes=notes, items=items)
+                                    notes=notes, delivery_date=self._delivery_date(),
+                                    reference_number=self._reference_number(),
+                                    custom_fields=self._custom_fields.get_values(), items=items)
             worker = Worker(self._sales_service.update_sales_order, self._sales_order_id, data)
         worker.signals.finished.connect(self._on_draft_saved)
         worker.signals.error.connect(self._on_save_error)
@@ -686,7 +722,9 @@ class NewBillPage(QWidget):
         data = SalesOrderCreate(customer_id=self._customer_combo.currentData(),
                                 warehouse_id=self._warehouse_combo.currentData(),
                                 notes=self._notes_edit.toPlainText().strip() or None,
-                                items=items)
+                                delivery_date=self._delivery_date(),
+                                reference_number=self._reference_number(),
+                                custom_fields=self._custom_fields.get_values(), items=items)
 
         def work():
             sales_order = self._sales_service.create_sales_order(data)
@@ -707,7 +745,9 @@ class NewBillPage(QWidget):
         update = SalesOrderUpdate(customer_id=self._customer_combo.currentData(),
                                   warehouse_id=self._warehouse_combo.currentData(),
                                   notes=self._notes_edit.toPlainText().strip() or None,
-                                  items=items)
+                                  delivery_date=self._delivery_date(),
+                                  reference_number=self._reference_number(),
+                                  custom_fields=self._custom_fields.get_values(), items=items)
 
         def work():
             self._sales_service.update_sales_order(self._sales_order_id, update)
@@ -751,7 +791,8 @@ class NewBillPage(QWidget):
         if isinstance(exc, SalesOrderValidationError):
             message = " ".join(exc.errors)
         elif isinstance(exc, (CustomerNotFoundError, WarehouseNotFoundError,
-                             InsufficientStockError, CreditLimitExceededError)):
+                             InsufficientStockError, CreditLimitExceededError,
+                             DuplicateReferenceNumberError)):
             message = str(exc)
         elif isinstance(exc, PermissionDeniedError):
             message = "You don't have permission to complete this action."
@@ -780,6 +821,9 @@ class NewBillPage(QWidget):
         self._payment_method_combo.setCurrentIndex(0)
         self._payment_amount_edit.setText("0")
         self._due_date_check.setChecked(False)
+        self._delivery_date_check.setChecked(False)
+        self._reference_number_edit.clear()
+        self._custom_fields.clear()
         self._notes_edit.clear()
         self._bill_number_label.setText("Assigned on save")
         self._bill_date_label.setText(datetime.now().strftime("%Y-%m-%d"))

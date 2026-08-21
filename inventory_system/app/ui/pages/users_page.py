@@ -48,7 +48,7 @@ from app.schemas.user import RoleOut, UserSummaryOut
 from app.security.session import SessionManager
 from app.services.user_service import UserService
 from app.ui import permission_hints
-from app.ui.theme import GREEN_DARK, MUTED, RED
+from app.ui.theme import GREEN_DARK, RED
 from app.ui.widgets.async_content import AsyncContentArea
 from app.ui.widgets.avatar import AvatarLabel
 from app.ui.widgets.change_user_role_dialog import ChangeUserRoleDialog
@@ -330,7 +330,7 @@ class UsersPage(QWidget):
         button.setText("Actions ▾")
         button.setCursor(Qt.CursorShape.PointingHandCursor)
         button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        button.setStyleSheet(f"border: none; color: {MUTED}; font-size: 12px; padding: 4px 6px;")
+        button.setObjectName("rowActions")
 
         menu = QMenu(button)
         menu.setToolTipsVisible(True)

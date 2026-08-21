@@ -1,0 +1,567 @@
+/* Central app-wide Qt Style Sheet.
+ *
+ * This file is a template, not raw QSS: the at-sign-delimited placeholders
+ * below are substituted with the design tokens defined in app/ui/theme.py (see
+ * load_qss() there) before this is handed to Qt. Edit colors/spacing/radius
+ * in theme.py, not here — this file only owns selectors and layout-of-
+ * style, so the same token can never drift into two different values in
+ * two different rules.
+ *
+ * Loaded once at startup via QApplication.setStyleSheet() (app/main.py) and
+ * cascades to every window/dialog/widget in the app.
+ */
+
+* {
+    font-family: "@FAMILY@";
+    color: @TEXT@;
+}
+QMainWindow, QDialog {
+    background: @CONTENT_BG@;
+}
+QScrollArea {
+    background: transparent;
+    border: none;
+}
+QScrollArea > QWidget > QWidget {
+    background: transparent;
+}
+QWidget#contentArea {
+    background: @CONTENT_BG@;
+}
+QWidget#card {
+    background: @CARD_BG@;
+    border: 1px solid @BORDER@;
+    border-radius: @RADIUS@px;
+}
+QLabel#pageTitle {
+    font-size: 22px;
+    font-weight: 700;
+}
+QLabel#pageSubtitle {
+    font-size: 13px;
+    color: @MUTED@;
+}
+QLabel#sectionLabel {
+    font-size: 11px;
+    font-weight: 700;
+    color: @MUTED@;
+    letter-spacing: 0.5px;
+}
+QLabel#sectionTitle {
+    font-size: 14px;
+    font-weight: 700;
+    color: @TEXT@;
+}
+
+/* -- Buttons -------------------------------------------------------------
+ * Every explicit QPushButton in this codebase sets an objectName variant
+ * below. The bare (no objectName) case below is what Qt creates internally
+ * for QMessageBox/QDialogButtonBox standard buttons ("OK", "Cancel", "Yes"),
+ * which otherwise fall back to raw OS chrome — this default gives them a
+ * "Secondary" look consistent with the rest of the app. Every named variant
+ * declares its own border explicitly so this default border never leaks
+ * into them. */
+QPushButton {
+    border-radius: @RADIUS@px;
+    padding: 9px 16px;
+    font-size: 13px;
+    font-weight: 600;
+    border: 1px solid @BORDER@;
+    background: @CARD_BG@;
+    color: @TEXT@;
+}
+QPushButton:hover {
+    background: @SURFACE_MUTED@;
+}
+QPushButton:disabled {
+    background: @DISABLED_BG@;
+    color: @MUTED@;
+    border: 1px solid @BORDER@;
+}
+QPushButton#primary {
+    background: @ACCENT@;
+    color: white;
+    border: none;
+}
+QPushButton#primary:hover {
+    background: @ACCENT_DARK@;
+}
+QPushButton#primary:disabled {
+    background: @DISABLED_BORDER@;
+    color: @DISABLED_FG@;
+    border: none;
+}
+QPushButton#danger {
+    background: @RED@;
+    color: white;
+    border: none;
+}
+QPushButton#danger:hover {
+    background: @RED_DARK@;
+}
+QPushButton#danger:disabled {
+    background: @DISABLED_BORDER@;
+    color: @DISABLED_FG@;
+    border: none;
+}
+QPushButton#ghost {
+    background: @ACCENT_TINT@;
+    color: @ACCENT@;
+    border: none;
+}
+QPushButton#ghost:hover {
+    background: @ACCENT_TINT_HOVER@;
+}
+QPushButton#ghost:disabled {
+    background: @DISABLED_BG@;
+    color: @DISABLED_FG@;
+}
+QPushButton#flat {
+    background: transparent;
+    color: @MUTED@;
+    font-weight: 500;
+    border: none;
+}
+QPushButton#flat:hover {
+    background: @BORDER@;
+}
+QPushButton#flat:disabled {
+    background: transparent;
+    color: @DISABLED_FG@;
+}
+QPushButton#secondary {
+    background: @CARD_BG@;
+    color: @TEXT@;
+    border: 1px solid @BORDER@;
+}
+QPushButton#secondary:hover {
+    background: @SURFACE_MUTED@;
+}
+QPushButton#secondary:disabled {
+    background: @DISABLED_BG@;
+    color: @DISABLED_FG@;
+}
+QPushButton#success {
+    background: @GREEN@;
+    color: white;
+    border: none;
+}
+QPushButton#success:hover {
+    background: @GREEN_DARK@;
+}
+QPushButton#success:disabled {
+    background: @DISABLED_BORDER@;
+    color: @DISABLED_FG@;
+    border: none;
+}
+QPushButton#warning {
+    background: @AMBER@;
+    color: white;
+    border: none;
+}
+QPushButton#warning:hover {
+    background: @AMBER_DARK@;
+}
+QPushButton#warning:disabled {
+    background: @DISABLED_BORDER@;
+    color: @DISABLED_FG@;
+    border: none;
+}
+
+QLineEdit {
+    border: 1px solid @BORDER@;
+    border-radius: @RADIUS@px;
+    padding: 9px 12px;
+    font-size: 13px;
+    background: white;
+    color: @TEXT@;
+    selection-background-color: @ACCENT@;
+}
+QLineEdit:focus {
+    border: 1px solid @ACCENT@;
+}
+QLineEdit[error="true"] {
+    border: 1px solid @RED@;
+}
+QLineEdit:disabled {
+    background: @DISABLED_BG@;
+    color: @MUTED@;
+}
+
+QSpinBox, QDoubleSpinBox {
+    border: 1px solid @BORDER@;
+    border-radius: @RADIUS@px;
+    padding: 9px 12px;
+    font-size: 13px;
+    background: white;
+    color: @TEXT@;
+    selection-background-color: @ACCENT@;
+}
+QSpinBox:focus, QDoubleSpinBox:focus {
+    border: 1px solid @ACCENT@;
+}
+QSpinBox:disabled, QDoubleSpinBox:disabled {
+    background: @DISABLED_BG@;
+    color: @MUTED@;
+}
+
+/* QComboBox/QDateEdit/QTextEdit have no Qt Style Sheet rules by default in
+   this app, unlike QLineEdit above — without one, each falls back to the
+   OS-native widget style (dark/near-black on a system in dark mode, on
+   macOS in particular), which is what produced the black Description
+   textarea and black report filter dropdowns/date fields this block
+   fixes. Every value below reuses the same tokens QLineEdit already uses,
+   so all four input types look and behave identically. */
+QComboBox, QDateEdit, QTextEdit, QPlainTextEdit {
+    border: 1px solid @BORDER@;
+    border-radius: @RADIUS@px;
+    padding: 9px 12px;
+    font-size: 13px;
+    background: white;
+    color: @TEXT@;
+    selection-background-color: @ACCENT@;
+    selection-color: white;
+}
+QComboBox:focus, QDateEdit:focus, QTextEdit:focus, QPlainTextEdit:focus {
+    border: 1px solid @ACCENT@;
+}
+QComboBox:disabled, QDateEdit:disabled, QTextEdit:disabled, QPlainTextEdit:disabled {
+    background: @DISABLED_BG@;
+    color: @MUTED@;
+}
+QComboBox::drop-down, QDateEdit::drop-down {
+    border: none;
+    width: 24px;
+}
+QComboBox QAbstractItemView {
+    background: white;
+    color: @TEXT@;
+    border: 1px solid @BORDER@;
+    border-radius: @RADIUS@px;
+    outline: none;
+    padding: 4px;
+    selection-background-color: @ACCENT_TINT@;
+    selection-color: @ACCENT@;
+}
+
+/* QDateEdit's calendar popup (setCalendarPopup(True), used by every date
+   filter in Reports) is a QCalendarWidget — same "unstyled = OS-native
+   dark chrome" problem as above. */
+QCalendarWidget {
+    background: white;
+    color: @TEXT@;
+}
+QCalendarWidget QWidget {
+    background: white;
+    color: @TEXT@;
+}
+QCalendarWidget QToolButton {
+    background: white;
+    color: @TEXT@;
+    border: none;
+    border-radius: 4px;
+    padding: 4px 8px;
+    font-weight: 600;
+}
+QCalendarWidget QToolButton:hover {
+    background: @ACCENT_TINT@;
+    color: @ACCENT@;
+}
+QCalendarWidget QAbstractItemView {
+    background: white;
+    color: @TEXT@;
+    selection-background-color: @ACCENT@;
+    selection-color: white;
+    outline: none;
+}
+QCalendarWidget QAbstractItemView:disabled {
+    color: @MUTED@;
+}
+QCalendarWidget #qt_calendar_navigationbar {
+    background: white;
+    border-bottom: 1px solid @BORDER@;
+}
+
+/* -- Checkboxes ------------------------------------------------------- */
+QCheckBox {
+    spacing: 8px;
+    font-size: 13px;
+    color: @TEXT@;
+}
+QCheckBox::indicator {
+    width: 16px;
+    height: 16px;
+    border: 1.5px solid @DISABLED_BORDER@;
+    border-radius: 4px;
+    background: white;
+}
+QCheckBox::indicator:hover {
+    border: 1.5px solid @ACCENT@;
+}
+QCheckBox::indicator:checked {
+    background: @ACCENT@;
+    border: 1.5px solid @ACCENT@;
+}
+QCheckBox::indicator:disabled {
+    background: @DISABLED_BG@;
+    border: 1.5px solid @BORDER@;
+}
+QCheckBox:disabled {
+    color: @MUTED@;
+}
+
+QRadioButton {
+    spacing: 8px;
+    font-size: 13px;
+    color: @TEXT@;
+}
+QRadioButton::indicator {
+    width: 16px;
+    height: 16px;
+    border: 1.5px solid @DISABLED_BORDER@;
+    border-radius: 8px;
+    background: white;
+}
+QRadioButton::indicator:hover {
+    border: 1.5px solid @ACCENT@;
+}
+QRadioButton::indicator:checked {
+    background: @ACCENT@;
+    border: 1.5px solid @ACCENT@;
+}
+QRadioButton::indicator:disabled {
+    background: @DISABLED_BG@;
+    border: 1.5px solid @BORDER@;
+}
+QRadioButton:disabled {
+    color: @MUTED@;
+}
+
+QGroupBox {
+    border: 1px solid @BORDER@;
+    border-radius: @RADIUS@px;
+    margin-top: 14px;
+    padding: 16px 12px 12px 12px;
+    font-size: 13px;
+    font-weight: 700;
+    color: @TEXT@;
+}
+QGroupBox::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 10px;
+    padding: 0 6px;
+    color: @MUTED@;
+}
+
+/* -- Tabs (Settings page, Catalog manager) ----------------------------- */
+QTabWidget::pane {
+    border: 1px solid @BORDER@;
+    border-radius: @RADIUS@px;
+    background: @CARD_BG@;
+    top: -1px;
+}
+QTabBar::tab {
+    background: transparent;
+    color: @MUTED@;
+    padding: 9px 18px;
+    font-size: 13px;
+    font-weight: 600;
+    border: none;
+    border-bottom: 2px solid transparent;
+    margin-right: 4px;
+}
+QTabBar::tab:hover {
+    color: @TEXT@;
+}
+QTabBar::tab:selected {
+    color: @ACCENT@;
+    border-bottom: 2px solid @ACCENT@;
+}
+QTabBar::tab:disabled {
+    color: @DISABLED_BORDER@;
+}
+
+/* -- Toolbar icon buttons (kebab menus, notification bell, user menu) -- */
+QToolButton {
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    padding: 4px;
+}
+QToolButton:hover {
+    background: @ACCENT_TINT@;
+}
+QToolButton:pressed {
+    background: @BORDER@;
+}
+QToolButton::menu-indicator {
+    width: 0px;
+    image: none;
+}
+/* Per-row "Actions ▾" menu trigger used by every list page's actions
+   column (Warehouses, Users, Suppliers, Customers, ...). */
+QToolButton#rowActions {
+    color: @MUTED@;
+    font-size: 12px;
+    padding: 4px 6px;
+}
+QToolButton#rowActions:hover {
+    color: @TEXT@;
+    background: @ACCENT_TINT@;
+}
+QToolButton#notificationBell {
+    font-size: 16px;
+}
+QToolButton#userMenuTrigger {
+    font-size: 11px;
+    color: @MUTED@;
+}
+QLabel#notificationBadge {
+    background: @RED@;
+    border-radius: 4px;
+}
+
+/* -- Progress bar (indeterminate loading state) ------------------------ */
+QProgressBar {
+    border: none;
+    background: @BORDER@;
+    border-radius: 3px;
+    text-align: center;
+    color: transparent;
+}
+QProgressBar::chunk {
+    background: @ACCENT@;
+    border-radius: 3px;
+}
+
+QListWidget#sidebarList {
+    background: @SIDEBAR_BG@;
+    border: none;
+    outline: none;
+    padding: 4px 0;
+}
+QListWidget#sidebarList::item {
+    color: @SIDEBAR_FG@;
+    padding: 11px 22px;
+    border-left: 3px solid transparent;
+    font-size: 13px;
+}
+QListWidget#sidebarList::item:hover {
+    background: @SIDEBAR_HOVER@;
+}
+QListWidget#sidebarList::item:selected {
+    background: @NAV_ACTIVE@;
+    color: white;
+    border-left: 3px solid white;
+}
+
+QFrame#header {
+    background: @CARD_BG@;
+    border-bottom: 1px solid @BORDER@;
+}
+QStatusBar#statusBar {
+    background: @CARD_BG@;
+    border-top: 1px solid @BORDER@;
+    color: @MUTED@;
+    font-size: 11px;
+    padding-left: 12px;
+}
+QStatusBar#statusBar::item {
+    border: none;
+}
+
+QMenu {
+    background: white;
+    border: 1px solid @BORDER@;
+    border-radius: @RADIUS@px;
+    padding: 6px;
+}
+QMenu::item {
+    padding: 8px 14px;
+    border-radius: 4px;
+    font-size: 13px;
+}
+QMenu::item:selected {
+    background: @ACCENT_TINT@;
+    color: @ACCENT@;
+}
+QMenu::separator {
+    height: 1px;
+    background: @BORDER@;
+    margin: 6px 4px;
+}
+
+QToolTip {
+    background: @TEXT@;
+    color: white;
+    border: none;
+    padding: 6px 8px;
+    border-radius: 4px;
+}
+
+/* -- Message boxes / confirm dialogs ------------------------------------
+ * QMessageBox (used app-wide for confirm/info/warning/error prompts, see
+ * app/ui/widgets/confirm_dialog.py) has no rules of its own by default and
+ * otherwise inherits raw OS chrome for its background/text on some
+ * platforms. Its buttons pick up the bare QPushButton default above. */
+QMessageBox {
+    background: @CARD_BG@;
+}
+QMessageBox QLabel {
+    color: @TEXT@;
+    font-size: 13px;
+}
+
+QTableWidget {
+    background: white;
+    border: none;
+    gridline-color: @BORDER@;
+    font-size: 13px;
+    selection-background-color: @ACCENT_TINT@;
+    selection-color: @TEXT@;
+}
+QHeaderView::section {
+    background: @SURFACE_MUTED@;
+    color: @MUTED@;
+    padding: 8px;
+    border: none;
+    border-bottom: 1px solid @BORDER@;
+    font-weight: 700;
+    font-size: 11px;
+}
+QTableWidget::item {
+    padding: 6px;
+}
+QTableWidget::item:selected {
+    background: @ACCENT_TINT@;
+    color: @TEXT@;
+}
+QTableWidget::item:hover {
+    background: @SURFACE_MUTED@;
+}
+
+QScrollBar:vertical {
+    width: 10px;
+    background: transparent;
+}
+QScrollBar::handle:vertical {
+    background: @DISABLED_BORDER@;
+    border-radius: 5px;
+    min-height: 24px;
+}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0;
+}
+QScrollBar:horizontal {
+    height: 10px;
+    background: transparent;
+}
+QScrollBar::handle:horizontal {
+    background: @DISABLED_BORDER@;
+    border-radius: 5px;
+    min-width: 24px;
+}
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+    width: 0;
+}

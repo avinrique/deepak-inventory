@@ -105,6 +105,7 @@ class ProductService:
             sku=sku, name=data.name, purchase_price=data.purchase_price,
             selling_price=data.selling_price, tax_percent=data.tax_percent,
             minimum_stock_level=data.minimum_stock_level, is_taxable=data.is_taxable,
+            excise_percent=data.excise_percent,
             unit_id=data.unit_id, sub_unit_id=data.sub_unit_id,
             sub_unit_conversion_factor=data.sub_unit_conversion_factor,
             tertiary_unit_id=data.tertiary_unit_id,
@@ -160,6 +161,7 @@ class ProductService:
         selling_price = updates.get("selling_price", existing.selling_price)
         tax_percent = updates.get("tax_percent", existing.tax_percent)
         is_taxable = updates.get("is_taxable", existing.is_taxable)
+        excise_percent = updates.get("excise_percent", existing.excise_percent)
         minimum_stock_level = updates.get("minimum_stock_level", existing.minimum_stock_level)
         unit_id = updates.get("unit_id", existing.unit.id)
         sub_unit_id = (updates["sub_unit_id"] if "sub_unit_id" in updates
@@ -180,7 +182,8 @@ class ProductService:
         errors = validate_product(
             sku=sku, name=name, purchase_price=purchase_price, selling_price=selling_price,
             tax_percent=tax_percent, minimum_stock_level=minimum_stock_level,
-            is_taxable=is_taxable, unit_id=unit_id, sub_unit_id=sub_unit_id,
+            is_taxable=is_taxable, excise_percent=excise_percent,
+            unit_id=unit_id, sub_unit_id=sub_unit_id,
             sub_unit_conversion_factor=sub_unit_conversion_factor,
             tertiary_unit_id=tertiary_unit_id,
             tertiary_unit_conversion_factor=tertiary_unit_conversion_factor,

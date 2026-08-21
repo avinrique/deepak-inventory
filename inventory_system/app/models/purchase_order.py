@@ -22,7 +22,7 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from sqlalchemy import BigInteger, CheckConstraint, Date, DateTime, Enum, ForeignKey, Index, Numeric, String, Text, func
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.domain.purchasing import PurchaseOrderStatus
@@ -58,6 +58,9 @@ class PurchaseOrder(UUIDPKMixin, TimestampMixin, Base):
         nullable=False, default=PurchaseOrderStatus.DRAFT)
     expected_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Ad-hoc key/value pairs, no field-type system or org-level schema —
+    # same shape as AuditLog.changes / SalesOrder.custom_fields.
+    custom_fields: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     created_by: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
     approved_by: Mapped[uuid.UUID | None] = mapped_column(

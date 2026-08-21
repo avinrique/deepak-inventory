@@ -7,8 +7,6 @@ ones as a popup list rather than nothing happening.
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QLabel, QMenu, QToolButton
 
-from app.ui.theme import RED
-
 
 class NotificationBell(QToolButton):
     clicked_bell = Signal()
@@ -17,11 +15,11 @@ class NotificationBell(QToolButton):
         super().__init__()
         self.setText("🔔")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setStyleSheet("border: none; font-size: 16px; padding: 4px;")
+        self.setObjectName("notificationBell")
         self._history: list[tuple[str, str]] = []  # (kind, message)
         self._badge = QLabel(self)
         self._badge.setFixedSize(8, 8)
-        self._badge.setStyleSheet(f"background: {RED}; border-radius: 4px;")
+        self._badge.setObjectName("notificationBadge")
         self._badge.move(20, 4)
         self._badge.hide()
         self.clicked.connect(self._show_history)

@@ -17,14 +17,17 @@ dialog deliberately doesn't duplicate that finalize logic.
 from datetime import datetime
 from decimal import Decimal
 
-from PySide6.QtCore import QThreadPool, Qt
+from PySide6.QtCore import QDate, QThreadPool, Qt
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
+    QDateEdit,
     QDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPushButton,
     QScrollArea,
     QTextEdit,
@@ -34,6 +37,7 @@ from PySide6.QtWidgets import (
 
 from app.core.exceptions import (
     CustomerNotFoundError,
+    DuplicateReferenceNumberError,
     ProductNotFoundError,
     SalesOrderValidationError,
     WarehouseNotFoundError,
@@ -45,6 +49,7 @@ from app.services.inventory_service import InventoryService
 from app.services.product_service import ProductService
 from app.services.sales_service import SalesService
 from app.ui.theme import RED, STYLESHEET
+from app.ui.widgets.custom_fields_section import CustomFieldsSection
 from app.ui.widgets.customer_form_dialog import CustomerFormDialog
 from app.ui.widgets.order_form_style import ORDER_FORM_STYLESHEET, apply_card_shadow, field_label
 from app.ui.widgets.transaction_items_table import TransactionItemsTable
@@ -91,6 +96,8 @@ class SalesOrderFormDialog(QDialog):
         content_layout.addWidget(self._build_order_info_card(warehouses))
         content_layout.addWidget(self._build_items_card(product_service, inventory_service))
         content_layout.addWidget(self._build_notes_card())
+        self._custom_fields = CustomFieldsSection()
+        content_layout.addWidget(self._custom_fields)
 
         if not customers or not warehouses:
             missing = "customers" if not customers else "warehouses"
@@ -175,8 +182,28 @@ class SalesOrderFormDialog(QDialog):
         grid.addWidget(field_label("Order Date"), 3, 1)
         grid.addWidget(order_date_value, 4, 1)
 
+        delivery_row = QHBoxLayout()
+        self._delivery_date_check = QCheckBox("Set delivery date")
+        self._delivery_date_check.toggled.connect(self._on_delivery_date_toggled)
+        delivery_row.addWidget(self._delivery_date_check)
+        self._delivery_date_edit = QDateEdit(QDate.currentDate())
+        self._delivery_date_edit.setCalendarPopup(True)
+        self._delivery_date_edit.setEnabled(False)
+        delivery_row.addWidget(self._delivery_date_edit, stretch=1)
+        grid.addWidget(field_label("Delivery Date"), 5, 0)
+        grid.addLayout(delivery_row, 6, 0)
+
+        self._reference_number_edit = QLineEdit()
+        self._reference_number_edit.setPlaceholderText(
+            "Customer PO / reference number (optional)")
+        grid.addWidget(field_label("Reference Number"), 5, 1)
+        grid.addWidget(self._reference_number_edit, 6, 1)
+
         layout.addLayout(grid)
         return card
+
+    def _on_delivery_date_toggled(self, checked: bool) -> None:
+        self._delivery_date_edit.setEnabled(checked)
 
     def _populate_customers(self) -> None:
         self._customer.blockSignals(True)
@@ -284,12 +311,16 @@ class SalesOrderFormDialog(QDialog):
         self._tax_value = self._totals_value()
         totals_grid.addWidget(self._tax_value, 4, 1)
 
+        totals_grid.addWidget(self._totals_caption("Total Excise Duty"), 5, 0)
+        self._excise_value = self._totals_value()
+        totals_grid.addWidget(self._excise_value, 5, 1)
+
         grand_label = QLabel("Grand Total")
         grand_label.setObjectName("grandTotalLabel")
-        totals_grid.addWidget(grand_label, 5, 0)
+        totals_grid.addWidget(grand_label, 6, 0)
         self._grand_total_value = QLabel(_money(Decimal("0")))
         self._grand_total_value.setObjectName("grandTotalValue")
-        totals_grid.addWidget(self._grand_total_value, 5, 1,
+        totals_grid.addWidget(self._grand_total_value, 6, 1,
                               Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
         totals_row.addLayout(totals_grid)
@@ -310,13 +341,15 @@ class SalesOrderFormDialog(QDialog):
         return label
 
     def _on_totals_changed(self) -> None:
-        subtotal, discount_total, tax_total, grand_total = self._items_editor.compute_totals()
+        (subtotal, discount_total, tax_total, excise_total,
+         grand_total) = self._items_editor.compute_totals()
         non_taxable, taxable = self._items_editor.compute_tax_split()
         self._subtotal_value.setText(_money(subtotal))
         self._discount_value.setText(_money(discount_total))
         self._non_taxable_value.setText(_money(non_taxable))
         self._taxable_value.setText(_money(taxable))
         self._tax_value.setText(_money(tax_total))
+        self._excise_value.setText(_money(excise_total))
         self._grand_total_value.setText(_money(grand_total))
 
     # -- notes -------------------------------------------------------------------#
@@ -384,9 +417,16 @@ class SalesOrderFormDialog(QDialog):
                                      quantity_ordered=r["quantity"],
                                      unit_price=r["unit_price"],
                                      tax_percent=r["tax_percent"],
-                                     discount_percent=r["discount_percent"]) for r in rows]
+                                     discount_percent=r["discount_percent"],
+                                     excise_percent=r["excise_percent"]) for r in rows]
+        delivery_date = (self._delivery_date_edit.date().toPython()
+                        if self._delivery_date_check.isChecked() else None)
         data = SalesOrderCreate(customer_id=customer_id, warehouse_id=warehouse_id,
-                                notes=self._notes.toPlainText().strip() or None, items=items)
+                                notes=self._notes.toPlainText().strip() or None,
+                                delivery_date=delivery_date,
+                                reference_number=self._reference_number_edit.text().strip()
+                                or None,
+                                custom_fields=self._custom_fields.get_values(), items=items)
 
         self._set_busy(True)
         worker = Worker(self._sales_service.create_sales_order, data)
@@ -404,7 +444,7 @@ class SalesOrderFormDialog(QDialog):
         if isinstance(exc, SalesOrderValidationError):
             self._show_error(" ".join(exc.errors))
         elif isinstance(exc, (CustomerNotFoundError, WarehouseNotFoundError,
-                              ProductNotFoundError)):
+                              ProductNotFoundError, DuplicateReferenceNumberError)):
             self._show_error(str(exc))
         elif isinstance(exc, PermissionDeniedError):
             self._show_error("You don't have permission to create sales orders.")

@@ -283,6 +283,12 @@ class DuplicateInvoiceError(AppError):
         super().__init__(f"Sales order {sales_order_id!r} already has an invoice")
 
 
+class DuplicateReferenceNumberError(AppError):
+    def __init__(self, reference_number: str):
+        self.reference_number = reference_number
+        super().__init__(f"Reference number {reference_number!r} already exists")
+
+
 class OverpaymentError(AppError):
     """Raised when a payment would exceed an invoice's outstanding balance
     — SalesOrderRepository.record_payment locks the Invoice row and checks

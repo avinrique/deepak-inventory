@@ -14,6 +14,7 @@ terminal, so returning to the login screen (not exiting) is the point.
 import logging
 import sys
 
+from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from app.core.container import Container
@@ -22,7 +23,7 @@ from app.core.logging_config import configure_logging
 from app.database.schema_check import check_schema_version
 from app.ui.login_window import LoginWindow
 from app.ui.main_window import MainWindow
-from app.ui.theme import STYLESHEET
+from app.ui.theme import MUTED, STYLESHEET
 
 _logger = logging.getLogger(__name__)
 
@@ -67,6 +68,14 @@ def main() -> int:
     configure_logging()
     app = QApplication(sys.argv)
     app.setStyleSheet(STYLESHEET)
+
+    # QSS has no selector for placeholder text, so without this every
+    # QLineEdit/QTextEdit placeholder falls back to whatever the OS style
+    # computes — invisible-to-low-contrast on some platforms/themes. Setting
+    # it once here covers every placeholder in the app consistently.
+    palette = app.palette()
+    palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(MUTED))
+    app.setPalette(palette)
 
     # Fails fast and clearly on schema drift, before any window is shown —
     # see SchemaVersionMismatchError's docstring for the production

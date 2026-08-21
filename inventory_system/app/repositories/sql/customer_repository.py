@@ -71,7 +71,8 @@ def compute_customer_balance(db, organization_id: uuid.UUID, customer: Customer)
         .all())
     pending_orders_total = sum(
         (line_total_after_discount(item.quantity_ordered, item.unit_price,
-                                   item.discount_percent, item.tax_percent)
+                                   item.discount_percent, item.tax_percent,
+                                   excise_percent=item.excise_percent)
         for so in pending_orders for item in so.items), Decimal("0"))
 
     # Returns credit the customer back for goods no longer kept —

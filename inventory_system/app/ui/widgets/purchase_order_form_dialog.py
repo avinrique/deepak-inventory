@@ -45,6 +45,7 @@ from app.services.inventory_service import InventoryService
 from app.services.product_service import ProductService
 from app.services.purchase_service import PurchaseService
 from app.ui.theme import RED, STYLESHEET
+from app.ui.widgets.custom_fields_section import CustomFieldsSection
 from app.ui.widgets.order_form_style import ORDER_FORM_STYLESHEET, apply_card_shadow, field_label
 from app.ui.widgets.transaction_items_table import TransactionItemsTable
 from app.workers.base_worker import Worker
@@ -89,6 +90,8 @@ class PurchaseOrderFormDialog(QDialog):
         content_layout.addWidget(self._build_order_info_card(suppliers, warehouses))
         content_layout.addWidget(self._build_items_card(product_service, inventory_service))
         content_layout.addWidget(self._build_notes_card())
+        self._custom_fields = CustomFieldsSection()
+        content_layout.addWidget(self._custom_fields)
 
         if not suppliers or not warehouses:
             missing = "suppliers" if not suppliers else "warehouses"
@@ -257,7 +260,7 @@ class PurchaseOrderFormDialog(QDialog):
         return label
 
     def _on_totals_changed(self) -> None:
-        subtotal, _discount, tax_total, grand_total = self._items_editor.compute_totals()
+        subtotal, _discount, tax_total, _excise, grand_total = self._items_editor.compute_totals()
         non_taxable, taxable = self._items_editor.compute_tax_split()
         self._subtotal_value.setText(_money(subtotal))
         self._non_taxable_value.setText(_money(non_taxable))
@@ -335,7 +338,8 @@ class PurchaseOrderFormDialog(QDialog):
             expected_date = self._expected_date_edit.date().toPython()
         data = PurchaseOrderCreate(supplier_id=supplier_id, warehouse_id=warehouse_id,
                                    expected_date=expected_date,
-                                   notes=self._notes.toPlainText().strip() or None, items=items)
+                                   notes=self._notes.toPlainText().strip() or None,
+                                   custom_fields=self._custom_fields.get_values(), items=items)
 
         self._set_busy(True)
         worker = Worker(self._purchase_service.create_purchase_order, data)

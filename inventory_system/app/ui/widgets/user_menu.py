@@ -36,7 +36,7 @@ class UserMenu(QWidget):
         self._button = QToolButton()
         self._button.setText("▾")
         self._button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._button.setStyleSheet("border: none; font-size: 11px; color: " + MUTED + ";")
+        self._button.setObjectName("userMenuTrigger")
         self._button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
 
         menu = QMenu(self._button)

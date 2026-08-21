@@ -6,12 +6,12 @@ data).
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QGraphicsOpacityEffect, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
-from app.ui.theme import GREEN, RED, TEXT
+from app.ui.theme import ACCENT, GREEN, RED, TEXT
 
 _KIND_STYLE = {
     "success": (GREEN, "✓"),
     "error": (RED, "✕"),
-    "info": ("#2563eb", "ⓘ"),
+    "info": (ACCENT, "ⓘ"),
 }
 
 

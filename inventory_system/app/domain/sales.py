@@ -112,7 +112,8 @@ def validate_customer(*, name: str, customer_code: str | None = None,
 
 def validate_sales_order_item(*, quantity_ordered: Decimal, unit_price: Decimal,
                               tax_percent: Decimal,
-                              discount_percent: Decimal = Decimal("0")) -> list[str]:
+                              discount_percent: Decimal = Decimal("0"),
+                              excise_percent: Decimal = Decimal("0")) -> list[str]:
     errors = []
     if quantity_ordered <= 0:
         errors.append("Quantity must be greater than zero.")
@@ -122,6 +123,8 @@ def validate_sales_order_item(*, quantity_ordered: Decimal, unit_price: Decimal,
         errors.append("Tax percent must be between 0 and 100.")
     if not (Decimal("0") <= discount_percent <= Decimal("100")):
         errors.append("Discount percent must be between 0 and 100.")
+    if not (Decimal("0") <= excise_percent <= Decimal("100")):
+        errors.append("Excise percent must be between 0 and 100.")
     return errors
 
 
@@ -146,11 +149,23 @@ def line_tax_after_discount(quantity: Decimal, unit_price: Decimal, discount_per
                                         discount_percent) * tax_percent / Decimal("100")
 
 
+# Excise duty — mirrors line_tax_after_discount exactly: applied to the
+# same post-discount base as tax, computed independently of tax (neither
+# compounds on the other), and simply summed into the line total alongside
+# it. See line_total_after_discount.
+def line_excise_after_discount(quantity: Decimal, unit_price: Decimal, discount_percent: Decimal,
+                               excise_percent: Decimal) -> Decimal:
+    return line_subtotal_after_discount(quantity, unit_price,
+                                        discount_percent) * excise_percent / Decimal("100")
+
+
 def line_total_after_discount(quantity: Decimal, unit_price: Decimal, discount_percent: Decimal,
-                              tax_percent: Decimal) -> Decimal:
+                              tax_percent: Decimal,
+                              excise_percent: Decimal = Decimal("0")) -> Decimal:
     after_discount = line_subtotal_after_discount(quantity, unit_price, discount_percent)
-    return after_discount + line_tax_after_discount(quantity, unit_price, discount_percent,
-                                                     tax_percent)
+    return (after_discount
+            + line_tax_after_discount(quantity, unit_price, discount_percent, tax_percent)
+            + line_excise_after_discount(quantity, unit_price, discount_percent, excise_percent))
 
 
 def format_invoice_number(prefix: str, sequence_value: int) -> str:

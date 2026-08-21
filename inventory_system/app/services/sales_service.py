@@ -22,6 +22,7 @@ from app.core.exceptions import (
     CreditLimitExceededError,
     CustomerNotFoundError,
     DuplicateCustomerCodeError,
+    DuplicateReferenceNumberError,
     InvalidSalesOrderTransitionError,
     InvoiceNotFoundError,
     ProductNotFoundError,
@@ -279,7 +280,8 @@ class SalesService:
                 raise ProductNotFoundError(item.product_id)
             errors.extend(validate_sales_order_item(
                 quantity_ordered=item.quantity_ordered, unit_price=item.unit_price,
-                tax_percent=item.tax_percent, discount_percent=item.discount_percent))
+                tax_percent=item.tax_percent, discount_percent=item.discount_percent,
+                excise_percent=item.excise_percent))
         if errors:
             raise SalesOrderValidationError(errors)
 
@@ -292,6 +294,9 @@ class SalesService:
         if self._warehouses.get_by_id(org_id, data.warehouse_id) is None:
             raise WarehouseNotFoundError(data.warehouse_id)
         self._validate_items(data)
+        if data.reference_number and self._sales_orders.reference_number_exists(
+                org_id, data.reference_number):
+            raise DuplicateReferenceNumberError(data.reference_number)
 
         # Credit control: enforced here, not just hidden in the UI — a
         # caller going straight to the service (a script, a bug, a future
@@ -300,7 +305,8 @@ class SalesService:
         # app.models.customer's docstring).
         order_total = sum(
             (line_total_after_discount(item.quantity_ordered, item.unit_price,
-                                       item.discount_percent, item.tax_percent)
+                                       item.discount_percent, item.tax_percent,
+                                       excise_percent=item.excise_percent)
             for item in data.items), Decimal("0"))
         self._check_credit_limit(customer, order_total)
 
@@ -325,6 +331,9 @@ class SalesService:
             raise WarehouseNotFoundError(data.warehouse_id)
         if data.items is not None:
             self._validate_items(data)
+        if data.reference_number is not None and self._sales_orders.reference_number_exists(
+                org_id, data.reference_number, exclude_id=sales_order_id):
+            raise DuplicateReferenceNumberError(data.reference_number)
         result = self._sales_orders.update(org_id, sales_order_id, data)
         if result is None:
             raise SalesOrderNotFoundError(sales_order_id)

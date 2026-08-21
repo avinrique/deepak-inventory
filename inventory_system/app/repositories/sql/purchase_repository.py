@@ -76,7 +76,8 @@ def _to_out(po: PurchaseOrder) -> PurchaseOrderOut:
     return PurchaseOrderOut(
         id=po.id, order_number=po.order_number, supplier_id=po.supplier_id,
         warehouse_id=po.warehouse_id, status=po.status,
-        expected_date=po.expected_date, notes=po.notes, created_by=po.created_by,
+        expected_date=po.expected_date, notes=po.notes, custom_fields=po.custom_fields,
+        created_by=po.created_by,
         approved_by=po.approved_by, approved_at=po.approved_at,
         items=[_item_to_out(i) for i in po.items], created_at=po.created_at,
         updated_at=po.updated_at)
@@ -144,7 +145,7 @@ class SqlPurchaseOrderRepository:
                                warehouse_id=data.warehouse_id,
                                status=PurchaseOrderStatus.DRAFT,
                                expected_date=data.expected_date, notes=data.notes,
-                               created_by=created_by)
+                               custom_fields=data.custom_fields, created_by=created_by)
             db.add(po)
             db.flush()
             for item in data.items:

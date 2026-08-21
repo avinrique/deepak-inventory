@@ -1,12 +1,17 @@
-"""Central design tokens (colors/spacing/fonts) + the app-wide QSS
-stylesheet. Every widget under app/ui pulls from here rather than hardcoding
-a color, so the app reads as one consistent system, not a pile of one-off
-styles.
+"""Central design tokens (colors/spacing/fonts) for the whole app, plus the
+loader that turns app/ui/styles/*.qss template files into ready-to-apply
+stylesheets. Every widget under app/ui pulls a color from the tokens below
+(directly in Python, or via an @TOKEN@ placeholder in a .qss file) rather
+than hardcoding a fresh hex value, so the app reads as one consistent
+system, not a pile of one-off styles.
 """
 import platform
+from pathlib import Path
 
 MAC = platform.system() == "Darwin"
 FAMILY = "Helvetica Neue" if MAC else "Segoe UI"
+
+STYLES_DIR = Path(__file__).resolve().parent / "styles"
 
 # Palette — dark sidebar / light content, the same system proven out on the
 # legacy Tkinter app's UI pass, carried over for visual continuity.
@@ -21,13 +26,22 @@ BORDER = "#e2e6ec"
 ACCENT = "#2563eb"
 ACCENT_DARK = "#1d4ed8"
 ACCENT_TINT = "#eef2ff"
+ACCENT_TINT_HOVER = "#e0e7ff"
 GREEN = "#059669"
 GREEN_DARK = "#047857"
+GREEN_TINT = "#ecfdf5"
 RED = "#dc2626"
+RED_DARK = "#b91c1c"
 RED_TINT = "#fef2f2"
 AMBER = "#d97706"
+AMBER_DARK = "#b45309"
+AMBER_TINT = "#fffbeb"
 TEXT = "#111827"
 MUTED = "#6b7280"
+SURFACE_MUTED = "#f8fafc"  # table headers, subtle hover fills
+DISABLED_BG = "#f1f5f9"
+DISABLED_BORDER = "#cbd5e1"
+DISABLED_FG = "#94a3b8"
 
 SPACING_XS = 4
 SPACING_SM = 8
@@ -37,281 +51,57 @@ SPACING_XL = 32
 
 RADIUS = 8
 
-STYLESHEET = f"""
-* {{
-    font-family: "{FAMILY}";
-    color: {TEXT};
-}}
-QMainWindow, QDialog {{
-    background: {CONTENT_BG};
-}}
-QScrollArea {{
-    background: transparent;
-    border: none;
-}}
-QScrollArea > QWidget > QWidget {{
-    background: transparent;
-}}
-QWidget#contentArea {{
-    background: {CONTENT_BG};
-}}
-QWidget#card {{
-    background: {CARD_BG};
-    border: 1px solid {BORDER};
-    border-radius: {RADIUS}px;
-}}
-QLabel#pageTitle {{
-    font-size: 22px;
-    font-weight: 700;
-}}
-QLabel#pageSubtitle {{
-    font-size: 13px;
-    color: {MUTED};
-}}
-QLabel#sectionLabel {{
-    font-size: 11px;
-    font-weight: 700;
-    color: {MUTED};
-    letter-spacing: 0.5px;
-}}
-QLabel#sectionTitle {{
-    font-size: 14px;
-    font-weight: 700;
-    color: {TEXT};
-}}
+# Every name a .qss file may reference as @NAME@. Kept as an explicit map
+# (rather than scraping globals()) so it's obvious what's part of the public
+# token contract between theme.py and app/ui/styles/*.qss.
+_TOKENS = {
+    "FAMILY": FAMILY,
+    "SIDEBAR_BG": SIDEBAR_BG,
+    "SIDEBAR_FG": SIDEBAR_FG,
+    "SIDEBAR_HOVER": SIDEBAR_HOVER,
+    "SIDEBAR_MUTED": SIDEBAR_MUTED,
+    "NAV_ACTIVE": NAV_ACTIVE,
+    "CONTENT_BG": CONTENT_BG,
+    "CARD_BG": CARD_BG,
+    "BORDER": BORDER,
+    "ACCENT": ACCENT,
+    "ACCENT_DARK": ACCENT_DARK,
+    "ACCENT_TINT": ACCENT_TINT,
+    "ACCENT_TINT_HOVER": ACCENT_TINT_HOVER,
+    "GREEN": GREEN,
+    "GREEN_DARK": GREEN_DARK,
+    "GREEN_TINT": GREEN_TINT,
+    "RED": RED,
+    "RED_DARK": RED_DARK,
+    "RED_TINT": RED_TINT,
+    "AMBER": AMBER,
+    "AMBER_DARK": AMBER_DARK,
+    "AMBER_TINT": AMBER_TINT,
+    "TEXT": TEXT,
+    "MUTED": MUTED,
+    "SURFACE_MUTED": SURFACE_MUTED,
+    "DISABLED_BG": DISABLED_BG,
+    "DISABLED_BORDER": DISABLED_BORDER,
+    "DISABLED_FG": DISABLED_FG,
+    "SPACING_XS": SPACING_XS,
+    "SPACING_SM": SPACING_SM,
+    "SPACING_MD": SPACING_MD,
+    "SPACING_LG": SPACING_LG,
+    "SPACING_XL": SPACING_XL,
+    "RADIUS": RADIUS,
+}
 
-QPushButton {{
-    border-radius: {RADIUS}px;
-    padding: 9px 16px;
-    font-size: 13px;
-    font-weight: 600;
-    border: none;
-}}
-QPushButton#primary {{
-    background: {ACCENT};
-    color: white;
-}}
-QPushButton#primary:hover {{
-    background: {ACCENT_DARK};
-}}
-QPushButton#primary:disabled {{
-    background: #cbd5e1;
-    color: #94a3b8;
-}}
-QPushButton#danger {{
-    background: {RED};
-    color: white;
-}}
-QPushButton#danger:hover {{
-    background: #b91c1c;
-}}
-QPushButton#ghost {{
-    background: {ACCENT_TINT};
-    color: {ACCENT};
-}}
-QPushButton#ghost:hover {{
-    background: #e0e7ff;
-}}
-QPushButton#flat {{
-    background: transparent;
-    color: {MUTED};
-    font-weight: 500;
-}}
-QPushButton#flat:hover {{
-    background: {BORDER};
-}}
 
-QLineEdit {{
-    border: 1px solid {BORDER};
-    border-radius: {RADIUS}px;
-    padding: 9px 12px;
-    font-size: 13px;
-    background: white;
-    color: {TEXT};
-    selection-background-color: {ACCENT};
-}}
-QLineEdit:focus {{
-    border: 1px solid {ACCENT};
-}}
-QLineEdit[error="true"] {{
-    border: 1px solid {RED};
-}}
-QLineEdit:disabled {{
-    background: #f1f5f9;
-    color: {MUTED};
-}}
+def load_qss(filename: str) -> str:
+    """Read a .qss file from app/ui/styles/ and substitute every @TOKEN@
+    placeholder with its value from the palette above. A plain string
+    replace (not str.format) so the .qss files can use real QSS brace
+    syntax without needing to escape every '{' / '}'.
+    """
+    text = (STYLES_DIR / filename).read_text(encoding="utf-8")
+    for key, value in _TOKENS.items():
+        text = text.replace(f"@{key}@", str(value))
+    return text
 
-/* QComboBox/QDateEdit/QTextEdit have no Qt Style Sheet rules by default in
-   this app, unlike QLineEdit above — without one, each falls back to the
-   OS-native widget style (dark/near-black on a system in dark mode, on
-   macOS in particular), which is what produced the black Description
-   textarea and black report filter dropdowns/date fields this block
-   fixes. Every value below reuses the same tokens QLineEdit already uses,
-   so all four input types look and behave identically. */
-QComboBox, QDateEdit, QTextEdit, QPlainTextEdit {{
-    border: 1px solid {BORDER};
-    border-radius: {RADIUS}px;
-    padding: 9px 12px;
-    font-size: 13px;
-    background: white;
-    color: {TEXT};
-    selection-background-color: {ACCENT};
-    selection-color: white;
-}}
-QComboBox:focus, QDateEdit:focus, QTextEdit:focus, QPlainTextEdit:focus {{
-    border: 1px solid {ACCENT};
-}}
-QComboBox:disabled, QDateEdit:disabled, QTextEdit:disabled, QPlainTextEdit:disabled {{
-    background: #f1f5f9;
-    color: {MUTED};
-}}
-QComboBox::drop-down, QDateEdit::drop-down {{
-    border: none;
-    width: 24px;
-}}
-QComboBox QAbstractItemView {{
-    background: white;
-    color: {TEXT};
-    border: 1px solid {BORDER};
-    border-radius: {RADIUS}px;
-    outline: none;
-    padding: 4px;
-    selection-background-color: {ACCENT_TINT};
-    selection-color: {ACCENT};
-}}
 
-/* QDateEdit's calendar popup (setCalendarPopup(True), used by every date
-   filter in Reports) is a QCalendarWidget — same "unstyled = OS-native
-   dark chrome" problem as above. */
-QCalendarWidget {{
-    background: white;
-    color: {TEXT};
-}}
-QCalendarWidget QWidget {{
-    background: white;
-    color: {TEXT};
-}}
-QCalendarWidget QToolButton {{
-    background: white;
-    color: {TEXT};
-    border: none;
-    border-radius: 4px;
-    padding: 4px 8px;
-    font-weight: 600;
-}}
-QCalendarWidget QToolButton:hover {{
-    background: {ACCENT_TINT};
-    color: {ACCENT};
-}}
-QCalendarWidget QAbstractItemView {{
-    background: white;
-    color: {TEXT};
-    selection-background-color: {ACCENT};
-    selection-color: white;
-    outline: none;
-}}
-QCalendarWidget QAbstractItemView:disabled {{
-    color: {MUTED};
-}}
-QCalendarWidget #qt_calendar_navigationbar {{
-    background: white;
-    border-bottom: 1px solid {BORDER};
-}}
-
-QListWidget#sidebarList {{
-    background: {SIDEBAR_BG};
-    border: none;
-    outline: none;
-    padding: 4px 0;
-}}
-QListWidget#sidebarList::item {{
-    color: {SIDEBAR_FG};
-    padding: 11px 22px;
-    border-left: 3px solid transparent;
-    font-size: 13px;
-}}
-QListWidget#sidebarList::item:hover {{
-    background: {SIDEBAR_HOVER};
-}}
-QListWidget#sidebarList::item:selected {{
-    background: {NAV_ACTIVE};
-    color: white;
-    border-left: 3px solid white;
-}}
-
-QFrame#header {{
-    background: {CARD_BG};
-    border-bottom: 1px solid {BORDER};
-}}
-QStatusBar#statusBar {{
-    background: {CARD_BG};
-    border-top: 1px solid {BORDER};
-    color: {MUTED};
-    font-size: 11px;
-    padding-left: 12px;
-}}
-QStatusBar#statusBar::item {{
-    border: none;
-}}
-
-QMenu {{
-    background: white;
-    border: 1px solid {BORDER};
-    border-radius: {RADIUS}px;
-    padding: 6px;
-}}
-QMenu::item {{
-    padding: 8px 14px;
-    border-radius: 4px;
-    font-size: 13px;
-}}
-QMenu::item:selected {{
-    background: {ACCENT_TINT};
-    color: {ACCENT};
-}}
-QMenu::separator {{
-    height: 1px;
-    background: {BORDER};
-    margin: 6px 4px;
-}}
-
-QToolTip {{
-    background: {TEXT};
-    color: white;
-    border: none;
-    padding: 6px 8px;
-    border-radius: 4px;
-}}
-
-QTableWidget {{
-    background: white;
-    border: none;
-    gridline-color: {BORDER};
-    font-size: 13px;
-}}
-QHeaderView::section {{
-    background: #f8fafc;
-    color: {MUTED};
-    padding: 8px;
-    border: none;
-    border-bottom: 1px solid {BORDER};
-    font-weight: 700;
-    font-size: 11px;
-}}
-QTableWidget::item {{
-    padding: 6px;
-}}
-
-QScrollBar:vertical {{
-    width: 10px;
-    background: transparent;
-}}
-QScrollBar::handle:vertical {{
-    background: #cbd5e1;
-    border-radius: 5px;
-    min-height: 24px;
-}}
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
-    height: 0;
-}}
-"""
+STYLESHEET = load_qss("theme.qss")

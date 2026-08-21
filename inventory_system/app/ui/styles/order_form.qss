@@ -1,0 +1,153 @@
+/* Extra rules layered on top of theme.qss for the three transaction forms —
+ * New Bill, Purchase Order, Sales Order — and the shared items table they
+ * all embed (see app/ui/widgets/order_form_style.py). Applied via
+ * self.setStyleSheet(STYLESHEET + ORDER_FORM_STYLESHEET), so anything not
+ * overridden here still falls back to the normal app look.
+ *
+ * Uses the SAME design tokens as theme.qss (substituted from
+ * app/ui/theme.py by the same load_qss() loader) — deliberately not a
+ * separate palette, so these forms read as part of the same application as
+ * everything else.
+ */
+
+QDialog {
+    background: @CONTENT_BG@;
+}
+QLabel {
+    color: @TEXT@;
+}
+QWidget#formCard {
+    background: @CARD_BG@;
+    border: 1px solid @BORDER@;
+    border-radius: 12px;
+}
+QLabel#formTitle {
+    font-size: 20px;
+    font-weight: 700;
+    color: @TEXT@;
+}
+QLabel#formSubtitle {
+    font-size: 13px;
+    color: @MUTED@;
+}
+QLabel#sectionTitle {
+    font-size: 13px;
+    font-weight: 700;
+    color: @TEXT@;
+}
+QLabel#fieldLabel {
+    font-size: 12px;
+    font-weight: 600;
+    color: @MUTED@;
+}
+QLabel#secondaryText {
+    font-size: 12px;
+    color: @MUTED@;
+}
+QLabel#readOnlyValue {
+    font-size: 13px;
+    color: @TEXT@;
+    padding: 9px 2px;
+}
+QLabel#grandTotalLabel {
+    font-size: 13px;
+    font-weight: 700;
+    color: @MUTED@;
+}
+QLabel#grandTotalValue {
+    font-size: 24px;
+    font-weight: 800;
+    color: @ACCENT@;
+}
+QFrame#divider {
+    background: @BORDER@;
+    max-height: 1px;
+    border: none;
+}
+QLineEdit, QComboBox, QDateEdit, QTextEdit {
+    background: white;
+    color: @TEXT@;
+    border: 1px solid @BORDER@;
+    border-radius: 8px;
+    padding: 9px 12px;
+    font-size: 13px;
+    min-height: 18px;
+}
+QLineEdit:focus, QComboBox:focus, QDateEdit:focus, QTextEdit:focus {
+    border: 1px solid @ACCENT@;
+}
+QLineEdit:disabled, QComboBox:disabled, QDateEdit:disabled {
+    background: @DISABLED_BG@;
+    color: @MUTED@;
+}
+QComboBox::drop-down, QDateEdit::drop-down {
+    border: none;
+    width: 24px;
+}
+QComboBox QAbstractItemView {
+    background: @CARD_BG@;
+    color: @TEXT@;
+    border: 1px solid @BORDER@;
+    outline: none;
+    selection-background-color: @ACCENT@;
+    selection-color: white;
+}
+QTableWidget {
+    background: @CARD_BG@;
+    border: 1px solid @BORDER@;
+    border-radius: 8px;
+    gridline-color: @BORDER@;
+    font-size: 13px;
+}
+QHeaderView::section {
+    background: @SURFACE_MUTED@;
+    color: @MUTED@;
+    padding: 8px;
+    border: none;
+    border-bottom: 1px solid @BORDER@;
+    font-weight: 700;
+    font-size: 11px;
+}
+QTableWidget::item {
+    padding: 4px;
+}
+QPushButton#orderPrimary {
+    background: @ACCENT@;
+    color: white;
+    border: none;
+    border-radius: 8px;
+    padding: 11px 22px;
+    font-size: 13px;
+    font-weight: 700;
+}
+QPushButton#orderPrimary:hover {
+    background: @ACCENT_DARK@;
+}
+QPushButton#orderPrimary:disabled {
+    background: @DISABLED_BORDER@;
+    color: @DISABLED_FG@;
+}
+QPushButton#orderSecondary {
+    background: @CARD_BG@;
+    color: @TEXT@;
+    border: 1px solid @BORDER@;
+    border-radius: 8px;
+    padding: 11px 22px;
+    font-size: 13px;
+    font-weight: 600;
+}
+QPushButton#orderSecondary:hover {
+    background: @SURFACE_MUTED@;
+}
+QPushButton#orderGhost {
+    background: @ACCENT_TINT@;
+    color: @ACCENT@;
+    border: 1px solid @BORDER@;
+    border-radius: 8px;
+    padding: 8px 14px;
+    font-size: 12px;
+    font-weight: 600;
+}
+QPushButton#orderGhost:hover {
+    background: @ACCENT_TINT_HOVER@;
+}

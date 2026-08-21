@@ -51,6 +51,7 @@ def normalize_optional_text(value: str | None) -> str | None:
 def validate_product(*, sku: str, name: str, purchase_price: Decimal,
                      selling_price: Decimal, tax_percent: Decimal,
                      minimum_stock_level: Decimal, is_taxable: bool = True,
+                     excise_percent: Decimal = Decimal("0"),
                      unit_id=None, sub_unit_id=None,
                      sub_unit_conversion_factor: Decimal | None = None,
                      tertiary_unit_id=None,
@@ -74,6 +75,8 @@ def validate_product(*, sku: str, name: str, purchase_price: Decimal,
         errors.append("Tax percent must be between 0 and 100.")
     if not is_taxable and tax_percent != Decimal("0"):
         errors.append("A non-taxable product cannot have a tax percent above 0.")
+    if not (Decimal("0") <= excise_percent <= Decimal("100")):
+        errors.append("Excise percent must be between 0 and 100.")
     if minimum_stock_level < 0:
         errors.append("Minimum stock level (re-order point) cannot be negative.")
 

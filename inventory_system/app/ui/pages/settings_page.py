@@ -56,7 +56,7 @@ from app.services.backup_service import BackupService
 from app.services.inventory_service import InventoryService
 from app.services.organization_service import OrganizationService
 from app.ui import permission_hints
-from app.ui.theme import MUTED, RED
+from app.ui.theme import DISABLED_BORDER, MUTED, RED
 from app.ui.widgets.async_content import AsyncContentArea
 from app.ui.widgets.combo_utils import select_by_data as _select_by_data
 from app.ui.widgets.confirm_dialog import confirm_typed
@@ -398,7 +398,7 @@ class _LogoEditor(QWidget):
         self._preview = QLabel("No logo")
         self._preview.setFixedSize(_LOGO_PREVIEW_SIZE, _LOGO_PREVIEW_SIZE)
         self._preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._preview.setStyleSheet(f"color: {MUTED}; border: 1px dashed #cbd5e1; "
+        self._preview.setStyleSheet(f"color: {MUTED}; border: 1px dashed {DISABLED_BORDER}; "
                                     "border-radius: 6px; font-size: 11px;")
         layout.addWidget(self._preview)
 

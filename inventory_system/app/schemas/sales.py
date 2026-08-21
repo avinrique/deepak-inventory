@@ -11,6 +11,7 @@ from app.domain.sales import (
     PaymentMethod,
     SalesOrderStatus,
     line_discount,
+    line_excise_after_discount,
     line_subtotal_after_discount,
     line_tax_after_discount,
     line_total_after_discount,
@@ -132,6 +133,7 @@ class SalesOrderItemInput(BaseModel):
     unit_price: Decimal
     tax_percent: Decimal = Decimal("0")
     discount_percent: Decimal = Decimal("0")
+    excise_percent: Decimal = Decimal("0")
 
 
 class SalesOrderItemOut(BaseModel):
@@ -142,6 +144,7 @@ class SalesOrderItemOut(BaseModel):
     unit_price: Decimal
     tax_percent: Decimal
     discount_percent: Decimal
+    excise_percent: Decimal
 
     @property
     def quantity_outstanding(self) -> Decimal:
@@ -165,15 +168,27 @@ class SalesOrderItemOut(BaseModel):
                                        self.discount_percent, self.tax_percent)
 
     @property
+    def excise_amount(self) -> Decimal:
+        """Computed on the post-discount price, independently of tax — see
+        app.domain.sales.line_excise_after_discount.
+        """
+        return line_excise_after_discount(self.quantity_ordered, self.unit_price,
+                                          self.discount_percent, self.excise_percent)
+
+    @property
     def total(self) -> Decimal:
         return line_total_after_discount(self.quantity_ordered, self.unit_price,
-                                         self.discount_percent, self.tax_percent)
+                                         self.discount_percent, self.tax_percent,
+                                         excise_percent=self.excise_percent)
 
 
 class SalesOrderCreate(BaseModel):
     customer_id: uuid.UUID
     warehouse_id: uuid.UUID
     notes: str | None = None
+    delivery_date: date | None = None
+    reference_number: str | None = None
+    custom_fields: dict[str, str] | None = None
     items: list[SalesOrderItemInput]
 
 
@@ -184,6 +199,9 @@ class SalesOrderUpdate(BaseModel):
     customer_id: uuid.UUID | None = None
     warehouse_id: uuid.UUID | None = None
     notes: str | None = None
+    delivery_date: date | None = None
+    reference_number: str | None = None
+    custom_fields: dict[str, str] | None = None
     items: list[SalesOrderItemInput] | None = None
 
 
@@ -193,6 +211,9 @@ class SalesOrderOut(BaseModel):
     warehouse_id: uuid.UUID
     status: SalesOrderStatus
     notes: str | None
+    delivery_date: date | None
+    reference_number: str | None
+    custom_fields: dict[str, str] | None
     created_by: uuid.UUID
     confirmed_by: uuid.UUID | None
     confirmed_at: datetime | None
@@ -211,6 +232,10 @@ class SalesOrderOut(BaseModel):
     @property
     def tax_amount(self) -> Decimal:
         return sum((item.tax_amount for item in self.items), Decimal("0"))
+
+    @property
+    def excise_amount(self) -> Decimal:
+        return sum((item.excise_amount for item in self.items), Decimal("0"))
 
     @property
     def total_amount(self) -> Decimal:
@@ -245,6 +270,7 @@ class InvoiceOut(BaseModel):
     discount_amount: Decimal
     overall_discount_amount: Decimal
     tax_amount: Decimal
+    excise_amount: Decimal
     other_charges: Decimal
     total_amount: Decimal
     due_date: date | None
@@ -265,9 +291,11 @@ class InvoiceDocumentLine(BaseModel):
     unit_price: Decimal
     discount_percent: Decimal
     tax_percent: Decimal
+    excise_percent: Decimal
     line_subtotal: Decimal    # quantity * unit_price, before discount
     line_discount: Decimal
     line_tax: Decimal         # computed on the post-discount price
+    line_excise: Decimal      # computed on the post-discount price
     line_total: Decimal
 
 
@@ -306,6 +334,7 @@ class InvoiceDocumentData(BaseModel):
     discount_total: Decimal
     overall_discount: Decimal
     tax_total: Decimal
+    excise_total: Decimal
     other_charges: Decimal
     total: Decimal
     amount_paid: Decimal

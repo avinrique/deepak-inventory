@@ -394,6 +394,9 @@ class SalesOrderRepository(Protocol):
     def search(self, organization_id: uuid.UUID,
               filter: SalesOrderFilter) -> SalesOrderPage: ...
 
+    def reference_number_exists(self, organization_id: uuid.UUID, reference_number: str,
+                                exclude_id: uuid.UUID | None = None) -> bool: ...
+
     def confirm(self, organization_id: uuid.UUID, sales_order_id: uuid.UUID,
               confirmed_by: uuid.UUID) -> SalesOrderOut | None: ...
 
