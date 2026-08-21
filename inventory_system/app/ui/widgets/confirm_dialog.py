@@ -14,6 +14,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.ui.theme import STYLESHEET
+
 
 def confirm(parent: QWidget, title: str, message: str, confirm_label: str = "Confirm",
            danger: bool = False) -> bool:
@@ -26,6 +28,13 @@ def confirm(parent: QWidget, title: str, message: str, confirm_label: str = "Con
     cancel_button = box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
     cancel_button.setObjectName("flat")
     box.setDefaultButton(confirm_button)
+    # Must come after addButton()/setObjectName() above: QMessageBox doesn't
+    # reliably pick up an objectName-selector variant (#danger/#primary/
+    # #flat) for buttons added via addButton() unless the stylesheet is
+    # (re)applied once those buttons already exist — setting it earlier, or
+    # relying on the QApplication-level stylesheet alone, silently falls
+    # back to the bare default QPushButton look for these buttons.
+    box.setStyleSheet(STYLESHEET)
     box.exec()
     return box.clickedButton() is confirm_button
 
@@ -67,4 +76,7 @@ def confirm_typed(parent: QWidget, title: str, message: str, required_text: str,
         lambda text: ok_button.setEnabled(text == required_text))
     input_field.setFocus(Qt.FocusReason.OtherFocusReason)
 
+    # See the matching comment in confirm() above: must come after the
+    # button box (and its "danger" objectName) already exist.
+    dialog.setStyleSheet(STYLESHEET)
     return dialog.exec() == QDialog.DialogCode.Accepted
