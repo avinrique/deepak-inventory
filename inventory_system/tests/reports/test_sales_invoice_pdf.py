@@ -151,6 +151,26 @@ def test_invoice_pdf_omits_discount_row_when_zero(tmp_path):
     assert "Total" in text
 
 
+def test_invoice_pdf_shows_excise_duty_row_when_present(tmp_path):
+    path = str(tmp_path / "invoice.pdf")
+    items = [_line(excise_percent=Decimal("5"))]
+    render_invoice_pdf(_data(items=items), path)
+
+    text = _extract_text(path)
+    assert "Excise Duty" in text
+    assert "Excise" in text  # the items-table column header
+
+
+def test_invoice_pdf_omits_excise_duty_row_when_zero(tmp_path):
+    path = str(tmp_path / "invoice.pdf")
+    render_invoice_pdf(_data(items=[_line(excise_percent=Decimal("0"))]), path)
+
+    text = _extract_text(path)
+    assert "Excise Duty" not in text
+    assert "Subtotal" in text
+    assert "Total" in text
+
+
 def test_invoice_pdf_shows_due_date_when_present(tmp_path):
     path = str(tmp_path / "invoice.pdf")
     from datetime import date

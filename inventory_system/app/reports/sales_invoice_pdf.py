@@ -137,7 +137,7 @@ def _build_bill_to(data: InvoiceDocumentData) -> Table:
 
 
 def _build_items_table(data: InvoiceDocumentData) -> Table:
-    header = ["#", "Item", "Qty", "Unit Price", "Discount", "Tax", "Line Total"]
+    header = ["#", "Item", "Qty", "Unit Price", "Discount", "Excise", "Tax", "Line Total"]
     rows = [header]
     for i, item in enumerate(data.items, start=1):
         rows.append([
@@ -146,13 +146,15 @@ def _build_items_table(data: InvoiceDocumentData) -> Table:
             f"{item.quantity:,g}",
             _money(item.unit_price),
             (f"{item.discount_percent:,g}%" if item.discount_percent else "—"),
+            (f"{item.excise_percent:,g}%" if item.excise_percent else "—"),
             (f"{item.tax_percent:,g}%" if item.tax_percent else "—"),
             _money(item.line_total),
         ])
     rows[1:] = [[Paragraph(str(cell), _body_style) if isinstance(cell, str) and "<br/>" in cell
                 else cell for cell in row] for row in rows[1:]]
 
-    table = Table(rows, colWidths=[1 * cm, 6.2 * cm, 1.8 * cm, 2.5 * cm, 2 * cm, 1.5 * cm, 2.5 * cm],
+    table = Table(rows, colWidths=[1 * cm, 5 * cm, 1.5 * cm, 2.2 * cm, 1.7 * cm, 1.7 * cm,
+                                   1.3 * cm, 2.1 * cm],
                   repeatRows=1)
     table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), TABLE_HEADER_BG),
@@ -179,6 +181,8 @@ def _build_totals(data: InvoiceDocumentData) -> Table:
     if data.overall_discount:
         rows.append(["Overall Discount", f"-{_money(data.overall_discount)}"])
     rows.append(["Tax", _money(data.tax_total)])
+    if data.excise_total:
+        rows.append(["Excise Duty", _money(data.excise_total)])
     if data.other_charges:
         rows.append(["Other Charges", _money(data.other_charges)])
     # "Total" is always the third-from-last row — everything above is

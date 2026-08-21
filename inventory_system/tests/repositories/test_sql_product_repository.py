@@ -56,6 +56,26 @@ def test_create_then_get_by_id_round_trips(org_and_unit):
     assert isinstance(fetched.purchase_price, Decimal)
 
 
+def test_create_persists_excise_percent(org_and_unit):
+    org_id, unit_id = org_and_unit
+    repo = SqlProductRepository()
+    created = repo.create(org_id, _product("SKU-1", unit_id, excise_percent=Decimal("6.5")))
+
+    fetched = repo.get_by_id(org_id, created.id)
+    assert fetched.excise_percent == Decimal("6.5")
+
+
+def test_update_persists_excise_percent(org_and_unit):
+    from app.schemas.product import ProductUpdate
+
+    org_id, unit_id = org_and_unit
+    repo = SqlProductRepository()
+    created = repo.create(org_id, _product("SKU-1", unit_id, excise_percent=Decimal("0")))
+
+    updated = repo.update(org_id, created.id, ProductUpdate(excise_percent=Decimal("9.25")))
+    assert updated.excise_percent == Decimal("9.25")
+
+
 def test_duplicate_sku_within_same_org_rejected(org_and_unit):
     org_id, unit_id = org_and_unit
     repo = SqlProductRepository()

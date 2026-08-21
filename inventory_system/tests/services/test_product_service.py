@@ -216,6 +216,18 @@ def test_create_product_defaults_to_goods_type():
     assert created.product_type == ProductType.GOODS
 
 
+def test_create_product_persists_excise_percent():
+    service, _ = _service()
+    created = _create(service, excise_percent=Decimal("7.5"))
+    assert created.excise_percent == Decimal("7.5")
+
+
+def test_create_product_rejects_excise_percent_out_of_range():
+    service, _ = _service()
+    with pytest.raises(ProductValidationError):
+        service.create_product(_create_data(excise_percent=Decimal("101")))
+
+
 def test_create_service_product_does_not_require_warehouse():
     service, _ = _service()
     created = _create(service, sku="SVC-1", product_type=ProductType.SERVICE)
@@ -387,6 +399,21 @@ def test_create_product_accepts_future_expiry_date():
 
 
 # -- update ------------------------------------------------------------------#
+
+def test_update_product_persists_excise_percent():
+    service, _ = _service()
+    created = _create(service, excise_percent=Decimal("0"))
+    updated = service.update_product(created.id,
+                                     ProductUpdate(excise_percent=Decimal("12.5")))
+    assert updated.excise_percent == Decimal("12.5")
+
+
+def test_update_product_rejects_excise_percent_out_of_range():
+    service, _ = _service()
+    created = _create(service)
+    with pytest.raises(ProductValidationError):
+        service.update_product(created.id, ProductUpdate(excise_percent=Decimal("-1")))
+
 
 def test_update_product_renormalizes_sku():
     service, _ = _service()

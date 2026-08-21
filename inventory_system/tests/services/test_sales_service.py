@@ -16,6 +16,7 @@ from app.core.exceptions import (
     CreditLimitExceededError,
     CustomerNotFoundError,
     DuplicateCustomerCodeError,
+    DuplicateReferenceNumberError,
     InvalidSalesOrderTransitionError,
     ProductNotFoundError,
     SalesOrderItemNotFoundError,
@@ -643,6 +644,66 @@ def test_create_sales_order_requires_permission():
     limited, _, _, _, _ = _service(permissions=frozenset())
     with pytest.raises(PermissionDeniedError):
         limited.create_sales_order(_so_data(customer.id, product.id))
+
+
+def test_create_sales_order_rejects_duplicate_reference_number():
+    service, customer, product = _setup()
+    service.create_sales_order(_so_data(customer.id, product.id, reference_number="PO-1"))
+    with pytest.raises(DuplicateReferenceNumberError):
+        service.create_sales_order(_so_data(customer.id, product.id, reference_number="PO-1"))
+
+
+def test_create_sales_order_allows_blank_reference_number_on_multiple_orders():
+    service, customer, product = _setup()
+    service.create_sales_order(_so_data(customer.id, product.id))
+    # No error — a second order with no reference_number at all.
+    service.create_sales_order(_so_data(customer.id, product.id))
+
+
+def test_update_sales_order_rejects_duplicate_reference_number_excluding_self():
+    service, customer, product = _setup()
+    first = service.create_sales_order(_so_data(customer.id, product.id,
+                                                reference_number="PO-1"))
+    second = service.create_sales_order(_so_data(customer.id, product.id))
+
+    # Keeping its own reference number (a no-op update) must not raise.
+    service.update_sales_order(first.id, SalesOrderUpdate(reference_number="PO-1"))
+
+    with pytest.raises(DuplicateReferenceNumberError):
+        service.update_sales_order(second.id, SalesOrderUpdate(reference_number="PO-1"))
+
+
+def test_create_sales_order_credit_check_includes_excise_duty():
+    service, customer, product = _setup()
+    service.update_customer(customer.id, CustomerUpdate(credit_limit=Decimal("60")))
+
+    # 10 units x $5 = $50 subtotal, no tax, no excise -> $50 total, fits
+    # comfortably within the $60 limit.
+    fits = _so_data(customer.id, product.id, items=[
+        SalesOrderItemInput(product_id=product.id, quantity_ordered=Decimal("10"),
+                           unit_price=Decimal("5"), tax_percent=Decimal("0"),
+                           excise_percent=Decimal("0"))])
+    service.create_sales_order(fits)
+
+    # Same subtotal, but 30% excise pushes the total to $65 — over the $60
+    # limit. If excise were silently dropped from the credit check, this
+    # would incorrectly be allowed through.
+    exceeds = _so_data(customer.id, product.id, items=[
+        SalesOrderItemInput(product_id=product.id, quantity_ordered=Decimal("10"),
+                           unit_price=Decimal("5"), tax_percent=Decimal("0"),
+                           excise_percent=Decimal("30"))])
+    with pytest.raises(CreditLimitExceededError):
+        service.create_sales_order(exceeds)
+
+
+def test_validate_items_rejects_excise_percent_out_of_range():
+    service, customer, product = _setup()
+    with pytest.raises(SalesOrderValidationError):
+        service.create_sales_order(_so_data(
+            customer.id, product.id,
+            items=[SalesOrderItemInput(product_id=product.id, quantity_ordered=Decimal("1"),
+                                      unit_price=Decimal("5"), tax_percent=Decimal("0"),
+                                      excise_percent=Decimal("101"))]))
 
 
 def test_edit_sales_order_allowed_while_draft():

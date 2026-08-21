@@ -99,6 +99,76 @@ def test_product_added_via_add_product_flow_is_immediately_usable_in_a_sale(worl
         "Add Product opening-stock transaction wrote into")
 
 
+def test_product_excise_percent_survives_the_full_new_bill_finalize_chain(world):
+    """A product created with a nonzero excise_percent must have that
+    excise duty reflected end-to-end: product -> sales order item ->
+    finalize_new_bill's confirm+fulfill+invoice, landing correctly on the
+    generated Invoice's excise_amount/total_amount — proving excise
+    survives the whole atomic New-Bill finalize path with the same rigor
+    the discount/tax path already gets.
+    """
+    org_id, user_id = world["org_id"], world["user_id"]
+    sessions = _sessions(org_id, user_id)
+    product_service = ProductService(SqlProductRepository(), sessions, _NoopAuditLog(),
+                                     SqlWarehouseRepository(), SqlUnitRepository())
+
+    data = ProductCreate(sku="CHAIN-EXCISE", name="Excise Widget", unit_id=world["unit_id"],
+                         product_type=ProductType.GOODS, purchase_price=Decimal("10"),
+                         selling_price=Decimal("100"), tax_percent=Decimal("10"),
+                         excise_percent=Decimal("5"))
+    product, _opening = product_service.create_product(
+        data, warehouse_id=world["warehouse_id"], opening_quantity=Decimal("50"))
+
+    sales_repo = SqlSalesOrderRepository()
+    so = sales_repo.create(org_id, SalesOrderCreate(
+        customer_id=world["customer_id"], warehouse_id=world["warehouse_id"],
+        items=[SalesOrderItemInput(product_id=product.id, quantity_ordered=Decimal("10"),
+                                  unit_price=Decimal("100"), tax_percent=Decimal("10"),
+                                  excise_percent=Decimal("5"))]),
+        user_id)
+
+    from app.schemas.sales import FinalizeSaleRequest
+    result = sales_repo.finalize_new_bill(org_id, so.id, user_id, FinalizeSaleRequest())
+
+    # 10 x 100 = 1000 subtotal, no discount. 10% tax -> 100. 5% excise -> 50.
+    # total = 1000 + 100 + 50 = 1150.
+    assert result.invoice.tax_amount == Decimal("100.00")
+    assert result.invoice.excise_amount == Decimal("50.00")
+    assert result.invoice.total_amount == Decimal("1150.00")
+
+
+def test_delivery_date_reference_number_and_custom_fields_round_trip(world):
+    """A sales order's new fields must survive a real create -> get_by_id
+    round trip through the JSONB/scalar columns, untouched — not just the
+    ORM in-memory object create() itself returns.
+    """
+    import datetime as dt
+
+    org_id, user_id = world["org_id"], world["user_id"]
+    product_service = ProductService(SqlProductRepository(), _sessions(org_id, user_id),
+                                     _NoopAuditLog(), SqlWarehouseRepository(),
+                                     SqlUnitRepository())
+    data = ProductCreate(sku="CHAIN-REF", name="Ref Widget", unit_id=world["unit_id"],
+                         product_type=ProductType.GOODS, purchase_price=Decimal("10"),
+                         selling_price=Decimal("20"), tax_percent=Decimal("0"))
+    product, _opening = product_service.create_product(data)
+
+    sales_repo = SqlSalesOrderRepository()
+    delivery = dt.date(2026, 11, 20)
+    so = sales_repo.create(org_id, SalesOrderCreate(
+        customer_id=world["customer_id"], warehouse_id=world["warehouse_id"],
+        delivery_date=delivery, reference_number="CHAIN-PO-1",
+        custom_fields={"delivery_window": "morning", "gate": "3"},
+        items=[SalesOrderItemInput(product_id=product.id, quantity_ordered=Decimal("1"),
+                                  unit_price=Decimal("20"), tax_percent=Decimal("0"))]),
+        user_id)
+
+    fetched = sales_repo.get_by_id(org_id, so.id)
+    assert fetched.delivery_date == delivery
+    assert fetched.reference_number == "CHAIN-PO-1"
+    assert fetched.custom_fields == {"delivery_window": "morning", "gate": "3"}
+
+
 class _NoopAuditLog:
     def record(self, **kwargs):
         pass

@@ -71,10 +71,11 @@ def _repo():
 
 
 def _create_po(world, quantity=Decimal("100"), unit_price=Decimal("10"),
-              tax_percent=Decimal("13")):
+              tax_percent=Decimal("13"), custom_fields=None):
     repo = _repo()
     data = PurchaseOrderCreate(
         supplier_id=world["supplier_id"], warehouse_id=world["warehouse_id"],
+        custom_fields=custom_fields,
         items=[PurchaseOrderItemInput(product_id=world["product_id"],
                                       quantity_ordered=quantity, unit_price=unit_price,
                                       tax_percent=tax_percent)])
@@ -110,6 +111,12 @@ def test_update_replaces_items_wholesale(world):
     assert len(updated.items) == 1
     assert updated.items[0].product_id == world["product2_id"]
     assert updated.items[0].quantity_ordered == Decimal("5")
+
+
+def test_create_persists_custom_fields(world):
+    po = _create_po(world, custom_fields={"dock": "A1"})
+    fetched = _repo().get_by_id(world["org_id"], po.id)
+    assert fetched.custom_fields == {"dock": "A1"}
 
 
 def test_create_assigns_sequential_order_numbers_with_configured_prefix(world):

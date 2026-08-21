@@ -52,6 +52,21 @@ def test_validate_product_rejects_tax_percent_out_of_range():
         **_valid_kwargs(tax_percent=Decimal("-1")))
 
 
+def test_validate_product_rejects_excise_percent_out_of_range():
+    assert "Excise percent must be between 0 and 100." in validate_product(
+        **_valid_kwargs(excise_percent=Decimal("101")))
+    assert "Excise percent must be between 0 and 100." in validate_product(
+        **_valid_kwargs(excise_percent=Decimal("-1")))
+
+
+def test_validate_product_accepts_excise_independent_of_is_taxable():
+    # Excise duty is a distinct government levy, not coupled to
+    # is_taxable/tax_percent the way the tax fields are paired.
+    assert validate_product(
+        **_valid_kwargs(is_taxable=False, tax_percent=Decimal("0"),
+                        excise_percent=Decimal("5"))) == []
+
+
 def test_validate_product_rejects_negative_minimum_stock_level():
     errors = validate_product(**_valid_kwargs(minimum_stock_level=Decimal("-1")))
     assert "Minimum stock level (re-order point) cannot be negative." in errors

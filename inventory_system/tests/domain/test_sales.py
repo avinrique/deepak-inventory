@@ -5,6 +5,7 @@ from app.domain.sales import (
     can_transition,
     format_invoice_number,
     line_discount,
+    line_excise_after_discount,
     line_subtotal_after_discount,
     line_tax_after_discount,
     line_total_after_discount,
@@ -130,3 +131,58 @@ def test_zero_discount_matches_undiscounted_totals():
                                                                                   tax_pct)
     assert line_total_after_discount(qty, price, Decimal("0"), tax_pct) == line_total(
         qty, price, tax_pct)
+
+
+# -- excise duty --------------------------------------------------------- #
+
+def test_validate_sales_order_item_rejects_out_of_range_excise():
+    errors = validate_sales_order_item(quantity_ordered=Decimal("5"), unit_price=Decimal("10"),
+                                       tax_percent=Decimal("0"), excise_percent=Decimal("101"))
+    assert errors != []
+
+
+def test_validate_sales_order_item_accepts_valid_excise():
+    assert validate_sales_order_item(quantity_ordered=Decimal("5"), unit_price=Decimal("10"),
+                                     tax_percent=Decimal("13"),
+                                     excise_percent=Decimal("5")) == []
+
+
+def test_validate_sales_order_item_defaults_excise_to_zero():
+    assert validate_sales_order_item(quantity_ordered=Decimal("5"), unit_price=Decimal("10"),
+                                     tax_percent=Decimal("13")) == []
+
+
+def test_line_excise_zero_percent_is_zero():
+    assert line_excise_after_discount(Decimal("10"), Decimal("100"), Decimal("0"),
+                                      Decimal("0")) == Decimal("0")
+
+
+def test_excise_is_computed_on_the_discounted_price_not_the_list_price():
+    # Same base as tax — 1000 list, 10% discount -> 900 taxable base,
+    # 5% excise -> 45, not 50.
+    excise = line_excise_after_discount(Decimal("10"), Decimal("100"), Decimal("10"),
+                                        Decimal("5"))
+    assert excise == Decimal("45")
+
+
+def test_excise_and_tax_are_computed_independently_not_compounded():
+    # 1000 list, 10% discount -> 900 base. Tax 13% -> 117. Excise 5% -> 45.
+    # Neither is applied on top of the other — both come from the same
+    # post-discount base, then simply summed.
+    qty, price, discount = Decimal("10"), Decimal("100"), Decimal("10")
+    tax = line_tax_after_discount(qty, price, discount, Decimal("13"))
+    excise = line_excise_after_discount(qty, price, discount, Decimal("5"))
+    total = line_total_after_discount(qty, price, discount, Decimal("13"),
+                                      excise_percent=Decimal("5"))
+    assert tax == Decimal("117")
+    assert excise == Decimal("45")
+    assert total == Decimal("900") + tax + excise == Decimal("1062")
+
+
+def test_line_total_after_discount_excise_percent_defaults_to_zero():
+    # Backward compatibility: every existing call site that doesn't pass
+    # excise_percent must produce exactly the same total as before this
+    # parameter existed.
+    qty, price, discount, tax = Decimal("10"), Decimal("100"), Decimal("10"), Decimal("13")
+    assert (line_total_after_discount(qty, price, discount, tax)
+           == line_total_after_discount(qty, price, discount, tax, excise_percent=Decimal("0")))

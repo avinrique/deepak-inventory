@@ -393,6 +393,13 @@ class SqlSalesOrderRepository:
                                          tax_percent=item.tax_percent,
                                          discount_percent=item.discount_percent,
                                          excise_percent=item.excise_percent))
+            # Captured before the flush attempt: a failed flush leaves the
+            # session's transaction rolled back, and re-reading an
+            # attribute off `so` at that point would trigger a lazy-load
+            # against a dead transaction (PendingRollbackError) instead of
+            # returning the pending in-memory value.
+            attempted_reference_number = so.reference_number
+
             # Explicit flush even when only non-item fields changed — without
             # it, a reference_number collision would only surface as a raw
             # IntegrityError at get_session()'s implicit commit, bypassing
@@ -401,7 +408,7 @@ class SqlSalesOrderRepository:
                 db.flush()
             except IntegrityError as exc:
                 if constraint_name(exc) == "ix_sales_orders_org_reference_number":
-                    raise DuplicateReferenceNumberError(so.reference_number) from exc
+                    raise DuplicateReferenceNumberError(attempted_reference_number) from exc
                 raise
             if data.items is not None:
                 # See PurchaseOrderRepository.update — the already-loaded

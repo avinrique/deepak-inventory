@@ -68,21 +68,27 @@ def _stock_in(world, quantity=Decimal("100")):
 
 
 def _create_so(world, quantity=Decimal("10"), unit_price=Decimal("15"),
-              tax_percent=Decimal("13"), discount_percent=Decimal("0")):
+              tax_percent=Decimal("13"), discount_percent=Decimal("0"),
+              excise_percent=Decimal("0"), delivery_date=None, reference_number=None,
+              custom_fields=None):
     repo = _repo()
     data = SalesOrderCreate(
         customer_id=world["customer_id"], warehouse_id=world["warehouse_id"],
+        delivery_date=delivery_date, reference_number=reference_number,
+        custom_fields=custom_fields,
         items=[SalesOrderItemInput(product_id=world["product_id"], quantity_ordered=quantity,
                                    unit_price=unit_price, tax_percent=tax_percent,
-                                   discount_percent=discount_percent)])
+                                   discount_percent=discount_percent,
+                                   excise_percent=excise_percent)])
     return repo.create(world["org_id"], data, world["user_id"])
 
 
 def _confirmed_so(world, quantity=Decimal("10"), unit_price=Decimal("15"),
-                  tax_percent=Decimal("13"), discount_percent=Decimal("0")):
+                  tax_percent=Decimal("13"), discount_percent=Decimal("0"),
+                  excise_percent=Decimal("0")):
     repo = _repo()
     so = _create_so(world, quantity=quantity, unit_price=unit_price, tax_percent=tax_percent,
-                    discount_percent=discount_percent)
+                    discount_percent=discount_percent, excise_percent=excise_percent)
     return repo.confirm(world["org_id"], so.id, world["user_id"])
 
 
@@ -127,6 +133,92 @@ def test_update_preserves_line_discount_percent(world):
                                    unit_price=Decimal("30"), tax_percent=Decimal("0"),
                                    discount_percent=Decimal("10"))]))
     assert updated.items[0].discount_percent == Decimal("10")
+
+
+def test_create_persists_delivery_date_reference_number_and_excise_percent(world):
+    import datetime as dt
+
+    delivery = dt.date(2026, 9, 10)
+    so = _create_so(world, excise_percent=Decimal("7.5"), delivery_date=delivery,
+                    reference_number="PO-4711", custom_fields={"gate": "north"})
+
+    fetched = _repo().get_by_id(world["org_id"], so.id)
+    assert fetched.delivery_date == delivery
+    assert fetched.reference_number == "PO-4711"
+    assert fetched.custom_fields == {"gate": "north"}
+    assert fetched.items[0].excise_percent == Decimal("7.5")
+
+
+def test_create_allows_multiple_orders_with_no_reference_number(world):
+    _create_so(world)
+    _create_so(world)  # no error — blank reference_number is never a duplicate
+
+
+def test_create_rejects_duplicate_reference_number(world):
+    _create_so(world, reference_number="PO-1")
+    with pytest.raises(Exception):  # DuplicateReferenceNumberError
+        _create_so(world, reference_number="PO-1")
+
+
+def test_create_rejects_duplicate_reference_number_under_concurrent_writers(world):
+    """20 threads all try to create a sales order with the SAME
+    reference_number concurrently. The partial unique index must serialize
+    them: exactly one create succeeds, the other 19 raise
+    DuplicateReferenceNumberError — proving the IntegrityError->
+    DuplicateReferenceNumberError translation actually fires under a real
+    constraint violation, not just the service-layer pre-check.
+    """
+    from app.core.exceptions import DuplicateReferenceNumberError
+
+    successes = []
+    failures = []
+    lock = threading.Lock()
+
+    def attempt():
+        try:
+            so = _create_so(world, reference_number="RACE-1")
+            with lock:
+                successes.append(so.id)
+        except DuplicateReferenceNumberError:
+            with lock:
+                failures.append(1)
+
+    threads = [threading.Thread(target=attempt) for _ in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(successes) == 1
+    assert len(failures) == 19
+
+
+def test_update_persists_custom_fields_and_delivery_date(world):
+    import datetime as dt
+
+    so = _create_so(world)
+    delivery = dt.date(2026, 10, 1)
+    updated = _repo().update(world["org_id"], so.id, SalesOrderUpdate(
+        delivery_date=delivery, custom_fields={"floor": "3"}))
+    assert updated.delivery_date == delivery
+    assert updated.custom_fields == {"floor": "3"}
+
+
+def test_update_rejects_duplicate_reference_number_even_when_only_non_item_fields_change(world):
+    """Regression test: update() must flush and translate the constraint
+    violation even when data.items is None (only non-item fields changed)
+    — otherwise a reference_number collision on that path would surface as
+    a raw IntegrityError at get_session()'s implicit commit instead of
+    DuplicateReferenceNumberError.
+    """
+    from app.core.exceptions import DuplicateReferenceNumberError
+
+    _create_so(world, reference_number="TAKEN")
+    other = _create_so(world)
+
+    with pytest.raises(DuplicateReferenceNumberError):
+        _repo().update(world["org_id"], other.id,
+                       SalesOrderUpdate(reference_number="TAKEN"))
 
 
 def test_concurrent_update_and_confirm_cannot_both_apply_to_the_same_draft(world):
@@ -374,11 +466,12 @@ def test_fulfill_records_audit_log_entry(world):
 
 def _fulfilled_so(world, quantity=Decimal("10"), unit_price=Decimal("15"),
                   tax_percent=Decimal("13"), stock=Decimal("100"),
-                  discount_percent=Decimal("0")):
+                  discount_percent=Decimal("0"), excise_percent=Decimal("0")):
     _stock_in(world, stock)
     repo = _repo()
     so = _confirmed_so(world, quantity=quantity, unit_price=unit_price,
-                       tax_percent=tax_percent, discount_percent=discount_percent)
+                       tax_percent=tax_percent, discount_percent=discount_percent,
+                       excise_percent=excise_percent)
     return repo.fulfill_sale(world["org_id"], so.id, world["user_id"])
 
 
@@ -409,6 +502,21 @@ def test_generate_invoice_applies_discount_before_tax(world):
     assert invoice.discount_amount == Decimal("100.00")
     assert invoice.tax_amount == Decimal("90.00")
     assert invoice.total_amount == Decimal("990.00")
+
+
+def test_generate_invoice_computes_excise_amount_independently_of_tax(world):
+    repo = _repo()
+    # 10 x 100 = 1000 subtotal, no discount. 10% tax -> 100. 5% excise ->
+    # 50 — computed on the same base as tax, not folded into tax_amount,
+    # and not compounded on top of it. total = 1000 + 100 + 50 = 1150.
+    so = _fulfilled_so(world, quantity=Decimal("10"), unit_price=Decimal("100"),
+                       tax_percent=Decimal("10"), excise_percent=Decimal("5"))
+
+    invoice = repo.generate_invoice(world["org_id"], so.id, world["user_id"])
+
+    assert invoice.tax_amount == Decimal("100.00")
+    assert invoice.excise_amount == Decimal("50.00")
+    assert invoice.total_amount == Decimal("1150.00")
 
 
 def test_get_invoice_document_assembles_company_customer_and_line_data(world):
@@ -915,7 +1023,7 @@ def test_finalize_new_bill_persists_due_date_overall_discount_and_other_charges(
     _stock_in(world, Decimal("50"))
     repo = _repo()
     so = _create_so(world, quantity=Decimal("10"), unit_price=Decimal("100"),
-                    tax_percent=Decimal("10"))
+                    tax_percent=Decimal("10"), excise_percent=Decimal("5"))
     due = dt.date(2026, 9, 1)
 
     result = repo.finalize_new_bill(
@@ -927,8 +1035,29 @@ def test_finalize_new_bill_persists_due_date_overall_discount_and_other_charges(
     assert invoice.due_date == due
     assert invoice.overall_discount_amount == Decimal("50")
     assert invoice.other_charges == Decimal("20")
-    # subtotal 1000 - item_discount 0 - overall_discount 50 + tax 100 + other_charges 20 = 1070
-    assert invoice.total_amount == Decimal("1070.00")
+    assert invoice.excise_amount == Decimal("50.00")
+    # subtotal 1000 - item_discount 0 - overall_discount 50 + tax 100 +
+    # excise 50 + other_charges 20 = 1120
+    assert invoice.total_amount == Decimal("1120.00")
+
+
+def test_finalize_new_bill_preserves_delivery_date_reference_number_and_custom_fields(world):
+    import datetime as dt
+
+    from app.schemas.sales import FinalizeSaleRequest
+
+    _stock_in(world, Decimal("50"))
+    delivery = dt.date(2026, 9, 5)
+    so = _create_so(world, quantity=Decimal("10"), unit_price=Decimal("100"),
+                    delivery_date=delivery, reference_number="PO-99",
+                    custom_fields={"dock": "B2"})
+
+    result = _repo().finalize_new_bill(world["org_id"], so.id, world["user_id"],
+                                       FinalizeSaleRequest())
+
+    assert result.sales_order.delivery_date == delivery
+    assert result.sales_order.reference_number == "PO-99"
+    assert result.sales_order.custom_fields == {"dock": "B2"}
 
 
 def test_finalize_new_bill_rolls_back_everything_on_insufficient_stock(world):
