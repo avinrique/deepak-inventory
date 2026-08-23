@@ -541,6 +541,41 @@ QTableWidget::item:hover {
     background: @SURFACE_MUTED@;
 }
 
+/* Pinned totals footer under the Purchase/Sales transaction-register
+   tables (app/ui/widgets/totals_table.py). Mirrors the header's surface
+   so it reads as a fixed footer, not just another data row. */
+QTableWidget#totalsRow {
+    background: @SURFACE_MUTED@;
+    border: none;
+    border-top: 2px solid @BORDER@;
+    gridline-color: @SURFACE_MUTED@;
+    font-size: 13px;
+    font-weight: 700;
+}
+QTableWidget#totalsRow::item {
+    padding: 6px;
+    color: @TEXT@;
+}
+/* Overrides the generic QTableWidget::item:selected/:hover rules above,
+   which would otherwise tint this row even though it never accepts
+   selection or mouse interaction. */
+QTableWidget#totalsRow::item:selected {
+    background: @SURFACE_MUTED@;
+    color: @TEXT@;
+}
+QTableWidget#totalsRow::item:hover {
+    background: @SURFACE_MUTED@;
+}
+
+/* Hover affordance for the server-sorted transaction-list headers only
+   (app/ui/widgets/totals_table.py sets this objectName) — scoped so
+   tables elsewhere that don't respond to a header click don't imply they
+   do. */
+QTableWidget#sortableTransactionTable QHeaderView::section:hover {
+    background: @ACCENT_TINT@;
+    color: @TEXT@;
+}
+
 QScrollBar:vertical {
     width: 10px;
     background: transparent;

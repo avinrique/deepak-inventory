@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import selectinload
 
 from app.core.exceptions import (
     InvalidPurchaseOrderTransitionError,
@@ -49,8 +50,10 @@ from app.models import (
     PurchaseReturn,
     User,
 )
+from app.repositories.sql import transaction_list
 from app.repositories.sql.audit_log_repository import record_audit_log
 from app.repositories.sql.inventory_repository import _apply
+from app.schemas.transactions import TransactionListPage, TransactionListRow
 from app.schemas.purchasing import (
     GoodsReceiptItemOut,
     GoodsReceiptLineInput,
@@ -74,7 +77,9 @@ def _item_to_out(item: PurchaseOrderItem) -> PurchaseOrderItemOut:
 
 def _to_out(po: PurchaseOrder) -> PurchaseOrderOut:
     return PurchaseOrderOut(
-        id=po.id, order_number=po.order_number, supplier_id=po.supplier_id,
+        id=po.id, order_number=po.order_number,
+        supplier_invoice_number=po.supplier_invoice_number,
+        reference_number=po.reference_number, supplier_id=po.supplier_id,
         warehouse_id=po.warehouse_id, status=po.status,
         expected_date=po.expected_date, notes=po.notes, custom_fields=po.custom_fields,
         created_by=po.created_by,
@@ -141,6 +146,8 @@ class SqlPurchaseOrderRepository:
             seq.next_value += 1
 
             po = PurchaseOrder(organization_id=organization_id, order_number=order_number,
+                               supplier_invoice_number=data.supplier_invoice_number or None,
+                               reference_number=data.reference_number or None,
                                supplier_id=data.supplier_id,
                                warehouse_id=data.warehouse_id,
                                status=PurchaseOrderStatus.DRAFT,
@@ -191,6 +198,20 @@ class SqlPurchaseOrderRepository:
                 return None
             return _to_out(po)
 
+    def list_transactions(self, organization_id: uuid.UUID,
+                          filter: PurchaseOrderFilter) -> TransactionListPage:
+        """The purchase register — flattened rows plus totals over the
+        whole filtered set. See app.repositories.sql.transaction_list for
+        why the money is summed in SQL rather than Python.
+        """
+        with get_session() as db:
+            return transaction_list.purchase_list(db, organization_id, filter)
+
+    def export_transactions(self, organization_id: uuid.UUID,
+                            filter: PurchaseOrderFilter) -> list[TransactionListRow]:
+        with get_session() as db:
+            return transaction_list.purchase_export_rows(db, organization_id, filter)
+
     def search(self, organization_id: uuid.UUID,
               filter: PurchaseOrderFilter) -> PurchaseOrderPage:
         with get_session() as db:
@@ -202,6 +223,9 @@ class SqlPurchaseOrderRepository:
                 query = query.filter(PurchaseOrder.status == filter.status)
 
             total = query.count()
+            # _to_out touches po.items, which lazy-loads one query per row
+            # without this — 25 extra round-trips on a default page.
+            query = query.options(selectinload(PurchaseOrder.items))
             query = query.order_by(PurchaseOrder.created_at.desc())
 
             page = max(1, filter.page)

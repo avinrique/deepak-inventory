@@ -21,7 +21,7 @@ import uuid
 from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import BigInteger, CheckConstraint, Date, DateTime, Enum, ForeignKey, Index, Numeric, String, Text, func
+from sqlalchemy import BigInteger, CheckConstraint, Date, DateTime, Enum, ForeignKey, Index, Numeric, String, Text, func, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -36,6 +36,13 @@ class PurchaseOrder(UUIDPKMixin, TimestampMixin, Base):
         Index("ix_purchase_orders_org_supplier", "organization_id", "supplier_id"),
         Index("ix_purchase_orders_org_order_number", "organization_id", "order_number",
              unique=True),
+        # One supplier can't bill the same invoice number twice. Scoped per
+        # (org, supplier) — two different suppliers legitimately issue
+        # invoice "001". Partial, so leaving it blank stays unconstrained.
+        Index("ix_purchase_orders_org_supplier_invoice_number",
+              "organization_id", "supplier_id", "supplier_invoice_number", unique=True,
+              postgresql_where=text("supplier_invoice_number IS NOT NULL")),
+        Index("ix_purchase_orders_org_created_at", "organization_id", "created_at"),
     )
 
     organization_id: Mapped[uuid.UUID] = mapped_column(
@@ -47,6 +54,12 @@ class PurchaseOrder(UUIDPKMixin, TimestampMixin, Base):
     # created before this column existed (pre-migration) don't need a risky
     # backfill; every row created going forward always gets one.
     order_number: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    # The number printed on the *supplier's* bill, entered by hand — what a
+    # purchase register reconciles against, unlike order_number which this
+    # system generates. Free external reference alongside it, mirroring
+    # SalesOrder.reference_number.
+    supplier_invoice_number: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    reference_number: Mapped[str | None] = mapped_column(String(120), nullable=True)
     # RESTRICT: a supplier/warehouse referenced by a purchase order can't be
     # deleted out from under it — same policy as Product.category_id.
     supplier_id: Mapped[uuid.UUID] = mapped_column(

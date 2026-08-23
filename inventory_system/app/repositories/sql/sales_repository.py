@@ -43,6 +43,7 @@ from decimal import Decimal
 
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import selectinload
 
 from app.core.exceptions import (
     CreditLimitExceededError,
@@ -80,10 +81,12 @@ from app.models import (
     SalesReturn,
     User,
 )
+from app.repositories.sql import transaction_list
 from app.repositories.sql.audit_log_repository import record_audit_log
 from app.repositories.sql.constraint_utils import constraint_name
 from app.repositories.sql.customer_repository import compute_customer_balance
 from app.repositories.sql.inventory_repository import _apply
+from app.schemas.transactions import TransactionListPage, TransactionListRow
 from app.schemas.sales import (
     FinalizeSaleRequest,
     FinalizeSaleResult,
@@ -426,6 +429,20 @@ class SqlSalesOrderRepository:
                 return None
             return _to_out(so)
 
+    def list_transactions(self, organization_id: uuid.UUID,
+                          filter: SalesOrderFilter) -> TransactionListPage:
+        """The sales register — flattened rows plus totals over the whole
+        filtered set. See app.repositories.sql.transaction_list for why the
+        money is summed in SQL rather than Python.
+        """
+        with get_session() as db:
+            return transaction_list.sales_list(db, organization_id, filter)
+
+    def export_transactions(self, organization_id: uuid.UUID,
+                            filter: SalesOrderFilter) -> list[TransactionListRow]:
+        with get_session() as db:
+            return transaction_list.sales_export_rows(db, organization_id, filter)
+
     def search(self, organization_id: uuid.UUID,
               filter: SalesOrderFilter) -> SalesOrderPage:
         with get_session() as db:
@@ -436,6 +453,9 @@ class SqlSalesOrderRepository:
                 query = query.filter(SalesOrder.status == filter.status)
 
             total = query.count()
+            # _to_out touches so.items, which lazy-loads one query per row
+            # without this — 25 extra round-trips on a default page.
+            query = query.options(selectinload(SalesOrder.items))
             query = query.order_by(SalesOrder.created_at.desc())
 
             page = max(1, filter.page)

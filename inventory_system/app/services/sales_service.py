@@ -45,6 +45,7 @@ from app.repositories.interfaces import (
     SalesOrderRepository,
     WarehouseRepository,
 )
+from app.schemas.transactions import TransactionListPage, TransactionListRow
 from app.schemas.sales import (
     CustomerBalance,
     CustomerCreate,
@@ -346,6 +347,18 @@ class SalesService:
     @require_permission("sales.view")
     def search_sales_orders(self, filter: SalesOrderFilter) -> SalesOrderPage:
         return self._sales_orders.search(self._organization_id(), filter)
+
+    @require_permission("sales.view")
+    def list_sales_transactions(self, filter: SalesOrderFilter) -> TransactionListPage:
+        """The Sales register — same filter shape as search_sales_orders,
+        but flattened rows plus totals over the whole filtered set. See
+        app.repositories.sql.transaction_list.
+        """
+        return self._sales_orders.list_transactions(self._organization_id(), filter)
+
+    @require_permission("sales.view")
+    def export_sales_transactions(self, filter: SalesOrderFilter) -> list[TransactionListRow]:
+        return self._sales_orders.export_transactions(self._organization_id(), filter)
 
     def _transition_or_raise(self, sales_order_id: uuid.UUID,
                              target: SalesOrderStatus) -> SalesOrderOut:

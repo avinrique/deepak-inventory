@@ -35,6 +35,7 @@ from app.repositories.interfaces import (
     SupplierRepository,
     WarehouseRepository,
 )
+from app.schemas.transactions import TransactionListPage, TransactionListRow
 from app.schemas.purchasing import (
     GoodsReceiptOut,
     PurchaseOrderCreate,
@@ -167,6 +168,19 @@ class PurchaseService:
     @require_permission("purchases.view")
     def search_purchase_orders(self, filter: PurchaseOrderFilter) -> PurchaseOrderPage:
         return self._purchase_orders.search(self._organization_id(), filter)
+
+    @require_permission("purchases.view")
+    def list_purchase_transactions(self, filter: PurchaseOrderFilter) -> TransactionListPage:
+        """The Purchases register — same filter shape as
+        search_purchase_orders, but flattened rows plus totals over the
+        whole filtered set. See app.repositories.sql.transaction_list.
+        """
+        return self._purchase_orders.list_transactions(self._organization_id(), filter)
+
+    @require_permission("purchases.view")
+    def export_purchase_transactions(self,
+                                     filter: PurchaseOrderFilter) -> list[TransactionListRow]:
+        return self._purchase_orders.export_transactions(self._organization_id(), filter)
 
     def _transition_or_raise(self, purchase_order_id: uuid.UUID,
                              target: PurchaseOrderStatus) -> PurchaseOrderOut:

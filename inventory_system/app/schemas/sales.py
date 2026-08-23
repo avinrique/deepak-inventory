@@ -245,6 +245,17 @@ class SalesOrderOut(BaseModel):
 class SalesOrderFilter(BaseModel):
     customer_id: uuid.UUID | None = None
     status: SalesOrderStatus | None = None
+    # Case-insensitive substring match across invoice number, reference
+    # number, and customer name.
+    search: str | None = None
+    # Both bounds inclusive, against created_at. The dates are interpreted
+    # as whole UTC days — see app.repositories.sql.transaction_list.
+    date_from: date | None = None
+    date_to: date | None = None
+    # Resolved against a whitelist in transaction_list; an unrecognised
+    # value falls back to created_at rather than reaching SQL.
+    sort_by: str = "created_at"
+    sort_desc: bool = True
     page: int = 1
     page_size: int = 25
 

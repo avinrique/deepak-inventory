@@ -118,6 +118,8 @@ class FakePurchaseOrderRepository:
 
     def __init__(self):
         self.orders: dict[uuid.UUID, PurchaseOrderOut] = {}
+        self.list_transactions_called = False
+        self.export_transactions_called = False
 
     def create(self, organization_id, data: PurchaseOrderCreate, created_by) -> PurchaseOrderOut:
         now = datetime.now(timezone.utc)
@@ -157,6 +159,14 @@ class FakePurchaseOrderRepository:
 
     def search(self, organization_id, filter):
         raise NotImplementedError  # not exercised by these tests
+
+    def list_transactions(self, organization_id, filter):
+        self.list_transactions_called = True
+        raise NotImplementedError  # only reached if the permission gate lets a call through
+
+    def export_transactions(self, organization_id, filter):
+        self.export_transactions_called = True
+        raise NotImplementedError  # only reached if the permission gate lets a call through
 
     def _set_status(self, purchase_order_id, status, **extra):
         existing = self.orders[purchase_order_id]
@@ -361,6 +371,22 @@ def test_create_purchase_order_requires_permission():
     limited, _, _, _ = _service(permissions=frozenset())
     with pytest.raises(PermissionDeniedError):
         limited.create_purchase_order(_po_data(supplier.id, product.id))
+
+
+def test_list_purchase_transactions_requires_permission():
+    from app.schemas.purchasing import PurchaseOrderFilter
+    limited, _, purchase_orders, _ = _service(permissions=frozenset())
+    with pytest.raises(PermissionDeniedError):
+        limited.list_purchase_transactions(PurchaseOrderFilter())
+    assert purchase_orders.list_transactions_called is False
+
+
+def test_export_purchase_transactions_requires_permission():
+    from app.schemas.purchasing import PurchaseOrderFilter
+    limited, _, purchase_orders, _ = _service(permissions=frozenset())
+    with pytest.raises(PermissionDeniedError):
+        limited.export_purchase_transactions(PurchaseOrderFilter())
+    assert purchase_orders.export_transactions_called is False
 
 
 def test_edit_purchase_order_allowed_while_draft():

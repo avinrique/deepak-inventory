@@ -19,6 +19,7 @@ from app.domain.product import ProductStatus, ProductType
 from app.schemas.product import ProductOut, UnitOut
 from app.ui.widgets.transaction_items_table import (
     _COL_HSN,
+    _COL_PRICE,
     _COL_QTY,
     TransactionItemsTable,
 )
@@ -164,3 +165,103 @@ def test_compute_totals_excise_always_zero_when_discount_disabled(qapp):
 # column in _remove_row_widget/_renumber_rows), so the missing automated
 # coverage here is a pre-existing gap in the test harness's Qt-lifetime
 # handling, not a regression risk from this change.
+
+
+# -- add_row overrides (seeding an existing order's saved values) --------- #
+
+def test_add_row_override_wins_over_product_defaults(qapp):
+    """A saved order line's price/tax reflect what was actually agreed —
+    they must not be silently replaced by the product's current catalog
+    values (which may have changed since).
+    """
+    table = _table(qapp)
+    product = _product(selling_price=Decimal("50"), tax_percent=Decimal("13"))
+    table.add_row(product, quantity=Decimal("3"), unit_price=Decimal("42.50"),
+                 tax_percent=Decimal("0"), discount_percent=Decimal("10"),
+                 excise_percent=Decimal("2"))
+
+    assert table._table.cellWidget(0, _COL_QTY).text() == "3"
+    assert table._table.cellWidget(0, _COL_PRICE).text() == "42.50"
+    assert table._table.cellWidget(0, table._col_tax).text() == "0"
+    assert table._table.cellWidget(0, table._col_discount).text() == "10"
+    assert table._table.cellWidget(0, table._col_excise).text() == "2"
+
+
+def test_add_row_with_no_overrides_still_uses_product_defaults(qapp):
+    table = _table(qapp)
+    table.add_row(_product(tax_percent=Decimal("13")))
+    assert table._table.cellWidget(0, table._col_tax).text() == "13"
+
+
+# -- set_items -------------------------------------------------------------- #
+
+def test_set_items_replaces_existing_rows(qapp):
+    table = _table(qapp)
+    table.add_row(_product(name="Old Product"))
+    assert table._table.rowCount() == 1
+
+    new_product = _product(name="New Product", sku="SKU-2")
+    table.set_items([(new_product, {"quantity": Decimal("5"),
+                                    "unit_price": Decimal("20"),
+                                    "tax_percent": Decimal("13"),
+                                    "discount_percent": Decimal("0"),
+                                    "excise_percent": Decimal("0")})])
+
+    assert table._table.rowCount() == 1
+    assert table._table.item(0, 1).text() == "New Product"
+    assert table._table.cellWidget(0, _COL_QTY).text() == "5"
+
+
+def test_set_items_with_empty_list_clears_the_table(qapp):
+    table = _table(qapp)
+    table.add_row(_product())
+    table.set_items([])
+    assert table._table.rowCount() == 0
+    assert table.is_empty()
+
+
+def test_set_items_round_trips_through_collect_items(qapp):
+    table = _table(qapp)
+    product = _product()
+    table.set_items([(product, {"quantity": Decimal("7"), "unit_price": Decimal("99.99"),
+                                "tax_percent": Decimal("13"), "discount_percent": Decimal("5"),
+                                "excise_percent": Decimal("1")})])
+
+    items, errors = table.collect_items()
+    assert errors == []
+    assert items[0]["quantity"] == Decimal("7")
+    assert items[0]["unit_price"] == Decimal("99.99")
+    assert items[0]["discount_percent"] == Decimal("5")
+    assert items[0]["excise_percent"] == Decimal("1")
+
+
+# -- set_read_only ------------------------------------------------------------#
+
+def test_read_only_disables_search_and_add(qapp):
+    table = _table(qapp)
+    table.set_read_only(True)
+    assert table._search.isEnabled() is False
+    assert table._results.isEnabled() is False
+    assert table._add_button.isEnabled() is False
+
+
+def test_read_only_makes_existing_row_fields_read_only(qapp):
+    table = _table(qapp)
+    table.add_row(_product())
+    table.set_read_only(True)
+
+    assert table._table.cellWidget(0, _COL_QTY).isReadOnly() is True
+    assert table._table.cellWidget(0, table._col_tax).isReadOnly() is True
+    assert table._table.cellWidget(0, table._col_action).isVisible() is False
+
+
+def test_read_only_applied_to_rows_added_after_the_call(qapp):
+    """set_items() (used to seed View/Edit) calls add_row() after
+    set_read_only() may already be in effect on a reused widget instance
+    — new rows must come in already locked, not just the ones present at
+    the time set_read_only() was called.
+    """
+    table = _table(qapp)
+    table.set_read_only(True)
+    table.add_row(_product())
+    assert table._table.cellWidget(0, _COL_QTY).isReadOnly() is True

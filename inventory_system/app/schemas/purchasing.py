@@ -78,6 +78,8 @@ class PurchaseOrderItemOut(BaseModel):
 class PurchaseOrderCreate(BaseModel):
     supplier_id: uuid.UUID
     warehouse_id: uuid.UUID
+    supplier_invoice_number: str | None = None
+    reference_number: str | None = None
     expected_date: date | None = None
     notes: str | None = None
     custom_fields: dict[str, str] | None = None
@@ -90,6 +92,8 @@ class PurchaseOrderUpdate(BaseModel):
     """
     supplier_id: uuid.UUID | None = None
     warehouse_id: uuid.UUID | None = None
+    supplier_invoice_number: str | None = None
+    reference_number: str | None = None
     expected_date: date | None = None
     notes: str | None = None
     custom_fields: dict[str, str] | None = None
@@ -99,6 +103,8 @@ class PurchaseOrderUpdate(BaseModel):
 class PurchaseOrderOut(BaseModel):
     id: uuid.UUID
     order_number: str | None
+    supplier_invoice_number: str | None = None
+    reference_number: str | None = None
     supplier_id: uuid.UUID
     warehouse_id: uuid.UUID
     status: PurchaseOrderStatus
@@ -128,6 +134,17 @@ class PurchaseOrderOut(BaseModel):
 class PurchaseOrderFilter(BaseModel):
     supplier_id: uuid.UUID | None = None
     status: PurchaseOrderStatus | None = None
+    # Case-insensitive substring match across order number, supplier
+    # invoice number, reference number, and supplier name.
+    search: str | None = None
+    # Both bounds inclusive, against created_at. The dates are interpreted
+    # as whole UTC days — see app.repositories.sql.transaction_list.
+    date_from: date | None = None
+    date_to: date | None = None
+    # Resolved against a whitelist in transaction_list; an unrecognised
+    # value falls back to created_at rather than reaching SQL.
+    sort_by: str = "created_at"
+    sort_desc: bool = True
     page: int = 1
     page_size: int = 25
 

@@ -23,6 +23,7 @@ from app.schemas.inventory import (
 from app.schemas.organization import OrganizationOut, OrganizationUpdate
 from app.schemas.party import PartyOut
 from app.schemas.reporting import DashboardMetrics, ReportFilter, ReportResult
+from app.schemas.transactions import TransactionListPage, TransactionListRow
 from app.schemas.sales import (
     CustomerBalance,
     CustomerCreate,
@@ -331,6 +332,12 @@ class PurchaseOrderRepository(Protocol):
     def search(self, organization_id: uuid.UUID,
               filter: PurchaseOrderFilter) -> PurchaseOrderPage: ...
 
+    def list_transactions(self, organization_id: uuid.UUID,
+                          filter: PurchaseOrderFilter) -> TransactionListPage: ...
+
+    def export_transactions(self, organization_id: uuid.UUID,
+                            filter: PurchaseOrderFilter) -> list[TransactionListRow]: ...
+
     def submit(self, organization_id: uuid.UUID,
               purchase_order_id: uuid.UUID) -> PurchaseOrderOut | None: ...
 
@@ -393,6 +400,12 @@ class SalesOrderRepository(Protocol):
 
     def search(self, organization_id: uuid.UUID,
               filter: SalesOrderFilter) -> SalesOrderPage: ...
+
+    def list_transactions(self, organization_id: uuid.UUID,
+                          filter: SalesOrderFilter) -> TransactionListPage: ...
+
+    def export_transactions(self, organization_id: uuid.UUID,
+                            filter: SalesOrderFilter) -> list[TransactionListRow]: ...
 
     def reference_number_exists(self, organization_id: uuid.UUID, reference_number: str,
                                 exclude_id: uuid.UUID | None = None) -> bool: ...

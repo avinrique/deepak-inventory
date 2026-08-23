@@ -166,6 +166,8 @@ class FakeSalesOrderRepository:
         self.orders: dict[uuid.UUID, SalesOrderOut] = {}
         self.invoices: dict[uuid.UUID, InvoiceOut] = {}
         self._next_invoice_seq = 1
+        self.list_transactions_called = False
+        self.export_transactions_called = False
 
     def create(self, organization_id, data: SalesOrderCreate, created_by) -> SalesOrderOut:
         now = datetime.now(timezone.utc)
@@ -213,6 +215,14 @@ class FakeSalesOrderRepository:
 
     def search(self, organization_id, filter):
         raise NotImplementedError  # not exercised by these tests
+
+    def list_transactions(self, organization_id, filter):
+        self.list_transactions_called = True
+        raise NotImplementedError  # only reached if the permission gate lets a call through
+
+    def export_transactions(self, organization_id, filter):
+        self.export_transactions_called = True
+        raise NotImplementedError  # only reached if the permission gate lets a call through
 
     def confirm(self, organization_id, sales_order_id, confirmed_by):
         existing = self.orders[sales_order_id]
@@ -644,6 +654,22 @@ def test_create_sales_order_requires_permission():
     limited, _, _, _, _ = _service(permissions=frozenset())
     with pytest.raises(PermissionDeniedError):
         limited.create_sales_order(_so_data(customer.id, product.id))
+
+
+def test_list_sales_transactions_requires_permission():
+    from app.schemas.sales import SalesOrderFilter
+    limited, _, sales_orders, _, _ = _service(permissions=frozenset())
+    with pytest.raises(PermissionDeniedError):
+        limited.list_sales_transactions(SalesOrderFilter())
+    assert sales_orders.list_transactions_called is False
+
+
+def test_export_sales_transactions_requires_permission():
+    from app.schemas.sales import SalesOrderFilter
+    limited, _, sales_orders, _, _ = _service(permissions=frozenset())
+    with pytest.raises(PermissionDeniedError):
+        limited.export_sales_transactions(SalesOrderFilter())
+    assert sales_orders.export_transactions_called is False
 
 
 def test_create_sales_order_rejects_duplicate_reference_number():

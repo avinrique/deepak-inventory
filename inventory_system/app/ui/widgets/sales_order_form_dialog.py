@@ -14,6 +14,7 @@ Record Payment actions already on the Sales list (or via the New Bill
 page, which does the full create-through-invoice flow in one step); this
 dialog deliberately doesn't duplicate that finalize logic.
 """
+import uuid
 from datetime import datetime
 from decimal import Decimal
 
@@ -43,7 +44,15 @@ from app.core.exceptions import (
     WarehouseNotFoundError,
 )
 from app.schemas.inventory import WarehouseOut
-from app.schemas.sales import CustomerBalance, CustomerOut, SalesOrderCreate, SalesOrderItemInput
+from app.schemas.product import ProductOut
+from app.schemas.sales import (
+    CustomerBalance,
+    CustomerOut,
+    SalesOrderCreate,
+    SalesOrderItemInput,
+    SalesOrderOut,
+    SalesOrderUpdate,
+)
 from app.security.authorization import PermissionDeniedError
 from app.services.inventory_service import InventoryService
 from app.services.product_service import ProductService
@@ -60,15 +69,51 @@ def _money(value: Decimal) -> str:
     return f"{value:,.2f}"
 
 
+class _PlaceholderCustomer:
+    """Stands in for a since-deactivated customer in the picker so an
+    existing order's customer_id has somewhere to resolve to — see
+    SalesOrderFormDialog's docstring on ``party_name``. _populate_customers
+    only ever reads .id/.name off entries in self._customers, so this needs
+    nothing more than that.
+    """
+
+    def __init__(self, id, name: str):
+        self.id = id
+        self.name = name
+
+
 class SalesOrderFormDialog(QDialog):
     def __init__(self, sales_service: SalesService, product_service: ProductService,
                 inventory_service: InventoryService, customers: list[CustomerOut],
-                warehouses: list[WarehouseOut], parent=None):
+                warehouses: list[WarehouseOut], *,
+                sales_order: SalesOrderOut | None = None,
+                party_name: str | None = None,
+                invoice_number: str | None = None,
+                seed_products: dict[uuid.UUID, ProductOut] | None = None,
+                read_only: bool = False, parent=None):
+        """``sales_order``/``seed_products`` open this dialog pre-filled for
+        View or Edit instead of Create. ``customers`` is the ACTIVE-only
+        list the page already has for the create picker — an existing
+        order's customer may since have been deactivated and so be absent
+        from it, which is what ``party_name`` is for (see the identical
+        trap documented on PurchaseOrderFormDialog). ``invoice_number`` is
+        display-only — SalesOrderOut carries no invoice reference itself
+        (it lives on the separate Invoice row), so the caller passes
+        through whatever it already has (the list row) rather than this
+        dialog issuing its own lookup.
+        """
         super().__init__(parent)
         self._sales_service = sales_service
         self._customers = list(customers)
+        self._sales_order = sales_order
+        self._read_only = read_only
         self.order = None
-        self.setWindowTitle("Create Sales Order")
+        if read_only:
+            self.setWindowTitle("View Sales Order")
+        elif sales_order is not None:
+            self.setWindowTitle("Edit Sales Order")
+        else:
+            self.setWindowTitle("Create Sales Order")
         self.setMinimumWidth(760)
         self.resize(800, 680)
         self.setStyleSheet(STYLESHEET + ORDER_FORM_STYLESHEET)
@@ -77,11 +122,19 @@ class SalesOrderFormDialog(QDialog):
         outer.setContentsMargins(24, 22, 24, 22)
         outer.setSpacing(14)
 
-        title = QLabel("New Sales Order")
+        if read_only:
+            title_text, subtitle_text = "View Sales Order", "Read-only — this order's saved details."
+        elif sales_order is not None:
+            title_text = "Edit Sales Order"
+            subtitle_text = "Only draft orders can be edited — items are replaced wholesale on save."
+        else:
+            title_text = "New Sales Order"
+            subtitle_text = ("Create a draft order for a customer — inventory isn't "
+                             "touched until it's confirmed and fulfilled.")
+        title = QLabel(title_text)
         title.setObjectName("formTitle")
         outer.addWidget(title)
-        subtitle = QLabel("Create a draft order for a customer — inventory isn't "
-                          "touched until it's confirmed and fulfilled.")
+        subtitle = QLabel(subtitle_text)
         subtitle.setObjectName("formSubtitle")
         outer.addWidget(subtitle)
 
@@ -93,7 +146,7 @@ class SalesOrderFormDialog(QDialog):
         content_layout.setContentsMargins(0, 4, 6, 0)
         content_layout.setSpacing(16)
 
-        content_layout.addWidget(self._build_order_info_card(warehouses))
+        content_layout.addWidget(self._build_order_info_card(warehouses, invoice_number))
         content_layout.addWidget(self._build_items_card(product_service, inventory_service))
         content_layout.addWidget(self._build_notes_card())
         self._custom_fields = CustomFieldsSection()
@@ -118,13 +171,67 @@ class SalesOrderFormDialog(QDialog):
 
         outer.addLayout(self._build_footer(bool(customers), bool(warehouses)))
 
+        if sales_order is not None and party_name is not None:
+            self._customers = list(customers) + (
+                [] if sales_order.customer_id in {c.id for c in customers}
+                else [_PlaceholderCustomer(sales_order.customer_id, f"{party_name} (inactive)")])
         self._populate_customers()
+        if sales_order is not None:
+            self._select_combo_data(self._customer, sales_order.customer_id)
         self._on_customer_changed()
         self._on_warehouse_changed()
+
+        if sales_order is not None:
+            self._prefill(sales_order, seed_products or {})
+        if read_only:
+            self._apply_read_only()
         self._on_totals_changed()
 
+    # -- prefill (View/Edit) ---------------------------------------------- #
+    def _prefill(self, order: SalesOrderOut, seed_products: dict) -> None:
+        self._select_combo_data(self._warehouse, order.warehouse_id)
+        self._on_warehouse_changed()
+        if order.delivery_date is not None:
+            self._delivery_date_check.setChecked(True)
+            self._delivery_date_edit.setDate(QDate(order.delivery_date.year,
+                                                   order.delivery_date.month,
+                                                   order.delivery_date.day))
+        self._reference_number_edit.setText(order.reference_number or "")
+        self._notes.setPlainText(order.notes or "")
+        self._custom_fields.set_values(order.custom_fields or {})
+
+        lines = []
+        for item in order.items:
+            product = seed_products.get(item.product_id)
+            if product is None:
+                continue  # can't render a line whose product lookup failed
+            lines.append((product, {"quantity": item.quantity_ordered,
+                                    "unit_price": item.unit_price,
+                                    "tax_percent": item.tax_percent,
+                                    "discount_percent": item.discount_percent,
+                                    "excise_percent": item.excise_percent}))
+        self._items_editor.set_items(lines)
+
+    def _apply_read_only(self) -> None:
+        self._customer.setEnabled(False)
+        self._new_customer_button.setEnabled(False)
+        self._warehouse.setEnabled(False)
+        self._reference_number_edit.setReadOnly(True)
+        self._delivery_date_check.setEnabled(False)
+        self._delivery_date_edit.setEnabled(False)
+        self._notes.setReadOnly(True)
+        self._custom_fields.setEnabled(False)
+        self._items_editor.set_read_only(True)
+
+    @staticmethod
+    def _select_combo_data(combo: QComboBox, value) -> None:
+        index = combo.findData(value)
+        if index >= 0:
+            combo.setCurrentIndex(index)
+
     # -- order information ---------------------------------------------------#
-    def _build_order_info_card(self, warehouses: list[WarehouseOut]) -> QWidget:
+    def _build_order_info_card(self, warehouses: list[WarehouseOut],
+                               invoice_number: str | None) -> QWidget:
         card = QWidget()
         card.setObjectName("formCard")
         apply_card_shadow(card)
@@ -163,6 +270,9 @@ class SalesOrderFormDialog(QDialog):
         self._warehouse = QComboBox()
         for w in sorted(warehouses, key=lambda w: w.name.lower()):
             self._warehouse.addItem(w.name, w.id)
+        if self._sales_order is not None and (
+                self._sales_order.warehouse_id not in {w.id for w in warehouses}):
+            self._warehouse.addItem("(inactive warehouse)", self._sales_order.warehouse_id)
         self._warehouse.currentIndexChanged.connect(self._on_warehouse_changed)
         grid.addWidget(field_label("Ship From *"), 0, 1)
         grid.addWidget(self._warehouse, 1, 1)
@@ -172,12 +282,15 @@ class SalesOrderFormDialog(QDialog):
         self._customer_balance_label.setWordWrap(True)
         grid.addWidget(self._customer_balance_label, 2, 0, 1, 2)
 
-        invoice_number_value = QLabel("Assigned when invoiced")
+        invoice_number_value = QLabel(invoice_number or "Assigned when invoiced")
         invoice_number_value.setObjectName("readOnlyValue")
         grid.addWidget(field_label("Invoice Number"), 3, 0)
         grid.addWidget(invoice_number_value, 4, 0)
 
-        order_date_value = QLabel(datetime.now().strftime("%Y-%m-%d"))
+        order_date_text = (self._sales_order.created_at.strftime("%Y-%m-%d")
+                           if self._sales_order is not None
+                           else datetime.now().strftime("%Y-%m-%d"))
+        order_date_value = QLabel(order_date_text)
         order_date_value.setObjectName("readOnlyValue")
         grid.addWidget(field_label("Order Date"), 3, 1)
         grid.addWidget(order_date_value, 4, 1)
@@ -378,6 +491,15 @@ class SalesOrderFormDialog(QDialog):
         bar.setContentsMargins(0, 6, 0, 0)
         bar.addStretch()
 
+        if self._read_only:
+            close_button = QPushButton("Close")
+            close_button.setObjectName("orderPrimary")
+            close_button.setCursor(Qt.CursorShape.PointingHandCursor)
+            close_button.clicked.connect(self.reject)
+            bar.addWidget(close_button)
+            self._submit_button = None
+            return bar
+
         cancel_button = QPushButton("Cancel")
         cancel_button.setObjectName("orderSecondary")
         cancel_button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -390,7 +512,10 @@ class SalesOrderFormDialog(QDialog):
         # create-through-invoice flow in one step) — labeled "Save Draft"
         # to be honest about what this button does and to read the same
         # as New Bill's own "Save Draft" action for the equivalent step.
-        self._submit_button = QPushButton("Save Draft")
+        # Editing an existing (still-DRAFT) order says "Save Changes"
+        # instead, since it isn't creating a new draft.
+        self._save_label = "Save Changes" if self._sales_order is not None else "Save Draft"
+        self._submit_button = QPushButton(self._save_label)
         self._submit_button.setObjectName("orderPrimary")
         self._submit_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self._submit_button.setEnabled(has_customers and has_warehouses)
@@ -399,8 +524,10 @@ class SalesOrderFormDialog(QDialog):
         return bar
 
     def _set_busy(self, busy: bool) -> None:
+        if self._submit_button is None:
+            return
         self._submit_button.setEnabled(not busy)
-        self._submit_button.setText("Saving…" if busy else "Save Draft")
+        self._submit_button.setText("Saving…" if busy else self._save_label)
 
     def _submit(self) -> None:
         self._error_label.hide()
@@ -421,15 +548,23 @@ class SalesOrderFormDialog(QDialog):
                                      excise_percent=r["excise_percent"]) for r in rows]
         delivery_date = (self._delivery_date_edit.date().toPython()
                         if self._delivery_date_check.isChecked() else None)
-        data = SalesOrderCreate(customer_id=customer_id, warehouse_id=warehouse_id,
-                                notes=self._notes.toPlainText().strip() or None,
-                                delivery_date=delivery_date,
-                                reference_number=self._reference_number_edit.text().strip()
-                                or None,
-                                custom_fields=self._custom_fields.get_values(), items=items)
+        reference_number = self._reference_number_edit.text().strip() or None
+        notes = self._notes.toPlainText().strip() or None
+        custom_fields = self._custom_fields.get_values()
 
         self._set_busy(True)
-        worker = Worker(self._sales_service.create_sales_order, data)
+        if self._sales_order is not None:
+            data = SalesOrderUpdate(customer_id=customer_id, warehouse_id=warehouse_id,
+                                    notes=notes, delivery_date=delivery_date,
+                                    reference_number=reference_number,
+                                    custom_fields=custom_fields, items=items)
+            worker = Worker(self._sales_service.update_sales_order, self._sales_order.id, data)
+        else:
+            data = SalesOrderCreate(customer_id=customer_id, warehouse_id=warehouse_id,
+                                    notes=notes, delivery_date=delivery_date,
+                                    reference_number=reference_number,
+                                    custom_fields=custom_fields, items=items)
+            worker = Worker(self._sales_service.create_sales_order, data)
         worker.signals.finished.connect(self._on_success)
         worker.signals.error.connect(self._on_error)
         QThreadPool.globalInstance().start(worker)
@@ -447,9 +582,11 @@ class SalesOrderFormDialog(QDialog):
                               ProductNotFoundError, DuplicateReferenceNumberError)):
             self._show_error(str(exc))
         elif isinstance(exc, PermissionDeniedError):
-            self._show_error("You don't have permission to create sales orders.")
+            verb = "edit" if self._sales_order is not None else "create"
+            self._show_error(f"You don't have permission to {verb} sales orders.")
         else:
-            self._show_error("Something went wrong creating this sales order. "
+            verb = "saving changes to" if self._sales_order is not None else "creating"
+            self._show_error(f"Something went wrong {verb} this sales order. "
                              "Please try again.")
 
     def _show_error(self, message: str) -> None:

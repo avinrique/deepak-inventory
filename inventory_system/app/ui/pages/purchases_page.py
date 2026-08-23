@@ -1,12 +1,11 @@
-"""Purchases page — search/filter/paginate PurchaseOrder records, with
-Create/Submit/Approve/Receive Goods/Cancel actions. Mirrors
-sales_orders_page.py structure. Replaces the previous content of this
-sidebar entry (a read-only legacy Excel Bill list, via
-app.services.billing_service) — that list was a second, disconnected
-purchase record a real purchase order here never appeared in, which is
-why "record a purchase" looked unavailable. The real purchasing workflow
-(Supplier/PurchaseOrder/GoodsReceipt, see app.services.purchase_service)
-is what actually tracks purchases and moves inventory (via receive_goods).
+"""Purchases page — the purchase register: search/date-range/status/sort/
+paginate over PurchaseService.list_purchase_transactions, with a Create
+dialog and per-row View/Edit/workflow/Print actions. Replaces the previous
+minimal 5-column list (Order #/Supplier/Warehouse/Status/Total) with the
+full register the accounting side needs — Date, H.S Code, Invoice No.,
+Reference, Supplier, Taxable/Non-Taxable/VAT/Amount, and a totals footer
+that reflects the whole filtered set (not just the visible page), computed
+server-side by app.repositories.sql.transaction_list.
 
 No business logic here: every action calls PurchaseService on a
 background Worker. Permission-gated actions are hidden per-row when the
@@ -15,24 +14,32 @@ PurchaseService enforces the same rule independently via
 @require_permission.
 """
 import logging
+from datetime import datetime, timezone
 
-from PySide6.QtCore import Qt, QThreadPool
+from PySide6.QtCore import Qt, QThreadPool, QTimer
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QComboBox,
+    QFileDialog,
     QHBoxLayout,
-    QHeaderView,
+    QLabel,
+    QLineEdit,
+    QMenu,
     QMessageBox,
     QPushButton,
-    QTableWidget,
     QTableWidgetItem,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
+from app.core.exceptions import ProductNotFoundError
 from app.domain.product import ProductStatus
 from app.domain.purchasing import PurchaseOrderStatus
 from app.schemas.product import ProductFilter
-from app.schemas.purchasing import PurchaseOrderFilter, PurchaseOrderOut, PurchaseOrderPage
+from app.schemas.purchasing import PurchaseOrderFilter
+from app.schemas.reporting import ReportResult
+from app.schemas.transactions import TransactionListPage, TransactionListRow, TransactionTotals
 from app.security.session import SessionManager
 from app.services.inventory_service import InventoryService
 from app.services.product_service import ProductService
@@ -40,20 +47,52 @@ from app.services.purchase_service import PurchaseService
 from app.ui import permission_hints
 from app.ui.widgets.async_content import AsyncContentArea
 from app.ui.widgets.confirm_dialog import confirm
+from app.ui.widgets.date_range_filter import DateRangeFilter
 from app.ui.widgets.page_header import PageHeader
 from app.ui.widgets.pagination_bar import PaginationBar
 from app.ui.widgets.purchase_order_form_dialog import PurchaseOrderFormDialog
 from app.ui.widgets.receive_goods_dialog import ReceiveGoodsDialog
 from app.ui.widgets.states import EmptyStateWidget
+from app.ui.widgets.totals_table import TotalsTable
 from app.workers.base_worker import Worker
 
-_COLUMNS = ["Order #", "Supplier", "Warehouse", "Status", "Total"]
+_COLUMNS = ["Date", "H.S Code", "Invoice No.", "Reference", "Supplier",
+           "Taxable Amount (Rs)", "Non Taxable Amount (Rs)", "VAT (Rs)", "Amount (Rs)",
+           "Actions"]
+_STRETCH_COL = 4
+_RIGHT_ALIGNED = {5, 6, 7, 8}
+_FIXED = {9: 110}
+_ACTIONS_COL = 9
+
+# Column -> the PurchaseOrderFilter.sort_by key it sorts by. Sorting is
+# server-side (the register is SQL-paginated) — see
+# app.repositories.sql.transaction_list._PURCHASE_SORTS/_AGGREGATE_SORTS
+# for the matching whitelist. Columns absent here (H.S Code, Actions)
+# don't respond to a header click.
+_SORTABLE_COLUMNS = {0: "created_at", 2: "invoice_number", 3: "reference_number",
+                    4: "party_name", 5: "taxable_amount", 6: "non_taxable_amount",
+                    7: "vat_amount", 8: "total_amount"}
+_TEXT_COLUMNS = {2, 3, 4}  # default ascending; money/date columns default descending
+
+_SEARCH_DEBOUNCE_MS = 300
 
 _logger = logging.getLogger(__name__)
 
 
 def _money(value) -> str:
     return f"{value:,.2f}"
+
+
+def hs_code_summary(codes: list[str]) -> tuple[str, str]:
+    """(display text, tooltip) for a row's H.S Code cell. An order can span
+    several products with different HS codes — this shows the first plus a
+    count rather than a truncated, unreadable list.
+    """
+    if not codes:
+        return "—", ""
+    if len(codes) == 1:
+        return codes[0], codes[0]
+    return f"{codes[0]} +{len(codes) - 1} more", ", ".join(codes)
 
 
 class PurchasesPage(QWidget):
@@ -66,12 +105,12 @@ class PurchasesPage(QWidget):
         self._sessions = sessions
 
         self._page = 1
-        self._current_items: list[PurchaseOrderOut] = []
+        self._sort_by = "created_at"
+        self._sort_desc = True
+        self._current_rows: list[TransactionListRow] = []
         self._suppliers: list = []
         self._warehouses: list = []
         self._products: list = []
-        self._supplier_names: dict = {}
-        self._warehouse_names: dict = {}
         self._product_names: dict = {}
 
         layout = QVBoxLayout(self)
@@ -82,7 +121,7 @@ class PurchasesPage(QWidget):
         layout.addLayout(self._build_toolbar())
 
         self._async_area = AsyncContentArea(
-            load=lambda: self._purchase_service.search_purchase_orders(self._build_filter()),
+            load=lambda: self._purchase_service.list_purchase_transactions(self._build_filter()),
             render=self._render_table, is_empty=lambda page: len(page.items) == 0,
             empty_state=EmptyStateWidget(
                 "No purchase orders found", icon="📥",
@@ -94,8 +133,6 @@ class PurchasesPage(QWidget):
         self._pagination.page_changed.connect(self._on_page_changed)
         layout.addWidget(self._pagination)
 
-        layout.addLayout(self._build_row_actions())
-
         self._load_reference_data()
 
     def refresh(self) -> None:
@@ -106,19 +143,35 @@ class PurchasesPage(QWidget):
         return permission_hints.can(self._sessions, code)
 
     # -- toolbar --------------------------------------------------------- #
-    def _build_toolbar(self) -> QHBoxLayout:
-        bar = QHBoxLayout()
-        bar.setContentsMargins(28, 4, 28, 12)
-        bar.setSpacing(10)
+    def _build_toolbar(self) -> QVBoxLayout:
+        outer = QVBoxLayout()
+        outer.setContentsMargins(28, 4, 28, 12)
+        outer.setSpacing(8)
+
+        row1 = QHBoxLayout()
+        row1.setSpacing(10)
+
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("Search order #, invoice #, reference, or supplier…")
+        self._search.setMinimumWidth(260)
+        self._search_debounce = QTimer(self)
+        self._search_debounce.setSingleShot(True)
+        self._search_debounce.setInterval(_SEARCH_DEBOUNCE_MS)
+        self._search_debounce.timeout.connect(self._on_filter_changed)
+        self._search.textChanged.connect(lambda: self._search_debounce.start())
+        row1.addWidget(self._search, stretch=1)
+
+        self._supplier_filter = QComboBox()
+        self._supplier_filter.addItem("All Suppliers", None)
+        self._supplier_filter.currentIndexChanged.connect(self._on_filter_changed)
+        row1.addWidget(self._supplier_filter)
 
         self._status_filter = QComboBox()
         self._status_filter.addItem("All Statuses", None)
         for status in PurchaseOrderStatus:
             self._status_filter.addItem(status.value.replace("_", " ").title(), status)
         self._status_filter.currentIndexChanged.connect(self._on_filter_changed)
-        bar.addWidget(self._status_filter)
-
-        bar.addStretch()
+        row1.addWidget(self._status_filter)
 
         self._create_button = None
         if self._can("purchases.create"):
@@ -129,20 +182,45 @@ class PurchasesPage(QWidget):
             # Suppliers/warehouses/products load asynchronously (see
             # _load_reference_data) — disabled until that finishes so a
             # click landing before the load completes can't open the
-            # Create dialog with stale-empty lists (every field would show
-            # "No suppliers/warehouses/products available" even when real
-            # data exists, just not fetched yet).
+            # Create dialog with stale-empty lists.
             self._create_button.setEnabled(False)
             self._create_button.setToolTip("Loading suppliers, warehouses, and products…")
-            bar.addWidget(self._create_button)
-        return bar
+            row1.addWidget(self._create_button)
+        outer.addLayout(row1)
+
+        row2 = QHBoxLayout()
+        row2.setSpacing(10)
+        self._date_range = DateRangeFilter()
+        self._date_range.changed.connect(self._on_filter_changed)
+        row2.addWidget(self._date_range)
+        row2.addStretch()
+
+        export_button = QToolButton()
+        export_button.setText("Export ▾")
+        export_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        export_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        export_menu = QMenu(export_button)
+        export_menu.addAction("Export CSV…").triggered.connect(
+            lambda: self._export("csv"))
+        export_menu.addAction("Export Excel…").triggered.connect(
+            lambda: self._export("excel"))
+        export_button.setMenu(export_menu)
+        row2.addWidget(export_button)
+
+        print_button = QPushButton("Print")
+        print_button.setObjectName("ghost")
+        print_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        print_button.clicked.connect(self._print_register)
+        row2.addWidget(print_button)
+        outer.addLayout(row2)
+        return outer
 
     def _fetch_reference_data(self):
-        # Inactive suppliers/warehouses are excluded — same "archived
-        # things don't populate new-transaction pickers" rule already
-        # applied to products just below (ProductStatus.ACTIVE). Extracted
-        # from _load_reference_data so it's directly unit-testable without
-        # going through QThreadPool — see tests/ui/test_purchases_page.py.
+        # Inactive suppliers/warehouses are excluded from the create-form
+        # pickers — same "archived things don't populate new-transaction
+        # pickers" rule already applied to products just below
+        # (ProductStatus.ACTIVE). Extracted from _load_reference_data so
+        # it's directly unit-testable without going through QThreadPool.
         suppliers = [s for s in self._purchase_service.list_suppliers() if s.is_active]
         warehouses = [w for w in self._inventory_service.list_warehouses() if w.is_active]
         products = self._product_service.search_products(
@@ -164,12 +242,11 @@ class PurchasesPage(QWidget):
 
     def _on_reference_data_loaded(self, result) -> None:
         self._suppliers, self._warehouses, self._products = result
-        self._supplier_names = {s.id: s.name for s in self._suppliers}
-        self._warehouse_names = {w.id: w.name for w in self._warehouses}
         self._product_names = {p.id: p.name for p in self._products}
-        table = self._async_area.currentWidget()
-        if isinstance(table, QTableWidget):
-            self._render_table_contents(table)
+        self._supplier_filter.blockSignals(True)
+        for s in sorted(self._suppliers, key=lambda s: s.name.lower()):
+            self._supplier_filter.addItem(s.name, s.id)
+        self._supplier_filter.blockSignals(False)
         if self._create_button is not None:
             self._create_button.setEnabled(True)
             self._create_button.setToolTip("")
@@ -182,47 +259,15 @@ class PurchasesPage(QWidget):
         if dialog.exec():
             self.refresh()
 
-    # -- row actions ------------------------------------------------------#
-    def _build_row_actions(self) -> QHBoxLayout:
-        bar = QHBoxLayout()
-        bar.setContentsMargins(28, 0, 28, 16)
-        bar.setSpacing(10)
-
-        self._submit_button = QPushButton("Submit")
-        self._submit_button.setObjectName("ghost")
-        self._submit_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._submit_button.clicked.connect(self._submit_selected)
-        self._submit_button.setEnabled(False)
-        bar.addWidget(self._submit_button)
-
-        self._approve_button = QPushButton("Approve")
-        self._approve_button.setObjectName("ghost")
-        self._approve_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._approve_button.clicked.connect(self._approve_selected)
-        self._approve_button.setEnabled(False)
-        bar.addWidget(self._approve_button)
-
-        self._receive_button = QPushButton("Receive Goods")
-        self._receive_button.setObjectName("ghost")
-        self._receive_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._receive_button.clicked.connect(self._receive_selected)
-        self._receive_button.setEnabled(False)
-        bar.addWidget(self._receive_button)
-
-        self._cancel_button = QPushButton("Cancel Order")
-        self._cancel_button.setObjectName("danger")
-        self._cancel_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._cancel_button.clicked.connect(self._cancel_selected)
-        self._cancel_button.setEnabled(False)
-        bar.addWidget(self._cancel_button)
-
-        bar.addStretch()
-        return bar
-
     # -- data flow ----------------------------------------------------- #
     def _build_filter(self) -> PurchaseOrderFilter:
-        return PurchaseOrderFilter(status=self._status_filter.currentData(),
-                                   page=self._page, page_size=25)
+        return PurchaseOrderFilter(
+            supplier_id=self._supplier_filter.currentData(),
+            status=self._status_filter.currentData(),
+            search=self._search.text().strip() or None,
+            date_from=self._date_range.date_from(), date_to=self._date_range.date_to(),
+            sort_by=self._sort_by, sort_desc=self._sort_desc,
+            page=self._page, page_size=25)
 
     def _on_filter_changed(self) -> None:
         self._page = 1
@@ -232,95 +277,182 @@ class PurchasesPage(QWidget):
         self._page = page
         self.refresh()
 
+    def _on_sort_clicked(self, column: int) -> None:
+        key = _SORTABLE_COLUMNS.get(column)
+        if key is None:
+            return
+        if key == self._sort_by:
+            self._sort_desc = not self._sort_desc
+        else:
+            self._sort_by = key
+            self._sort_desc = column not in _TEXT_COLUMNS
+        self._page = 1
+        self.refresh()
+
     # -- table rendering ------------------------------------------------ #
-    def _render_table(self, page: PurchaseOrderPage) -> QTableWidget:
-        self._current_items = page.items
+    def _render_table(self, page: TransactionListPage) -> TotalsTable:
+        self._current_rows = page.items
         self._pagination.set_state(page=page.page, total_pages=page.total_pages,
                                    total=page.total)
 
-        table = QTableWidget(len(page.items), len(_COLUMNS))
-        table.setHorizontalHeaderLabels(_COLUMNS)
-        table.verticalHeader().setVisible(False)
-        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
-        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        table.itemSelectionChanged.connect(self._on_selection_changed)
-        self._render_table_contents(table)
-        return table
+        table = TotalsTable()
+        table.set_columns(_COLUMNS, stretch_column=_STRETCH_COL,
+                          right_aligned=_RIGHT_ALIGNED, fixed=_FIXED)
+        table.sort_requested.connect(self._on_sort_clicked)
+        sort_column = next((c for c, k in _SORTABLE_COLUMNS.items() if k == self._sort_by), 0)
+        table.enable_sort_indicator(sort_column, not self._sort_desc)
+        table.set_row_count(len(page.items))
 
-    def _render_table_contents(self, table: QTableWidget) -> None:
-        for row, po in enumerate(self._current_items):
-            supplier_name = self._supplier_names.get(po.supplier_id, str(po.supplier_id))
-            warehouse_name = self._warehouse_names.get(po.warehouse_id, str(po.warehouse_id))
+        for row_idx, row in enumerate(page.items):
+            hs_text, hs_tooltip = hs_code_summary(row.hs_codes)
             values = [
-                po.order_number or "—", supplier_name, warehouse_name,
-                po.status.value.replace("_", " ").title(), _money(po.total_amount),
+                row.created_at.strftime("%Y-%m-%d"), hs_text, row.invoice_number or "—",
+                row.reference_number or "—", row.party_name,
+                _money(row.taxable_amount), _money(row.non_taxable_amount),
+                _money(row.vat_amount), _money(row.total_amount),
             ]
             for col, value in enumerate(values):
                 item = QTableWidgetItem(value)
-                if col == 4:
-                    item.setTextAlignment(Qt.AlignmentFlag.AlignRight
-                                          | Qt.AlignmentFlag.AlignVCenter)
-                table.setItem(row, col, item)
+                if col == 1 and hs_tooltip:
+                    item.setToolTip(hs_tooltip)
+                table.set_item(row_idx, col, item)
+            table.set_cell_widget(row_idx, _ACTIONS_COL, self._build_actions_button(row))
 
-    def _on_selection_changed(self) -> None:
-        po = self._selected_order()
-        status = po.status if po is not None else None
-        self._submit_button.setEnabled(
-            po is not None and self._can("purchases.update")
-            and status == PurchaseOrderStatus.DRAFT)
-        self._approve_button.setEnabled(
-            po is not None and self._can("purchases.approve")
-            and status == PurchaseOrderStatus.SUBMITTED)
-        self._receive_button.setEnabled(
-            po is not None and self._can("purchases.receive")
-            and status in (PurchaseOrderStatus.APPROVED,
-                          PurchaseOrderStatus.PARTIALLY_RECEIVED))
-        self._cancel_button.setEnabled(
-            po is not None and self._can("purchases.cancel")
-            and status in (PurchaseOrderStatus.DRAFT, PurchaseOrderStatus.SUBMITTED,
-                          PurchaseOrderStatus.APPROVED))
+        table.set_totals_row(self._totals_row_items(page.totals))
+        return table
 
-    def _selected_order(self) -> PurchaseOrderOut | None:
-        table = self._async_area.currentWidget()
-        if not isinstance(table, QTableWidget):
-            return None
-        rows = table.selectionModel().selectedRows() if table.selectionModel() else []
-        if not rows:
-            return None
-        row = rows[0].row()
-        if row >= len(self._current_items):
-            return None
-        return self._current_items[row]
+    def _totals_row_items(self, totals: TransactionTotals) -> list[QTableWidgetItem]:
+        bold = QFont()
+        bold.setBold(True)
+        items = []
+        for col in range(len(_COLUMNS)):
+            if col == _STRETCH_COL:
+                text = "Total"
+            elif col == 5:
+                text = _money(totals.taxable_amount)
+            elif col == 6:
+                text = _money(totals.non_taxable_amount)
+            elif col == 7:
+                text = _money(totals.vat_amount)
+            elif col == 8:
+                text = _money(totals.total_amount)
+            else:
+                text = ""
+            item = QTableWidgetItem(text)
+            item.setFont(bold)
+            if col in _RIGHT_ALIGNED:
+                item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            items.append(item)
+        return items
 
-    # -- actions --------------------------------------------------------- #
-    def _submit_selected(self) -> None:
-        po = self._selected_order()
-        if po is None:
-            return
-        self._run_action(self._purchase_service.submit_purchase_order, po.id)
+    # -- per-row actions --------------------------------------------------- #
+    def _build_actions_button(self, row: TransactionListRow) -> QWidget:
+        holder = QWidget()
+        layout = QHBoxLayout(holder)
+        layout.setContentsMargins(8, 0, 8, 0)
 
-    def _approve_selected(self) -> None:
-        po = self._selected_order()
-        if po is None:
-            return
-        self._run_action(self._purchase_service.approve_purchase_order, po.id)
+        button = QToolButton()
+        button.setText("Actions ▾")
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        button.setObjectName("rowActions")
 
-    def _cancel_selected(self) -> None:
-        po = self._selected_order()
-        if po is None:
-            return
+        status = PurchaseOrderStatus(row.status)
+        menu = QMenu(button)
+        menu.addAction("View").triggered.connect(
+            lambda checked=False, r=row: self._open_view(r))
+        if self._can("purchases.update") and status == PurchaseOrderStatus.DRAFT:
+            menu.addAction("Edit").triggered.connect(
+                lambda checked=False, r=row: self._open_edit(r))
+        menu.addSeparator()
+        if self._can("purchases.update") and status == PurchaseOrderStatus.DRAFT:
+            menu.addAction("Submit").triggered.connect(
+                lambda checked=False, r=row: self._submit_row(r))
+        if self._can("purchases.approve") and status == PurchaseOrderStatus.SUBMITTED:
+            menu.addAction("Approve").triggered.connect(
+                lambda checked=False, r=row: self._approve_row(r))
+        if self._can("purchases.receive") and status in (
+                PurchaseOrderStatus.APPROVED, PurchaseOrderStatus.PARTIALLY_RECEIVED):
+            menu.addAction("Receive Goods").triggered.connect(
+                lambda checked=False, r=row: self._receive_row(r))
+        menu.addSeparator()
+        menu.addAction("Print").triggered.connect(
+            lambda checked=False, r=row: self._print_row(r))
+        if self._can("purchases.cancel") and status in (
+                PurchaseOrderStatus.DRAFT, PurchaseOrderStatus.SUBMITTED,
+                PurchaseOrderStatus.APPROVED):
+            menu.addSeparator()
+            menu.addAction("Cancel Order").triggered.connect(
+                lambda checked=False, r=row: self._cancel_row(r))
+
+        if menu.isEmpty():
+            button.setEnabled(False)
+        button.setMenu(menu)
+        layout.addWidget(button)
+        layout.addStretch()
+        return holder
+
+    # -- view / edit -------------------------------------------------------#
+    def _fetch_order_and_products(self, purchase_order_id):
+        order = self._purchase_service.get_purchase_order(purchase_order_id)
+        products = {}
+        for item in order.items:
+            try:
+                products[item.product_id] = self._product_service.get_product(item.product_id)
+            except ProductNotFoundError:
+                continue
+        return order, products
+
+    def _open_view(self, row: TransactionListRow) -> None:
+        worker = Worker(self._fetch_order_and_products, row.id)
+        worker.signals.finished.connect(
+            lambda result, r=row: self._on_order_loaded_for_view(result, r, read_only=True))
+        worker.signals.error.connect(self._on_load_order_error)
+        QThreadPool.globalInstance().start(worker)
+
+    def _open_edit(self, row: TransactionListRow) -> None:
+        worker = Worker(self._fetch_order_and_products, row.id)
+        worker.signals.finished.connect(
+            lambda result, r=row: self._on_order_loaded_for_view(result, r, read_only=False))
+        worker.signals.error.connect(self._on_load_order_error)
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_order_loaded_for_view(self, result, row: TransactionListRow, *,
+                                  read_only: bool) -> None:
+        order, products = result
+        dialog = PurchaseOrderFormDialog(
+            self._purchase_service, self._product_service, self._inventory_service,
+            self._suppliers, self._warehouses, purchase_order=order,
+            party_name=row.party_name, seed_products=products, read_only=read_only,
+            parent=self)
+        if dialog.exec() and not read_only:
+            self.refresh()
+
+    def _on_load_order_error(self, exc: Exception) -> None:
+        _logger.exception("Loading purchase order failed", exc_info=exc)
+        QMessageBox.critical(self, "Couldn't open order", str(exc))
+
+    # -- lifecycle actions --------------------------------------------------#
+    def _submit_row(self, row: TransactionListRow) -> None:
+        self._run_action(self._purchase_service.submit_purchase_order, row.id)
+
+    def _approve_row(self, row: TransactionListRow) -> None:
+        self._run_action(self._purchase_service.approve_purchase_order, row.id)
+
+    def _cancel_row(self, row: TransactionListRow) -> None:
         if confirm(self, "Cancel Purchase Order",
-                  f"Cancel purchase order {po.order_number or po.id}?",
+                  f"Cancel purchase order {row.invoice_number or row.id}?",
                   confirm_label="Cancel Order", danger=True):
-            self._run_action(self._purchase_service.cancel_purchase_order, po.id)
+            self._run_action(self._purchase_service.cancel_purchase_order, row.id)
 
-    def _receive_selected(self) -> None:
-        po = self._selected_order()
-        if po is None:
-            return
-        dialog = ReceiveGoodsDialog(self._purchase_service, po, self._product_names,
+    def _receive_row(self, row: TransactionListRow) -> None:
+        worker = Worker(self._purchase_service.get_purchase_order, row.id)
+        worker.signals.finished.connect(self._on_order_loaded_for_receive)
+        worker.signals.error.connect(self._on_load_order_error)
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_order_loaded_for_receive(self, order) -> None:
+        dialog = ReceiveGoodsDialog(self._purchase_service, order, self._product_names,
                                     parent=self)
         if dialog.exec():
             self.refresh()
@@ -334,3 +466,72 @@ class PurchasesPage(QWidget):
     def _on_action_error(self, exc: Exception) -> None:
         _logger.exception("Purchase order action failed", exc_info=exc)
         QMessageBox.critical(self, "Action failed", str(exc))
+
+    # -- print --------------------------------------------------------------#
+    def _row_report_result(self, row: TransactionListRow) -> ReportResult:
+        return ReportResult(
+            title=f"Purchase Order {row.invoice_number or row.id}",
+            generated_at=datetime.now(timezone.utc), columns=_export_columns(),
+            rows=[_row_to_export_dict(row)])
+
+    def _print_row(self, row: TransactionListRow) -> None:
+        from app.reporting.export import print_report
+        print_report(self._row_report_result(row), parent=self)
+
+    def _print_register(self) -> None:
+        worker = Worker(self._purchase_service.export_purchase_transactions,
+                        self._build_filter())
+        worker.signals.finished.connect(self._on_print_register_loaded)
+        worker.signals.error.connect(self._on_export_error)
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_print_register_loaded(self, rows: list[TransactionListRow]) -> None:
+        from app.reporting.export import print_report
+        result = ReportResult(title="Purchase Register", generated_at=datetime.now(timezone.utc),
+                              columns=_export_columns(),
+                              rows=[_row_to_export_dict(r) for r in rows])
+        print_report(result, parent=self)
+
+    # -- export ---------------------------------------------------------------#
+    def _export(self, fmt: str) -> None:
+        ext = "csv" if fmt == "csv" else "xlsx"
+        filt = "CSV Files (*.csv)" if fmt == "csv" else "Excel Files (*.xlsx)"
+        path, _ = QFileDialog.getSaveFileName(self, "Export Purchases", f"purchases.{ext}", filt)
+        if not path:
+            return
+        worker = Worker(self._purchase_service.export_purchase_transactions,
+                        self._build_filter())
+        worker.signals.finished.connect(lambda rows: self._on_export_loaded(rows, path, fmt))
+        worker.signals.error.connect(self._on_export_error)
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_export_loaded(self, rows: list[TransactionListRow], path: str, fmt: str) -> None:
+        from app.reporting.export import export_csv, export_excel
+        result = ReportResult(title="Purchase Register", generated_at=datetime.now(timezone.utc),
+                              columns=_export_columns(),
+                              rows=[_row_to_export_dict(r) for r in rows])
+        try:
+            (export_csv if fmt == "csv" else export_excel)(result, path)
+            QMessageBox.information(self, "Export Complete", f"Purchases exported to {path}")
+        except OSError as exc:
+            _logger.exception("Purchase export failed", exc_info=exc)
+            QMessageBox.warning(self, "Export Failed", "Couldn't write the export file.")
+
+    def _on_export_error(self, exc: Exception) -> None:
+        _logger.exception("Failed to load purchases for export", exc_info=exc)
+        QMessageBox.warning(self, "Export Failed", "Couldn't load purchases to export.")
+
+
+def _export_columns() -> list[str]:
+    return ["Date", "H.S Codes", "Invoice No.", "Reference", "Supplier", "Taxable Amount",
+           "Non Taxable Amount", "VAT Amount", "Amount"]
+
+
+def _row_to_export_dict(row: TransactionListRow) -> dict:
+    return {
+        "Date": row.created_at.strftime("%Y-%m-%d"), "H.S Codes": ", ".join(row.hs_codes),
+        "Invoice No.": row.invoice_number or "", "Reference": row.reference_number or "",
+        "Supplier": row.party_name, "Taxable Amount": row.taxable_amount,
+        "Non Taxable Amount": row.non_taxable_amount, "VAT Amount": row.vat_amount,
+        "Amount": row.total_amount,
+    }

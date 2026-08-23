@@ -88,6 +88,7 @@ class TransactionItemsTable(QWidget):
         self._warehouse_id: uuid.UUID | None = None
         self._rows: list[dict] = []  # parallel to table rows: {"product": ProductOut}
         self._search_results: list[ProductOut] = []
+        self._read_only = False
 
         self._col_discount = _COL_PRICE + 1 if include_discount else None
         self._col_excise = self._col_discount + 1 if include_discount else None
@@ -143,11 +144,11 @@ class TransactionItemsTable(QWidget):
         self._results.setPlaceholderText("No matches yet")
         bar.addWidget(self._results, stretch=1)
 
-        add_button = QPushButton("+ Add Product")
-        add_button.setObjectName("orderGhost")
-        add_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        add_button.clicked.connect(self._add_selected_result)
-        bar.addWidget(add_button)
+        self._add_button = QPushButton("+ Add Product")
+        self._add_button.setObjectName("orderGhost")
+        self._add_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._add_button.clicked.connect(self._add_selected_result)
+        bar.addWidget(self._add_button)
         return bar
 
     def _on_search_text_changed(self) -> None:
@@ -202,7 +203,20 @@ class TransactionItemsTable(QWidget):
             self._refresh_stock(row)
 
     # -- rows -------------------------------------------------------------- #
-    def add_row(self, product: ProductOut) -> None:
+    def add_row(self, product: ProductOut, *, quantity: Decimal | None = None,
+               unit_price: Decimal | None = None, tax_percent: Decimal | None = None,
+               discount_percent: Decimal | None = None,
+               excise_percent: Decimal | None = None) -> None:
+        """Adds one row. With no overrides this is "the user just picked a
+        product" — quantity 1, and price/tax/excise defaulted from the
+        product's own current catalog values (the existing behavior).
+
+        The overrides exist so set_items() below can seed a row from an
+        *already-saved* order line without duplicating this method: a
+        saved line's price/tax/discount/excise reflect what was actually
+        agreed at the time, not whatever the product catalog says today,
+        so those must win when supplied.
+        """
         row = self._table.rowCount()
         self._table.insertRow(row)
         self._rows.insert(row, {"product": product})
@@ -215,25 +229,29 @@ class TransactionItemsTable(QWidget):
         self._table.setItem(row, _COL_SKU, QTableWidgetItem(product.sku))
         self._table.setItem(row, _COL_HSN, QTableWidgetItem(product.hsn_code or "—"))
 
-        qty_edit = QLineEdit("1")
+        qty_edit = QLineEdit(str(quantity if quantity is not None else Decimal("1")))
         qty_edit.textChanged.connect(lambda: self._on_row_changed(row))
         self._table.setCellWidget(row, _COL_QTY, qty_edit)
 
-        price_edit = QLineEdit(str(getattr(product, self._price_field)))
+        price = unit_price if unit_price is not None else getattr(product, self._price_field)
+        price_edit = QLineEdit(str(price))
         price_edit.textChanged.connect(lambda: self._on_row_changed(row))
         self._table.setCellWidget(row, _COL_PRICE, price_edit)
 
         if self._col_discount is not None:
-            discount_edit = QLineEdit("0")
+            discount = discount_percent if discount_percent is not None else Decimal("0")
+            discount_edit = QLineEdit(str(discount))
             discount_edit.textChanged.connect(lambda: self._on_row_changed(row))
             self._table.setCellWidget(row, self._col_discount, discount_edit)
 
         if self._col_excise is not None:
-            excise_edit = QLineEdit(str(product.excise_percent))
+            excise = excise_percent if excise_percent is not None else product.excise_percent
+            excise_edit = QLineEdit(str(excise))
             excise_edit.textChanged.connect(lambda: self._on_row_changed(row))
             self._table.setCellWidget(row, self._col_excise, excise_edit)
 
-        tax_edit = QLineEdit(str(product.tax_percent))
+        tax = tax_percent if tax_percent is not None else product.tax_percent
+        tax_edit = QLineEdit(str(tax))
         tax_edit.textChanged.connect(lambda: self._on_row_changed(row))
         self._table.setCellWidget(row, self._col_tax, tax_edit)
 
@@ -254,6 +272,41 @@ class TransactionItemsTable(QWidget):
         self._recompute_row_amount(row)
         self._refresh_stock(row)
         self.totals_changed.emit()
+        if self._read_only:
+            self._apply_read_only_to_row(row)
+
+    def set_items(self, lines: list[tuple[ProductOut, dict]]) -> None:
+        """Replaces the table's contents with ``lines`` — (product, field
+        overrides) pairs, the overrides being whichever of quantity/
+        unit_price/tax_percent/discount_percent/excise_percent apply.
+        Used to seed the form when opening an existing order for View or
+        Edit; a brand-new order is built entirely through add_row(), this
+        method is never in that path.
+        """
+        self.clear_items()
+        for product, overrides in lines:
+            self.add_row(product, **overrides)
+
+    # -- read-only (View mode) --------------------------------------------#
+    def set_read_only(self, read_only: bool) -> None:
+        self._read_only = read_only
+        self._search.setEnabled(not read_only)
+        self._results.setEnabled(not read_only)
+        self._add_button.setEnabled(not read_only)
+        for row in range(self._table.rowCount()):
+            self._apply_read_only_to_row(row)
+
+    def _apply_read_only_to_row(self, row: int) -> None:
+        for col in (_COL_QTY, _COL_PRICE, self._col_discount, self._col_excise,
+                   self._col_tax):
+            if col is None:
+                continue
+            widget = self._table.cellWidget(row, col)
+            if widget is not None:
+                widget.setReadOnly(self._read_only)
+        remove_button = self._table.cellWidget(row, self._col_action)
+        if remove_button is not None:
+            remove_button.setVisible(not self._read_only)
 
     def _row_of_widget(self, widget: QWidget) -> int:
         for row in range(self._table.rowCount()):
