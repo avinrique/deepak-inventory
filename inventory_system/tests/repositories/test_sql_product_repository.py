@@ -156,6 +156,27 @@ def test_search_matches_sku_barcode_or_name(org_and_unit):
     assert len(by_barcode.items) == 1 and by_barcode.items[0].sku == "XYZ-9"
 
 
+def test_search_matches_hsn_code(org_and_unit):
+    org_id, unit_id = org_and_unit
+    repo = SqlProductRepository()
+    repo.create(org_id, _product("ABC-1", unit_id, name="Blue Widget", hsn_code="8471"))
+    repo.create(org_id, _product("XYZ-9", unit_id, name="Red Gadget", hsn_code="3004"))
+
+    by_hsn = repo.search(org_id, ProductFilter(search="8471"))
+    assert len(by_hsn.items) == 1 and by_hsn.items[0].sku == "ABC-1"
+
+
+def test_search_with_no_hsn_code_does_not_match_stray_terms(org_and_unit):
+    # A product with hsn_code=None must not accidentally match every search
+    # (ILIKE against NULL is NULL/false, never true) — this pins that.
+    org_id, unit_id = org_and_unit
+    repo = SqlProductRepository()
+    repo.create(org_id, _product("ABC-1", unit_id, name="Blue Widget", hsn_code=None))
+
+    result = repo.search(org_id, ProductFilter(search="8471"))
+    assert result.items == []
+
+
 def test_search_pagination(org_and_unit):
     org_id, unit_id = org_and_unit
     repo = SqlProductRepository()

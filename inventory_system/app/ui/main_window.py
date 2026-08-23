@@ -286,7 +286,8 @@ def _build_page(key: str, container: Container) -> QWidget:
     if key == "new_bill":
         from app.ui.pages.new_bill_page import NewBillPage
         return NewBillPage(container.sales_service(), container.inventory_service(),
-                           container.product_service(), container.sessions)
+                           container.product_service(), container.sessions,
+                           container.catalog_service(), container.organization_service())
     if key == "sales":
         from app.ui.pages.sales_orders_page import SalesOrdersPage
         return SalesOrdersPage(container.sales_service(), container.inventory_service(),

@@ -189,6 +189,10 @@ class FakeInventoryRepository:
                               warehouse_code="WH", quantity_on_hand=on_hand,
                               quantity_reserved=reserved)
 
+    def get_levels_for_products(self, organization_id, product_ids, warehouse_id):
+        return {product_id: self.get_level(organization_id, product_id, warehouse_id)
+               for product_id in product_ids}
+
     def list_levels_for_product(self, organization_id, product_id):
         return [self.get_level(organization_id, product_id, wh_id)
                for (p_id, wh_id) in self.levels if p_id == product_id]
@@ -272,6 +276,39 @@ def test_stock_in_then_get_level_reflects_quantity():
     level = service.get_inventory_level(product.id, warehouse.id)
     assert level.quantity_on_hand == Decimal("100")
     assert level.quantity_available == Decimal("100")
+
+
+def test_get_levels_for_products_returns_one_entry_per_id():
+    service, warehouse, product = _setup()
+    product2 = _product()
+    service._products.products[product2.id] = product2
+    service.stock_in(StockMoveRequest(product_id=product.id, warehouse_id=warehouse.id,
+                                      quantity=Decimal("100")))
+
+    levels = service.get_levels_for_products([product.id, product2.id], warehouse.id)
+
+    assert levels[product.id].quantity_on_hand == Decimal("100")
+    # A product with no stock movement yet still gets a zero-filled level,
+    # not an omission — the caller shouldn't have to special-case a KeyError.
+    assert levels[product2.id].quantity_on_hand == Decimal("0")
+
+
+def test_get_levels_for_products_requires_permission():
+    service, warehouse, product = _setup()
+    limited, *_ = _service(permissions=frozenset())
+    with pytest.raises(PermissionDeniedError):
+        limited.get_levels_for_products([product.id], warehouse.id)
+
+
+def test_get_levels_for_products_rejects_unknown_warehouse():
+    service, _, product = _setup()
+    with pytest.raises(WarehouseNotFoundError):
+        service.get_levels_for_products([product.id], uuid.uuid4())
+
+
+def test_get_levels_for_products_with_empty_list_returns_empty_dict():
+    service, warehouse, _ = _setup()
+    assert service.get_levels_for_products([], warehouse.id) == {}
 
 
 def test_stock_out_reduces_on_hand():

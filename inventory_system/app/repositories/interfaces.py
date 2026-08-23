@@ -289,6 +289,10 @@ class InventoryRepository(Protocol):
     def get_level(self, organization_id: uuid.UUID, product_id: uuid.UUID,
                  warehouse_id: uuid.UUID) -> InventoryLevel: ...
 
+    def get_levels_for_products(self, organization_id: uuid.UUID,
+                                product_ids: list[uuid.UUID],
+                                warehouse_id: uuid.UUID) -> dict[uuid.UUID, InventoryLevel]: ...
+
     def list_levels_for_product(self, organization_id: uuid.UUID,
                                 product_id: uuid.UUID) -> list[InventoryLevel]: ...
 

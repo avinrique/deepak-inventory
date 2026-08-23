@@ -2,9 +2,17 @@
 the Purchase Order form — # | Product | SKU | HSN Code | Qty | Rate |
 [Discount %] | [Excise %] | Tax % | Amount | Stock | Action (excise only
 where discount is, i.e. Sales/New Bill — Purchase Orders carry neither),
-with a debounced server-side product search (name/SKU/barcode), live
-per-row and grand totals, and a per-organization warehouse-scoped stock
-column.
+with a debounced server-side product search (name/SKU/barcode/HSN code)
+shown in a rich ProductSuggestPopup (Name/SKU/HSN/Stock/Price per row),
+live per-row and grand totals, and a per-organization warehouse-scoped
+stock column.
+
+When a search finds nothing, or the caller passes allow_product_creation=
+True, the popup's pinned "+ Add Product" row lets the host open its own
+product-creation dialog (this widget never does — see add_product_
+requested below) and hand the result straight back via add_row(), so
+creating a product never interrupts whatever else the user has already
+entered in the surrounding form.
 
 Replaces the two previously-separate implementations (app.ui.widgets.
 bill_items_table.BillItemsTable and app.ui.widgets.order_items_editor.
@@ -27,10 +35,9 @@ import logging
 import uuid
 from decimal import Decimal, InvalidOperation
 
-from PySide6.QtCore import QThreadPool, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QThreadPool, Qt, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QComboBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -55,6 +62,7 @@ from app.schemas.product import ProductFilter, ProductOut
 from app.services.inventory_service import InventoryService
 from app.services.product_service import ProductService
 from app.ui.theme import GREEN, MUTED, RED
+from app.ui.widgets.product_suggest_popup import ProductSuggestPopup
 from app.workers.base_worker import Worker
 
 _logger = logging.getLogger(__name__)
@@ -76,18 +84,33 @@ def _money(value: Decimal) -> str:
 
 class TransactionItemsTable(QWidget):
     totals_changed = Signal()
+    # Emitted when the user activates the popup's "+ Add Product" row —
+    # only ever fires when allow_product_creation=True (see below). Carries
+    # whatever text is currently in the search box, so the host's Add
+    # Product dialog can prefill Name with it. This widget never builds
+    # that dialog itself — it has no catalog/session access, and the host
+    # page already owns the permission check and catalog data (see
+    # NewBillPage._on_add_product_requested).
+    add_product_requested = Signal(str)
 
     def __init__(self, product_service: ProductService, inventory_service: InventoryService,
                 *, include_discount: bool = True, price_label: str = "Rate",
-                price_field: str = "selling_price", parent=None):
+                price_field: str = "selling_price", allow_product_creation: bool = False,
+                parent=None):
         super().__init__(parent)
         self._product_service = product_service
         self._inventory_service = inventory_service
         self._include_discount = include_discount
         self._price_field = price_field
+        self._allow_product_creation = allow_product_creation
         self._warehouse_id: uuid.UUID | None = None
-        self._rows: list[dict] = []  # parallel to table rows: {"product": ProductOut}
+        # Parallel to table rows: {"product": ProductOut, "available":
+        # Decimal | None}. "available" is filled in once _on_stock_loaded
+        # returns and is what the soft over-stock warning compares the
+        # typed quantity against — see _apply_stock_warning.
+        self._rows: list[dict] = []
         self._search_results: list[ProductOut] = []
+        self._search_generation = 0
         self._read_only = False
 
         self._col_discount = _COL_PRICE + 1 if include_discount else None
@@ -129,70 +152,118 @@ class TransactionItemsTable(QWidget):
         self._search_debounce.setSingleShot(True)
         self._search_debounce.timeout.connect(self._run_search)
 
-    # -- search / add ---------------------------------------------------- #
+    # -- search / suggestions ---------------------------------------------#
     def _build_search_bar(self) -> QHBoxLayout:
         bar = QHBoxLayout()
         bar.setSpacing(8)
 
         self._search = QLineEdit()
-        self._search.setPlaceholderText("Search product by name, SKU, or barcode…")
+        self._search.setPlaceholderText(
+            "Search product by name, SKU, barcode, or HSN code…")
         self._search.textChanged.connect(self._on_search_text_changed)
+        # Up/Down/Enter/Escape are handled here rather than by the popup
+        # itself, so the popup never needs keyboard focus and typing never
+        # jumps out of this box mid-word — see eventFilter below and
+        # ProductSuggestPopup's module docstring.
+        self._search.installEventFilter(self)
         bar.addWidget(self._search, stretch=1)
 
-        self._results = QComboBox()
-        self._results.setMinimumWidth(320)
-        self._results.setPlaceholderText("No matches yet")
-        bar.addWidget(self._results, stretch=1)
-
-        self._add_button = QPushButton("+ Add Product")
-        self._add_button.setObjectName("orderGhost")
-        self._add_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._add_button.clicked.connect(self._add_selected_result)
-        bar.addWidget(self._add_button)
+        self._popup = ProductSuggestPopup(self)
+        self._popup.product_selected.connect(self._on_suggestion_selected)
+        self._popup.add_product_requested.connect(self._on_popup_add_product_requested)
         return bar
 
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
+        if watched is not self._search or event.type() != QEvent.Type.KeyPress:
+            return super().eventFilter(watched, event)
+        if not self._popup.is_open():
+            return super().eventFilter(watched, event)
+        key = event.key()
+        if key == Qt.Key.Key_Down:
+            self._popup.move_selection(1)
+            return True
+        if key == Qt.Key.Key_Up:
+            self._popup.move_selection(-1)
+            return True
+        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self._popup.activate_selection()
+            return True
+        if key == Qt.Key.Key_Escape:
+            self._popup.hide_popup()
+            return True
+        return super().eventFilter(watched, event)
+
     def _on_search_text_changed(self) -> None:
+        text = self._search.text().strip()
+        if not text:
+            self._search_debounce.stop()
+            self._search_generation += 1  # invalidate any in-flight search
+            self._search_results = []
+            self._popup.hide_popup()
+            return
         self._search_debounce.start(_SEARCH_DEBOUNCE_MS)
+        self._popup.show_loading()
+        self._popup.reposition_below(self._search)
+        self._popup.show_popup()
 
     def _run_search(self) -> None:
         text = self._search.text().strip()
         if not text:
-            self._results.clear()
-            self._search_results = []
-            return
-        worker = Worker(self._product_service.search_products,
-                        ProductFilter(search=text, status=ProductStatus.ACTIVE,
-                                     page_size=_SEARCH_PAGE_SIZE))
-        worker.signals.finished.connect(self._on_search_results)
-        worker.signals.error.connect(self._on_search_error)
+            return  # cleared during the debounce window
+        # Bumped per search so a slow, superseded result can't clobber a
+        # newer one that already returned — the same generation-guard
+        # shape AsyncContentArea uses for its own reload() races.
+        self._search_generation += 1
+        generation = self._search_generation
+        worker = Worker(self._search_and_fetch_stock, text)
+        worker.signals.finished.connect(
+            lambda result: self._on_search_results(result, generation))
+        worker.signals.error.connect(lambda exc: self._on_search_error(exc, generation))
         QThreadPool.globalInstance().start(worker)
 
-    def _on_search_results(self, page) -> None:
+    def _search_and_fetch_stock(self, text: str):
+        """Runs on the worker thread: the product search plus, only when a
+        warehouse is already selected, one bulk stock lookup for exactly
+        the ids in that page — never per-row, never the whole catalog.
+        """
+        page = self._product_service.search_products(
+            ProductFilter(search=text, status=ProductStatus.ACTIVE,
+                         page_size=_SEARCH_PAGE_SIZE))
+        stock_by_product = {}
+        if self._warehouse_id is not None and page.items:
+            stock_by_product = self._inventory_service.get_levels_for_products(
+                [p.id for p in page.items], self._warehouse_id)
+        return page, stock_by_product
+
+    def _on_search_results(self, result, generation: int) -> None:
+        if generation != self._search_generation:
+            return  # superseded by a newer search — this result is stale
+        page, stock_by_product = result
         self._search_results = page.items
-        self._results.clear()
-        for product in page.items:
-            price = getattr(product, self._price_field)
-            label = f"{product.sku} — {product.name} ({_money(price)})"
-            self._results.addItem(label, product.id)
-        if not page.items:
-            self._results.addItem("No matching products", None)
+        self._popup.show_products(page.items, self._price_field, stock_by_product,
+                                  show_add_product=self._allow_product_creation)
+        self._popup.reposition_below(self._search)
+        self._popup.show_popup()
 
-    def _on_search_error(self, exc: Exception) -> None:
+    def _on_search_error(self, exc: Exception, generation: int) -> None:
+        if generation != self._search_generation:
+            return
         _logger.exception("Product search failed", exc_info=exc)
-        self._results.clear()
-        self._results.addItem("Search failed — try again", None)
+        self._search_results = []
+        self._popup.show_error("Couldn't search products — try again.",
+                               show_add_product=self._allow_product_creation)
+        self._popup.reposition_below(self._search)
+        self._popup.show_popup()
 
-    def _add_selected_result(self) -> None:
-        product_id = self._results.currentData()
-        if product_id is None:
-            return
-        product = next((p for p in self._search_results if p.id == product_id), None)
-        if product is None:
-            return
+    def _on_suggestion_selected(self, product: ProductOut) -> None:
         self.add_row(product)
         self._search.clear()
-        self._results.clear()
         self._search_results = []
+        self._popup.hide_popup()
+
+    def _on_popup_add_product_requested(self) -> None:
+        self._popup.hide_popup()
+        self.add_product_requested.emit(self._search.text().strip())
 
     # -- warehouse (for the live stock column) ---------------------------- #
     def set_warehouse(self, warehouse_id: uuid.UUID | None) -> None:
@@ -219,7 +290,7 @@ class TransactionItemsTable(QWidget):
         """
         row = self._table.rowCount()
         self._table.insertRow(row)
-        self._rows.insert(row, {"product": product})
+        self._rows.insert(row, {"product": product, "available": None})
         self._empty_hint.setVisible(False)
 
         num_item = QTableWidgetItem(str(row + 1))
@@ -291,8 +362,8 @@ class TransactionItemsTable(QWidget):
     def set_read_only(self, read_only: bool) -> None:
         self._read_only = read_only
         self._search.setEnabled(not read_only)
-        self._results.setEnabled(not read_only)
-        self._add_button.setEnabled(not read_only)
+        if read_only:
+            self._popup.hide_popup()
         for row in range(self._table.rowCount()):
             self._apply_read_only_to_row(row)
 
@@ -334,6 +405,7 @@ class TransactionItemsTable(QWidget):
         if row >= self._table.rowCount():
             return
         self._recompute_row_amount(row)
+        self._apply_stock_warning(row)
         self.totals_changed.emit()
 
     def _row_decimal(self, row: int, col: int) -> Decimal | None:
@@ -380,6 +452,8 @@ class TransactionItemsTable(QWidget):
         if self._warehouse_id is None:
             stock_item.setText("—")
             stock_item.setForeground(QColor(MUTED))
+            stock_item.setToolTip("")
+            self._rows[row]["available"] = None
             return
         product = self._rows[row]["product"]
         worker = Worker(self._inventory_service.get_inventory_level, product.id,
@@ -396,7 +470,30 @@ class TransactionItemsTable(QWidget):
         if stock_item is None:
             return
         stock_item.setText(f"{level.quantity_available:g}")
-        stock_item.setForeground(QColor(RED if level.quantity_available <= 0 else GREEN))
+        self._rows[row]["available"] = level.quantity_available
+        self._apply_stock_warning(row)
+
+    def _apply_stock_warning(self, row: int) -> None:
+        """Soft, non-blocking heads-up when the typed quantity exceeds
+        what's on hand — never refuses to save. Whether that's actually
+        allowed is an org-level policy (Organization.allow_negative_stock)
+        enforced server-side at fulfillment time, same as before this
+        feature; this is only a visual hint so the user notices before
+        submitting, not a second copy of that rule.
+        """
+        if row >= len(self._rows):
+            return
+        stock_item = self._table.item(row, self._col_stock)
+        if stock_item is None:
+            return
+        available = self._rows[row].get("available")
+        if available is None:
+            return  # no warehouse selected yet, or stock hasn't loaded
+        quantity = self._row_decimal(row, _COL_QTY)
+        over_stock = quantity is not None and quantity > available
+        stock_item.setForeground(QColor(RED if (over_stock or available <= 0) else GREEN))
+        stock_item.setToolTip(
+            f"Only {available:g} available — quantity exceeds stock." if over_stock else "")
 
     # -- collection / totals ------------------------------------------------#
     def is_empty(self) -> bool:

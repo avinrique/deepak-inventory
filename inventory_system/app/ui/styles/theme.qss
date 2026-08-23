@@ -567,6 +567,29 @@ QTableWidget#totalsRow::item:hover {
     background: @SURFACE_MUTED@;
 }
 
+/* Product-suggestion popup (app/ui/widgets/product_suggest_popup.py) —
+   the rich Name/SKU/HSN/Stock/Price dropdown shown under the product
+   search box in New Bill / Sales Order / Purchase Order item entry. */
+QFrame#productSuggestPopup {
+    background: white;
+    border: 1px solid @BORDER@;
+    border-radius: @RADIUS@px;
+}
+QListWidget#productSuggestList {
+    background: transparent;
+    border: none;
+    outline: none;
+}
+QListWidget#productSuggestList::item {
+    border-bottom: 1px solid @SURFACE_MUTED@;
+}
+QListWidget#productSuggestList::item:selected {
+    background: @ACCENT_TINT@;
+}
+QListWidget#productSuggestList::item:hover {
+    background: @SURFACE_MUTED@;
+}
+
 /* Hover affordance for the server-sorted transaction-list headers only
    (app/ui/widgets/totals_table.py sets this objectName) — scoped so
    tables elsewhere that don't respond to a header click don't imply they

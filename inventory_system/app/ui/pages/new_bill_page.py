@@ -53,6 +53,7 @@ from app.core.exceptions import (
     WarehouseNotFoundError,
 )
 from app.domain.sales import PaymentMethod, SalesOrderStatus
+from app.schemas.product import BrandOut, CategoryOut, UnitOut
 from app.schemas.sales import (
     CustomerBalance,
     CustomerOut,
@@ -66,11 +67,14 @@ from app.schemas.sales import (
 from app.schemas.inventory import WarehouseOut
 from app.security.authorization import PermissionDeniedError
 from app.security.session import SessionManager
+from app.services.catalog_service import CatalogService
 from app.services.inventory_service import InventoryService
+from app.services.organization_service import OrganizationService
 from app.services.product_service import ProductService
 from app.services.sales_service import SalesService
 from app.ui import permission_hints
 from app.ui.theme import GREEN, MUTED, STYLESHEET
+from app.ui.widgets.add_product_dialog import AddProductDialog
 from app.ui.widgets.custom_fields_section import CustomFieldsSection
 from app.ui.widgets.customer_form_dialog import CustomerFormDialog
 from app.ui.widgets.invoice_preview_dialog import InvoicePreviewDialog
@@ -105,15 +109,30 @@ def _parse_decimal(text: str) -> Decimal | None:
 
 class NewBillPage(QWidget):
     def __init__(self, sales_service: SalesService, inventory_service: InventoryService,
-                product_service: ProductService, sessions: SessionManager):
+                product_service: ProductService, sessions: SessionManager,
+                catalog_service: CatalogService | None = None,
+                organization_service: OrganizationService | None = None):
+        """``catalog_service``/``organization_service`` are optional (same
+        convention as ProductsPage) — they're only needed to power "+ Add
+        Product" (categories/brands/units, and the org's default tax
+        percent to prefill). Omitting them just means that affordance
+        never appears; everything else about New Bill is unaffected.
+        """
         super().__init__()
         self._sales_service = sales_service
         self._inventory_service = inventory_service
         self._product_service = product_service
         self._sessions = sessions
+        self._catalog_service = catalog_service
+        self._organization_service = organization_service
 
         self._customers: list[CustomerOut] = []
         self._warehouses: list[WarehouseOut] = []
+        self._categories: list[CategoryOut] = []
+        self._brands: list[BrandOut] = []
+        self._units: list[UnitOut] = []
+        self._catalog_loaded = False
+        self._default_tax_percent = Decimal("0")
         self._sales_order_id: uuid.UUID | None = None
         self._sales_order_status: SalesOrderStatus | None = None
         self._invoice_id: uuid.UUID | None = None
@@ -150,6 +169,8 @@ class NewBillPage(QWidget):
         outer.addLayout(self._build_actions_bar())
 
         self._load_reference_data()
+        if self._can("products.create"):
+            self._load_catalog_options()
         self._update_status_banner()
         self._update_button_states()
 
@@ -187,8 +208,10 @@ class NewBillPage(QWidget):
 
         self._items_table = TransactionItemsTable(
             self._product_service, self._inventory_service, include_discount=True,
-            price_label="Rate", price_field="selling_price")
+            price_label="Rate", price_field="selling_price",
+            allow_product_creation=self._can("products.create"))
         self._items_table.totals_changed.connect(self._on_totals_changed)
+        self._items_table.add_product_requested.connect(self._on_add_product_requested)
         self._items_table.setSizePolicy(QSizePolicy.Policy.Expanding,
                                         QSizePolicy.Policy.Expanding)
         products_layout.addWidget(self._items_table, stretch=1)
@@ -559,6 +582,55 @@ class NewBillPage(QWidget):
         _logger.exception("Failed to load New Bill reference data", exc_info=exc)
         QMessageBox.critical(self, "Couldn't load data",
                             "Failed to load customers/warehouses. Please retry.")
+
+    # -- product catalog (only fetched when "+ Add Product" can appear) ------#
+    def _fetch_catalog_options(self):
+        # Only reached when the session has products.create — see the
+        # _can() gate around _load_catalog_options()'s call site.
+        # Extracted so it's directly unit-testable without QThreadPool,
+        # same convention as _fetch_reference_data above.
+        categories = self._catalog_service.list_categories()
+        brands = self._catalog_service.list_brands()
+        units = self._catalog_service.list_units()
+        default_tax_percent = Decimal("0")
+        if self._organization_service is not None:
+            default_tax_percent = self._organization_service.get_current_organization(
+                ).default_tax_percent
+        return categories, brands, units, default_tax_percent
+
+    def _load_catalog_options(self) -> None:
+        if self._catalog_service is None:
+            return  # this NewBillPage instance wasn't given one — no Add Product affordance
+        worker = Worker(self._fetch_catalog_options)
+        worker.signals.finished.connect(self._on_catalog_options_loaded)
+        worker.signals.error.connect(self._on_catalog_options_error)
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_catalog_options_loaded(self, result) -> None:
+        self._categories, self._brands, self._units, self._default_tax_percent = result
+        self._catalog_loaded = True
+
+    def _on_catalog_options_error(self, exc: Exception) -> None:
+        # "+ Add Product" simply stays unusable (see _on_add_product_
+        # requested's not-yet-loaded guard) — this must not interrupt the
+        # bill the user is already building.
+        _logger.exception("Failed to load product catalog for Add Product", exc_info=exc)
+
+    def _on_add_product_requested(self, initial_name: str) -> None:
+        if not self._catalog_loaded:
+            QMessageBox.information(
+                self, "Still loading",
+                "Still loading product categories and units — try again in a moment.")
+            return
+        dialog = AddProductDialog(
+            self._product_service, self._categories, self._brands, self._units,
+            self._warehouses, parent=self, default_tax_percent=self._default_tax_percent,
+            initial_name=initial_name)
+        if dialog.exec() and dialog.product is not None:
+            # Only the new product is added — every other field already on
+            # this bill (customer, dates, notes, other items) is untouched,
+            # since nothing else about the page was rebuilt or reloaded.
+            self._items_table.add_row(dialog.product)
 
     # -- customer -------------------------------------------------------------#
     def _on_customer_changed(self) -> None:

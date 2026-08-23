@@ -130,7 +130,7 @@ class ProductOut(BaseModel):
 
 
 class ProductFilter(BaseModel):
-    search: str | None = None            # matches sku, barcode, or name
+    search: str | None = None            # matches name, sku, barcode, or hsn_code
     category_id: uuid.UUID | None = None
     brand_id: uuid.UUID | None = None
     status: ProductStatus | None = None

@@ -214,9 +214,17 @@ class SqlProductRepository:
             query = db.query(Product).filter(Product.organization_id == organization_id)
             if filter.search:
                 pattern = f"%{filter.search.strip()}%"
+                # hsn_code is searchable alongside the three obvious
+                # identifiers because it's how tax-facing work actually
+                # locates a product ("what did we bill under 8471?"), and
+                # it's already displayed as a column wherever products are
+                # picked (see TransactionItemsTable). NULL barcode/hsn_code
+                # rows simply don't match — ILIKE against NULL is NULL, not
+                # a match, which is the wanted behavior here.
                 query = query.filter(or_(Product.name.ilike(pattern),
                                          Product.sku.ilike(pattern),
-                                         Product.barcode.ilike(pattern)))
+                                         Product.barcode.ilike(pattern),
+                                         Product.hsn_code.ilike(pattern)))
             if filter.category_id:
                 query = query.filter(Product.category_id == filter.category_id)
             if filter.brand_id:

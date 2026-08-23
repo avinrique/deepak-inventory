@@ -437,6 +437,50 @@ def test_concurrent_transfers_in_opposite_directions_do_not_deadlock(world):
     assert level_a.quantity_on_hand + level_b.quantity_on_hand == Decimal("200")
 
 
+# -- bulk levels lookup ----------------------------------------------------#
+
+def test_get_levels_for_products_returns_one_entry_per_id(world):
+    with get_session() as session:
+        product2 = Product(organization_id=world["org_id"], sku="SKU-2", name="Gadget",
+                           unit_id=session.get(Product, world["product_id"]).unit_id,
+                           purchase_price=Decimal("10"), selling_price=Decimal("15"),
+                           tax_percent=Decimal("13"), minimum_stock_level=Decimal("0"))
+        session.add(product2)
+        session.flush()
+        product2_id = product2.id
+
+    repo = _repo()
+    repo.stock_in(world["org_id"], world["product_id"], world["warehouse_a_id"],
+                 Decimal("40"), world["user_id"])
+
+    levels = repo.get_levels_for_products(world["org_id"],
+                                          [world["product_id"], product2_id],
+                                          world["warehouse_a_id"])
+
+    assert levels[world["product_id"]].quantity_on_hand == Decimal("40")
+    # No Inventory row exists yet for product2 at this warehouse — it must
+    # still appear, zero-filled, not be silently missing from the dict.
+    assert levels[product2_id].quantity_on_hand == Decimal("0")
+    assert levels[product2_id].warehouse_code == "MAIN"
+
+
+def test_get_levels_for_products_is_scoped_by_warehouse(world):
+    repo = _repo()
+    repo.stock_in(world["org_id"], world["product_id"], world["warehouse_a_id"],
+                 Decimal("40"), world["user_id"])
+    repo.stock_in(world["org_id"], world["product_id"], world["warehouse_b_id"],
+                 Decimal("99"), world["user_id"])
+
+    levels = repo.get_levels_for_products(world["org_id"], [world["product_id"]],
+                                          world["warehouse_a_id"])
+    assert levels[world["product_id"]].quantity_on_hand == Decimal("40")
+
+
+def test_get_levels_for_products_with_empty_ids_returns_empty_dict(world):
+    repo = _repo()
+    assert repo.get_levels_for_products(world["org_id"], [], world["warehouse_a_id"]) == {}
+
+
 # -- warehouse repository -------------------------------------------------#
 
 def test_warehouse_repository_scopes_by_organization(world):

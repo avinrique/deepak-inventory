@@ -300,6 +300,37 @@ class SqlInventoryRepository:
                                   warehouse_code=code, quantity_on_hand=row.quantity_on_hand,
                                   quantity_reserved=row.quantity_reserved)
 
+    def get_levels_for_products(self, organization_id: uuid.UUID,
+                                product_ids: list[uuid.UUID],
+                                warehouse_id: uuid.UUID) -> dict[uuid.UUID, InventoryLevel]:
+        """One (product, warehouse) level per id in ``product_ids``, in a
+        single query — the bulk counterpart to get_level, for callers that
+        need stock for a whole result set (e.g. a product-suggestion
+        dropdown) without firing one query per row. A product with no
+        Inventory row at this warehouse yet gets a zero-quantity level
+        rather than being omitted, same as get_level's own fallback.
+        """
+        if not product_ids:
+            return {}
+        with get_session() as db:
+            warehouse = db.get(Warehouse, warehouse_id)
+            code = warehouse.code if warehouse else ""
+            rows = (db.query(Inventory)
+                   .filter(Inventory.organization_id == organization_id,
+                          Inventory.warehouse_id == warehouse_id,
+                          Inventory.product_id.in_(product_ids))
+                   .all())
+            levels = {r.product_id: InventoryLevel(
+                product_id=r.product_id, warehouse_id=warehouse_id, warehouse_code=code,
+                quantity_on_hand=r.quantity_on_hand, quantity_reserved=r.quantity_reserved)
+                for r in rows}
+            for product_id in product_ids:
+                if product_id not in levels:
+                    levels[product_id] = InventoryLevel(
+                        product_id=product_id, warehouse_id=warehouse_id, warehouse_code=code,
+                        quantity_on_hand=Decimal("0"), quantity_reserved=Decimal("0"))
+            return levels
+
     def list_levels_for_product(self, organization_id: uuid.UUID,
                                 product_id: uuid.UUID) -> list[InventoryLevel]:
         with get_session() as db:

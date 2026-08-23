@@ -23,6 +23,7 @@ Imported From/Expiry Date only make sense for physical GOODS. Re-order
 Point is similarly disabled for non-GOODS. Everything else (name,
 category, unit, pricing, tax) applies to all three types.
 """
+import logging
 import re
 import secrets
 from decimal import Decimal, InvalidOperation
@@ -53,14 +54,20 @@ from app.core.exceptions import (
 )
 from app.domain.product import ProductType
 from app.schemas.inventory import WarehouseOut
-from app.schemas.product import BrandOut, CategoryOut, ProductCreate, ProductOut, UnitOut
+from app.schemas.product import BrandOut, CategoryOut, ProductCreate, ProductFilter, ProductOut, UnitOut
 from app.security.authorization import PermissionDeniedError
 from app.services.product_service import ProductService
-from app.ui.theme import MUTED, RED, STYLESHEET
+from app.ui.theme import AMBER_DARK, MUTED, RED, STYLESHEET
 from app.workers.base_worker import Worker
+
+_logger = logging.getLogger(__name__)
 
 _NONE_ITEM = "—"
 _GOODS_ONLY_HINT = "Only applies to Goods."
+# How many existing same-name products to actually list in the warning —
+# enough to be useful, not an exhaustive dump for a name that's common by
+# design (e.g. many sizes/colors sharing one name).
+_DUPLICATE_NAME_DISPLAY_LIMIT = 3
 
 
 def _generate_sku_candidate(name: str) -> str:
@@ -104,12 +111,22 @@ class _SectionCard(QWidget):
 class AddProductDialog(QDialog):
     def __init__(self, product_service: ProductService, categories: list[CategoryOut],
                 brands: list[BrandOut], units: list[UnitOut], warehouses: list[WarehouseOut],
-                parent=None, default_tax_percent: Decimal = Decimal("0")):
+                parent=None, default_tax_percent: Decimal = Decimal("0"),
+                initial_name: str | None = None):
+        """``initial_name`` prefills Name — used when this dialog is opened
+        from a product search that came up empty (New Bill's "+ Add
+        Product"), so the user's typed text continues into the form
+        instead of starting over.
+        """
         super().__init__(parent)
         self._product_service = product_service
         self._units_data = units
         self._default_tax_percent = default_tax_percent
         self.product: ProductOut | None = None
+        # The exact Name value the user has already clicked past a
+        # duplicate-name warning for — see _submit()/_on_name_check_result.
+        # None means "not checked (or the name changed since)".
+        self._name_ack: str | None = None
 
         self.setWindowTitle("Add Product")
         self.setMinimumSize(560, 640)
@@ -142,6 +159,8 @@ class AddProductDialog(QDialog):
         outer.addLayout(self._build_footer())
 
         self._on_type_changed(ProductType.GOODS)
+        if initial_name:
+            self._name.setText(initial_name)
 
     # -- header ------------------------------------------------------- #
     def _build_header(self) -> QHBoxLayout:
@@ -205,6 +224,7 @@ class AddProductDialog(QDialog):
 
         self._name = QLineEdit()
         self._name.setPlaceholderText("e.g. Basmati Rice 5kg")
+        self._name.textChanged.connect(self._on_name_changed)
         card.form.addRow("Name *", self._name)
 
         self._category = QComboBox()
@@ -390,6 +410,16 @@ class AddProductDialog(QDialog):
         container.setContentsMargins(24, 8, 24, 20)
         container.setSpacing(8)
 
+        # Amber, not red: a same-name product is legitimate (sizes/colors
+        # of one item share a name), so this is a heads-up the user can
+        # act on or dismiss by clicking Save again — never a hard error
+        # like _error_label below.
+        self._duplicate_warning_label = QLabel("")
+        self._duplicate_warning_label.setWordWrap(True)
+        self._duplicate_warning_label.setStyleSheet(f"color: {AMBER_DARK}; font-size: 12px;")
+        self._duplicate_warning_label.hide()
+        container.addWidget(self._duplicate_warning_label)
+
         self._error_label = QLabel("")
         self._error_label.setWordWrap(True)
         self._error_label.setStyleSheet(f"color: {RED}; font-size: 12px;")
@@ -416,9 +446,22 @@ class AddProductDialog(QDialog):
             self._show_error(f"{field_label} must be a number.")
             return None
 
-    def _set_busy(self, busy: bool) -> None:
+    def _idle_button_label(self) -> str:
+        return "Create Anyway" if self._name_ack is not None else "Save Product"
+
+    def _set_busy(self, busy: bool, *, busy_label: str = "Saving…") -> None:
         self._save_button.setEnabled(not busy)
-        self._save_button.setText("Saving…" if busy else "Save Product")
+        self._save_button.setText(busy_label if busy else self._idle_button_label())
+
+    def _on_name_changed(self) -> None:
+        # A duplicate-name acknowledgment is only valid for the exact name
+        # it was given for — editing the name after seeing the warning
+        # must not silently carry the "go ahead anyway" past a name the
+        # user never actually confirmed.
+        if self._name_ack is not None:
+            self._name_ack = None
+            self._duplicate_warning_label.hide()
+            self._save_button.setText(self._idle_button_label())
 
     # -- submit --------------------------------------------------------- #
     def _submit(self) -> None:
@@ -494,6 +537,60 @@ class AddProductDialog(QDialog):
             country_of_origin=self._country_of_origin.text().strip() or None,
             expiry_date=expiry_date)
 
+        if name != self._name_ack:
+            # Not yet checked for this exact name (or it changed since the
+            # last check) — look for existing products sharing it before
+            # creating. This is a courtesy warning, not a gate: SKU/barcode
+            # stay hard-blocked server-side regardless (DuplicateSkuError/
+            # DuplicateBarcodeError below), same as before this feature.
+            self._duplicate_warning_label.hide()
+            self._set_busy(True, busy_label="Checking…")
+            worker = Worker(self._product_service.search_products,
+                            ProductFilter(search=name, page_size=10))
+            worker.signals.finished.connect(
+                lambda page: self._on_name_check_result(page, name, data, warehouse_id,
+                                                        opening_quantity))
+            worker.signals.error.connect(
+                lambda exc: self._on_name_check_error(exc, data, warehouse_id,
+                                                      opening_quantity))
+            QThreadPool.globalInstance().start(worker)
+            return
+
+        self._create_product(data, warehouse_id, opening_quantity)
+
+    def _on_name_check_result(self, page, name: str, data: ProductCreate,
+                              warehouse_id, opening_quantity: Decimal) -> None:
+        matches = [p for p in page.items if p.name.strip().lower() == name.lower()]
+        if not matches:
+            self._create_product(data, warehouse_id, opening_quantity)
+            return
+        # Arm: a second Save click with this same name proceeds straight
+        # to creation without checking again — see _on_name_changed for
+        # why editing the name resets this.
+        self._name_ack = name
+        listing = "; ".join(f"{p.name} (SKU {p.sku})"
+                            for p in matches[:_DUPLICATE_NAME_DISPLAY_LIMIT])
+        more = len(matches) - _DUPLICATE_NAME_DISPLAY_LIMIT
+        if more > 0:
+            listing += f", and {more} more"
+        self._duplicate_warning_label.setText(
+            f"A product named {name!r} already exists: {listing}. Click "
+            "“Create Anyway” if this is intentionally a separate product, "
+            "or change the name to pick the existing one instead.")
+        self._duplicate_warning_label.show()
+        self._set_busy(False)
+
+    def _on_name_check_error(self, exc: Exception, data: ProductCreate, warehouse_id,
+                             opening_quantity: Decimal) -> None:
+        # The duplicate-name check is a courtesy, not a requirement — if it
+        # can't run (permission gap, transient DB error), creation must
+        # still proceed; the real uniqueness rules (SKU/barcode) are
+        # enforced server-side regardless of whether this check ran.
+        _logger.warning("Duplicate-name check failed, proceeding without it", exc_info=exc)
+        self._create_product(data, warehouse_id, opening_quantity)
+
+    def _create_product(self, data: ProductCreate, warehouse_id, opening_quantity: Decimal
+                        ) -> None:
         self._set_busy(True)
         worker = Worker(self._product_service.create_product, data,
                         warehouse_id=warehouse_id, opening_quantity=opening_quantity)
@@ -520,5 +617,6 @@ class AddProductDialog(QDialog):
             self._show_error("Something went wrong saving this product. Please try again.")
 
     def _show_error(self, message: str) -> None:
+        self._duplicate_warning_label.hide()
         self._error_label.setText(message)
         self._error_label.show()

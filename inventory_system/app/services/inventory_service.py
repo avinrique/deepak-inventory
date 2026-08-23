@@ -191,6 +191,23 @@ class InventoryService:
         return self._inventory.get_level(self._organization_id(), product_id, warehouse_id)
 
     @require_permission("inventory.view")
+    def get_levels_for_products(self, product_ids: list[uuid.UUID],
+                                warehouse_id: uuid.UUID) -> dict[uuid.UUID, InventoryLevel]:
+        """Bulk counterpart to get_inventory_level — one query for a whole
+        result set (e.g. product-suggestion rows) instead of one per id.
+        Deliberately skips _require_product's per-id existence check: the
+        ids here come from a trusted prior search_products() result, not a
+        caller-supplied arbitrary id, so re-validating each one would just
+        reintroduce the N+1 this method exists to avoid. An id that somehow
+        doesn't exist is simply absent from get_levels_for_products' own
+        query and gets zero-filled like any other product with no stock
+        row yet — never an error.
+        """
+        self._require_warehouse(warehouse_id)
+        return self._inventory.get_levels_for_products(self._organization_id(), product_ids,
+                                                        warehouse_id)
+
+    @require_permission("inventory.view")
     def list_levels_for_product(self, product_id: uuid.UUID) -> list[InventoryLevel]:
         self._require_product(product_id)
         return self._inventory.list_levels_for_product(self._organization_id(), product_id)
