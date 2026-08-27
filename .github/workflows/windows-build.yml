@@ -84,7 +84,27 @@ jobs:
           # headless runner and skip themselves — ~180 tests silently not
           # running while the job still reports success.
           QT_QPA_PLATFORM: offscreen
-        run: python -m pytest -q
+          # This codebase is full of em-dashes, arrows and emoji (the sidebar
+          # icons are literal emoji characters). Windows still defaults to a
+          # legacy code page for stdout, so printing a failure containing any
+          # of them raises UnicodeEncodeError and buries the real error.
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: "utf-8"
+        # Failures are re-emitted as ::error:: workflow commands so they show
+        # up as annotations on the run. Downloading the full log needs admin
+        # rights on the repository; annotations do not, which means anyone
+        # looking at a failed build can see *which* test failed without
+        # having to be an owner.
+        run: |
+          $output = python -m pytest -q --tb=short 2>&1 | Out-String
+          Write-Host $output
+          if ($LASTEXITCODE -ne 0) {
+            $output -split "`r?`n" |
+              Where-Object { $_ -match '^(FAILED|ERROR) ' } |
+              ForEach-Object { Write-Host "::error::$_" }
+            throw "pytest failed"
+          }
+        shell: pwsh
 
       - name: Stamp the build with the commit
         # Ends up in the log header of every installed copy, so a bug report
