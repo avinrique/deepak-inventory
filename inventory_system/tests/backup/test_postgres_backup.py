@@ -114,10 +114,30 @@ def test_require_tool_raises_when_not_on_path(monkeypatch):
 
 # -- verify_backup_file (no live DB needed — reads the file directly) -----#
 
+def _pg_restore_available() -> bool:
+    try:
+        _require_tool("pg_restore")
+    except BackupToolNotFoundError:
+        return False
+    return True
+
+
+# These assert what pg_restore concludes about a file, so they need the real
+# program — there is nothing to test without it. Previously they simply
+# failed on any machine that lacked it, which included the CI runner (it has
+# PostgreSQL installed but not on PATH), while passing locally purely because
+# Homebrew had put pg_restore on the developer's PATH.
+needs_pg_restore = pytest.mark.skipif(
+    not _pg_restore_available(),
+    reason="pg_restore is not installed — run packaging/fetch_pgtools.py")
+
+
+@needs_pg_restore
 def test_verify_backup_file_false_for_missing_file(tmp_path):
     assert verify_backup_file(str(tmp_path / "does_not_exist.dump")) is False
 
 
+@needs_pg_restore
 def test_verify_backup_file_false_for_garbage_file(tmp_path):
     garbage = tmp_path / "garbage.dump"
     garbage.write_bytes(b"not a real pg_dump file")

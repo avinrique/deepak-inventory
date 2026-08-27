@@ -107,11 +107,20 @@ def icon_path() -> Path:
 
 
 def pg_bin_dir() -> Path:
-    """Where the installer puts pg_dump.exe/pg_restore.exe. Checked before
-    PATH by app.backup.postgres_backup, so Backup works on a machine with
-    no PostgreSQL installation of its own.
+    """Where pg_dump/pg_restore are shipped. Checked before PATH by
+    app.backup.postgres_backup, so Backup works on a machine with no
+    PostgreSQL installation of its own.
+
+    Same dev/frozen split as icon_path(): PyInstaller flattens the directory
+    to the bundle root, but packaging/fetch_pgtools.py stages it under
+    packaging/ in a source checkout. Checking only the frozen location meant
+    the tools were invisible when running from source even after staging
+    them, so the backup tests could never see them.
     """
-    return resource_path("pgtools")
+    bundled = resource_path("pgtools")
+    if bundled.is_dir():
+        return bundled
+    return resource_path("packaging", "pgtools")
 
 
 def ensure_user_dirs() -> None:

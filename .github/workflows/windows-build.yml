@@ -78,6 +78,17 @@ jobs:
         run: ruff check app scripts packaging
         continue-on-error: true
 
+      - name: Bundle the PostgreSQL backup tools
+        # Before the tests, not after: the tests that exercise pg_restore
+        # skip themselves when it cannot be found, and the runner has
+        # PostgreSQL installed but not on PATH. Staging first is what makes
+        # them actually run here.
+        #
+        # --optional keeps a runner-image change from breaking the build
+        # outright; the packaged app then reports that Backup is unavailable
+        # rather than crashing.
+        run: python packaging/fetch_pgtools.py --optional
+
       - name: Run tests
         env:
           # Without this the UI tests cannot create a QApplication on a
@@ -114,13 +125,6 @@ jobs:
 
       - name: Generate the Windows version resource
         run: python packaging/make_version_info.py
-
-      - name: Bundle the PostgreSQL backup tools
-        # windows-latest ships PostgreSQL, so pg_dump/pg_restore can be taken
-        # from there rather than downloaded. --optional keeps a runner image
-        # change from breaking the build outright; the self-test still passes
-        # and Backup reports the tools are missing instead of crashing.
-        run: python packaging/fetch_pgtools.py --optional
 
       - name: Build the executable
         run: python -m PyInstaller packaging/InventoryManagementSystem.spec --noconfirm --clean
