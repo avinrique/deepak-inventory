@@ -20,20 +20,37 @@ name: Windows build
 
 on:
   push:
-    branches: [main]
+    # Every branch, not just main. A Windows executable cannot be produced on
+    # the machine this is developed on, so CI is the only place the packaged
+    # application exists at all — waiting until a merge to find out it does
+    # not build would be leaving the whole point of the workflow untested.
+    branches: ["**"]
     tags: ["v*"]
   pull_request:
     branches: [main]
   workflow_dispatch:
 
+# A branch push that is also an open pull request would otherwise start two
+# identical builds; and a second push makes the first one's artifacts stale.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 defaults:
   run:
     working-directory: inventory_system
+
+# Read-only by default. The release step needs to write, and asks for it
+# explicitly below rather than the whole workflow running with write access.
+permissions:
+  contents: read
 
 jobs:
   build:
     runs-on: windows-latest
     timeout-minutes: 45
+    permissions:
+      contents: write   # only used by "Attach the installer to the release"
 
     steps:
       - uses: actions/checkout@v4
@@ -115,11 +132,31 @@ jobs:
           }
         shell: pwsh
 
+      - name: Ensure Inno Setup is available
+        # Present on the current windows-latest image, but not something the
+        # image is contracted to keep. Installing when it is missing costs a
+        # few seconds and stops a runner-image change from breaking releases.
+        run: |
+          $iscc = Get-ChildItem -Path "${env:ProgramFiles(x86)}", "${env:ProgramFiles}" `
+            -Filter ISCC.exe -Recurse -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+          if (-not $iscc) {
+            Write-Host "Inno Setup not found - installing"
+            choco install innosetup --no-progress -y
+          } else {
+            Write-Host "Found $($iscc.FullName)"
+          }
+        shell: pwsh
+
       - name: Build the installer
         run: |
           $version = (Select-String -Path app\__version__.py -Pattern '^VERSION\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
           Write-Host "Building installer for $version"
-          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$version" packaging\installer.iss
+          $iscc = Get-ChildItem -Path "${env:ProgramFiles(x86)}", "${env:ProgramFiles}" `
+            -Filter ISCC.exe -Recurse -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+          if (-not $iscc) { throw "ISCC.exe not found after installation" }
+          & $iscc.FullName "/DAppVersion=$version" packaging\installer.iss
           if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
         shell: pwsh
 

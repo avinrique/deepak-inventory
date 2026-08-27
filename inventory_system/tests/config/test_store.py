@@ -6,7 +6,9 @@ reassemble the URL byte-for-byte (a dropped ?sslmode=require would silently
 downgrade a Neon connection to plaintext, and a mangled one would look like
 a wrong-password failure to the user).
 """
+import base64
 import json
+import sys
 
 import pytest
 from sqlalchemy.engine import make_url
@@ -112,3 +114,64 @@ def test_redacted_url_hides_the_password():
 
 def test_redacted_url_survives_an_unparseable_value():
     assert store.redacted_url("!!! not a url !!!") == "<unparseable database url>"
+
+
+# -- Windows DPAPI --------------------------------------------------------- #
+# These only run on Windows, which is the point: the encryption path is
+# Windows-only, so on any other machine it is never executed at all and a
+# defect in it cannot be observed. Development happens on macOS, so CI is the
+# first and only place this code runs.
+
+pytestmark_windows = pytest.mark.skipif(
+    sys.platform != "win32", reason="DPAPI is Windows-only")
+
+
+@pytestmark_windows
+def test_dpapi_round_trips_a_password():
+    """Catches the class of ctypes bug that does not raise: a DATA_BLOB holds
+    only a length and a raw pointer, so if the buffer behind it is garbage
+    collected the API reads freed memory and returns plausible-looking
+    rubbish rather than failing."""
+    secret = "correct horse battery staple"
+
+    assert store._decrypt(store._encrypt(secret)) == secret
+
+
+@pytestmark_windows
+def test_dpapi_handles_non_ascii_and_long_passwords():
+    secret = "pässwörd-ünïcode-" + ("x" * 500)
+
+    assert store._decrypt(store._encrypt(secret)) == secret
+
+
+@pytestmark_windows
+def test_dpapi_ciphertext_differs_from_the_plaintext():
+    """A base64 of the plaintext would round-trip perfectly too — this is
+    what distinguishes real encryption from the development fallback."""
+    secret = "not-really-encrypted"
+
+    encoded = store._encrypt(secret)
+
+    assert base64.b64decode(encoded) != secret.encode()
+    assert secret not in encoded
+
+
+@pytestmark_windows
+def test_dpapi_rejects_a_blob_sealed_with_different_entropy(monkeypatch):
+    """The entropy namespaces our ciphertext, so a blob another program on
+    the same account produced cannot be fed to us."""
+    encoded = store._encrypt("secret")
+    monkeypatch.setattr(store, "_ENTROPY", b"some-other-application")
+
+    with pytest.raises(store.ConfigError):
+        store._decrypt(encoded)
+
+
+@pytestmark_windows
+def test_repeated_encryption_does_not_exhaust_or_corrupt_the_heap():
+    """LocalFree is called with a full-width pointer. Given ctypes' default
+    marshalling truncates an untyped pointer to 32 bits on 64-bit Windows,
+    getting this wrong corrupts the heap — which shows up as a crash
+    somewhere unrelated, so it is worth hammering deliberately."""
+    for index in range(200):
+        assert store._decrypt(store._encrypt(f"password-{index}")) == f"password-{index}"
