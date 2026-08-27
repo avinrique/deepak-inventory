@@ -23,6 +23,8 @@ Deactivate actions, which also enforce the Owner-protection rule).
 read_only=True turns this into a "View User" screen: every field disabled,
 no Save button — same convention as ProductFormDialog.
 """
+import logging
+
 from PySide6.QtCore import QThreadPool, Qt
 from PySide6.QtWidgets import (
     QComboBox,
@@ -50,6 +52,8 @@ from app.ui.theme import MUTED, RED, STYLESHEET
 from app.ui.widgets.responsive import constrain_dialog
 from app.workers.base_worker import Worker
 
+_logger = logging.getLogger(__name__)
+
 DEFAULT_PASSWORD_POLICY = PasswordPolicy(min_length=8, require_uppercase=False,
                                          require_number=False, require_special_char=False)
 
@@ -76,6 +80,9 @@ class UserFormDialog(QDialog):
         self._organization_id = organization_id
         self._read_only = read_only
         self._password_policy = password_policy
+        # True once a role load has definitively failed (or come back
+        # empty) — changes "Select a role." into an accurate explanation.
+        self._roles_failed = False
         self.setWindowTitle("View User" if read_only else
                             ("Edit User" if user else "Add User"))
         constrain_dialog(self, 420)
@@ -106,8 +113,7 @@ class UserFormDialog(QDialog):
 
         if user is None:
             self._role = QComboBox()
-            for role in roles:
-                self._role.addItem(role.name, role.id)
+            self._populate_roles(roles)
             form.addRow("Role *", self._role)
             editable_widgets.append(self._role)
 
@@ -173,9 +179,53 @@ class UserFormDialog(QDialog):
             self._save_button.clicked.connect(self._submit)
             layout.addWidget(self._save_button)
 
-    def _set_busy(self, busy: bool) -> None:
+        # The caller passes its cached role list, but that cache is filled
+        # by an async load that may not have finished (or may have failed)
+        # by the time this dialog opens. Rendering an empty, permanently
+        # unusable "Role *" dropdown in that window is what made creating a
+        # user impossible, so load them here instead of trusting the cache.
+        if not read_only and user is None and not roles:
+            self._load_roles()
+
+    def _populate_roles(self, roles: list[RoleOut]) -> None:
+        self._role.clear()
+        for role in roles:
+            self._role.addItem(role.name, role.id)
+        self._role.setEnabled(bool(roles) and not self._read_only)
+
+    def _load_roles(self) -> None:
+        self._roles_failed = False
+        self._role.clear()
+        self._role.addItem("Loading roles…", None)
+        self._role.setEnabled(False)
+        self._set_busy(True, "Loading…")
+        worker = Worker(self._user_service.list_roles)
+        worker.signals.finished.connect(self._on_roles_loaded)
+        worker.signals.error.connect(self._on_roles_error)
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_roles_loaded(self, roles: list[RoleOut]) -> None:
+        self._set_busy(False)
+        self._populate_roles(roles)
+        if not roles:
+            # A reachable database with no roles in it is a broken install,
+            # not a transient error — say so rather than leaving a silent
+            # empty dropdown.
+            self._roles_failed = True
+            self._show_error("No roles are configured, so a user can't be created yet.")
+
+    def _on_roles_error(self, exc: Exception) -> None:
+        _logger.exception("Failed to load roles for the user form", exc_info=exc)
+        self._set_busy(False)
+        self._roles_failed = True
+        self._role.clear()
+        self._role.setEnabled(False)
+        self._show_error("Couldn't load the list of roles. Check your connection, "
+                        "then reopen this window to try again.")
+
+    def _set_busy(self, busy: bool, busy_label: str = "Saving…") -> None:
         self._save_button.setEnabled(not busy)
-        self._save_button.setText("Saving…" if busy else "Save User")
+        self._save_button.setText(busy_label if busy else "Save User")
 
     def _validate_locally(self, *, full_name: str, email: str, username: str | None,
                           phone: str | None) -> list[str]:
@@ -192,7 +242,13 @@ class UserFormDialog(QDialog):
 
         if is_create:
             if self._role.currentData() is None:
-                errors.append("Select a role.")
+                if self._roles_failed:
+                    errors.append("Roles couldn't be loaded, so a role can't be "
+                                 "assigned. Reopen this window to try again.")
+                elif self._role.count():
+                    errors.append("Roles are still loading. Please wait a moment.")
+                else:
+                    errors.append("Select a role.")
 
             password = self._password.text()
             confirm_password = self._confirm_password.text()

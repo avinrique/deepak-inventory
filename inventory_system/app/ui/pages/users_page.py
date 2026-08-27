@@ -188,6 +188,11 @@ class UsersPage(QWidget):
         return bar
 
     def _load_roles(self) -> None:
+        """Fills the Role filter and the cache the Add User dialog is seeded
+        with. A failure here used to be logged and forgotten, leaving
+        self._roles empty for the life of the page — so retry on the next
+        refresh() rather than staying silently degraded until restart.
+        """
         worker = Worker(self._user_service.list_roles)
         worker.signals.finished.connect(self._on_roles_loaded)
         worker.signals.error.connect(
@@ -215,6 +220,8 @@ class UsersPage(QWidget):
 
     # -- data flow ------------------------------------------------------#
     def refresh(self) -> None:
+        if not self._roles:
+            self._load_roles()
         self._async_area.reload()
 
     def _on_search_changed(self) -> None:
