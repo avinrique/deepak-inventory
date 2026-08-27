@@ -16,6 +16,7 @@ With --screenshot-dir it also saves a PNG per screen, which is how the DPI
 matrix in CI produces something a human can actually look at.
 """
 import logging
+import os
 import tempfile
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -32,9 +33,23 @@ _logger = logging.getLogger(__name__)
 
 
 class _Check:
+    """Collects results and echoes them everywhere they might be readable.
+
+    A packaged build is windowed (no console), so sys.stdout is None and
+    print() is silently discarded — which is why every line is also recorded
+    for the report file. Without that, running --self-test against the .exe
+    on Windows produces no output at all and there is nothing to diagnose.
+    """
+
     def __init__(self):
         self.failures: list[str] = []
         self.passed = 0
+        self.lines: list[str] = []
+
+    def say(self, line: str) -> None:
+        self.lines.append(line)
+        _logger.info("self-test: %s", line)
+        print(line)          # a no-op when there is no stdout
 
     def run(self, name: str, fn) -> object:
         try:
@@ -42,10 +57,10 @@ class _Check:
         except Exception as exc:  # noqa: BLE001 - collecting, not propagating
             _logger.exception("self-test FAILED: %s", name)
             self.failures.append(f"{name}: {exc!r}")
-            print(f"  FAIL  {name}: {exc!r}")
+            self.say(f"  FAIL  {name}: {exc!r}")
             return None
         self.passed += 1
-        print(f"  ok    {name}")
+        self.say(f"  ok    {name}")
         return result
 
 
@@ -180,26 +195,39 @@ def _screenshot(widget: QWidget, path: Path) -> None:
         _logger.debug("Could not capture %s", path, exc_info=True)
 
 
-def run_self_test(app: QApplication, screenshot_dir: str | None = None) -> int:
-    """Returns 0 when everything a packaged build needs is present and works."""
+def run_self_test(app: QApplication, screenshot_dir: str | None = None,
+                  report_path: str | None = None) -> int:
+    """Returns 0 when everything a packaged build needs is present and works.
+
+    ``report_path`` receives the same lines that would go to stdout. CI uses
+    it because the packaged executable is windowed: it has no console to
+    print to, so a report file is the only way its result can be read.
+    """
     directory = Path(screenshot_dir) if screenshot_dir else None
     if directory is not None:
         directory.mkdir(parents=True, exist_ok=True)
 
-    print(f"Self-test: {version_string()}")
+    check = _Check()
+    check.say(f"Self-test: {version_string()}")
     screen = app.primaryScreen()
     if screen is not None:
-        print(f"Screen {screen.geometry().width()}x{screen.geometry().height()} "
-              f"@ DPR {screen.devicePixelRatio():.2f}")
+        check.say(f"Screen {screen.geometry().width()}x{screen.geometry().height()} "
+                  f"@ DPR {screen.devicePixelRatio():.2f}, "
+                  f"scale factor env {os.environ.get('QT_SCALE_FACTOR', 'unset')}")
 
-    check = _Check()
     _check_resources(check)
     _check_drivers(check)
     _check_reporting(check)
     _check_pages(check, directory)
     _check_windows(check, directory)
 
-    print(f"\n{check.passed} passed, {len(check.failures)} failed")
+    check.say(f"{check.passed} passed, {len(check.failures)} failed")
     for failure in check.failures:
-        print(f"  FAILED: {failure}")
+        check.say(f"  FAILED: {failure}")
+
+    if report_path:
+        try:
+            Path(report_path).write_text("\n".join(check.lines) + "\n", encoding="utf-8")
+        except OSError:
+            _logger.exception("Could not write the self-test report to %s", report_path)
     return 1 if check.failures else 0

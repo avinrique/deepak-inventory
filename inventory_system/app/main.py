@@ -230,6 +230,10 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
                              "Used to verify a packaged build.")
     parser.add_argument("--screenshot-dir", metavar="DIR",
                         help="With --self-test, save a PNG of every screen here.")
+    parser.add_argument("--report", metavar="FILE",
+                        help="With --self-test, write the results here. A packaged "
+                             "build is windowed and has no console, so this is the "
+                             "only way to read them.")
     return parser.parse_known_args(argv[1:])[0]
 
 
@@ -254,7 +258,8 @@ def main(argv: list[str] | None = None) -> int:
     if options.self_test:
         from app.selftest import run_self_test
 
-        return run_self_test(app, screenshot_dir=options.screenshot_dir)
+        return run_self_test(app, screenshot_dir=options.screenshot_dir,
+                             report_path=options.report)
 
     if settings_module.config_error is not None:
         # A config file exists but could not be used. Say so explicitly
