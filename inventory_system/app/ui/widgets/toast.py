@@ -6,7 +6,7 @@ data).
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QGraphicsOpacityEffect, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
-from app.ui.theme import ACCENT, GREEN, RED, TEXT
+from app.ui.theme import ACCENT, GREEN, RED, TEXT, scale
 
 _KIND_STYLE = {
     "success": (GREEN, "✓"),
@@ -81,7 +81,7 @@ class NotificationCenter(QWidget):
 
     def _show(self, message: str, kind: str):
         toast = Toast(self, message, kind)
-        toast.setMaximumWidth(360)
+        toast.setMaximumWidth(scale(360))
         self._layout.addWidget(toast)
         toast.show()
         self.raise_()

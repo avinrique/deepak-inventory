@@ -24,7 +24,7 @@ independent of whether the sidebar entry was ever shown.
 import logging
 from datetime import datetime, timezone
 
-from PySide6.QtCore import QEvent, QObject, QThreadPool, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QSettings, QThreadPool, QTimer, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -34,13 +34,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.__version__ import APP_NAME
 from app.core.container import Container
 from app.security.session import SessionManager
 from app.ui import permission_hints
-from app.ui.theme import STYLESHEET
+from app.ui.theme import STYLESHEET, scale
 from app.ui.widgets.change_password_dialog import ChangePasswordDialog
 from app.ui.widgets.confirm_dialog import confirm
 from app.ui.widgets.header import Header
+from app.ui.widgets.responsive import fit_to_screen, keep_on_screen
 from app.ui.widgets.sidebar import Sidebar, SidebarModule
 from app.ui.widgets.toast import NotificationCenter
 from app.workers.base_worker import Worker
@@ -83,6 +85,11 @@ _MODULE_PERMISSIONS: dict[str, frozenset[str]] = {
 
 IDLE_CHECK_INTERVAL_MS = 15_000
 
+# Below this window width (in design pixels) the sidebar shows icons only.
+# Chosen so a 1366x768 screen at 100% keeps the labels and the same screen
+# at 125% -- a 1092px logical desktop -- drops them.
+_SIDEBAR_COLLAPSE_WIDTH = 1150
+
 
 def _visible_modules(sessions: SessionManager) -> list[SidebarModule]:
     return [module for module in MODULES
@@ -96,9 +103,14 @@ class MainWindow(QMainWindow):
     def __init__(self, container: Container):
         super().__init__()
         self._container = container
-        self.setWindowTitle("Inventory Management")
-        self.resize(1360, 880)
-        self.setMinimumSize(1080, 700)
+        self.setWindowTitle(APP_NAME)
+        # Was resize(1360, 880) / setMinimumSize(1080, 700). On the low end of
+        # the supported hardware -- a 1366x768 laptop at 125% Windows scaling,
+        # i.e. a 1092x614 logical desktop -- that 700px minimum was taller
+        # than the screen, so the bottom of the window was unreachable and,
+        # being a *minimum*, could not be resized away.
+        fit_to_screen(self, 1360, 880, minimum_width=960, minimum_height=560)
+        self._restore_geometry()
         self.setStyleSheet(STYLESHEET)
 
         # Goes through AuthService rather than container.user_repo directly
@@ -106,28 +118,32 @@ class MainWindow(QMainWindow):
         # applies here too, and it's what makes "current user" info
         # available the same way to any page that wants it later, not just
         # this one-off lookup at window construction.
+        # These run on the UI thread, before the window is shown, because
+        # the header cannot be drawn without them. They are guarded rather
+        # than left bare: against a remote database a dropped connection
+        # between login and here would otherwise raise straight out of the
+        # constructor with no window to report it on.
         auth_service = container.auth_service()
         session = container.sessions.peek()
-        user = auth_service.get_current_user() if session is not None else None
-        membership = auth_service.get_current_membership() if session is not None else None
+        user = membership = None
+        if session is not None:
+            try:
+                user = auth_service.get_current_user()
+                membership = auth_service.get_current_membership()
+            except Exception:  # noqa: BLE001 - degrade to a usable header
+                _logger.exception("Could not load the current user for the header")
         full_name = user.full_name if user else "Unknown User"
         role_label = (membership.role_name if membership else
                      ("Superuser" if session and session.is_superuser else "Member"))
 
         visible_modules = _visible_modules(container.sessions)
-        try:
-            default_tax_percent = (container.organization_service()
-                                   .get_current_organization().default_tax_percent)
-        except Exception:
-            _logger.exception("Could not load organization tax setting for sidebar footer")
-            default_tax_percent = None
 
         central = QWidget()
         root = QHBoxLayout(central)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        self._sidebar = Sidebar(visible_modules, default_tax_percent)
+        self._sidebar = Sidebar(visible_modules, None)
         root.addWidget(self._sidebar)
 
         right = QWidget()
@@ -146,19 +162,14 @@ class MainWindow(QMainWindow):
             lambda: self._sidebar.select("profile"))
         right_layout.addWidget(self._header)
 
+        # Pages are built on first visit, not up front. Building all
+        # thirteen here meant every login paid for thirteen widget trees and,
+        # worse, fired each page's initial data load at once — thirteen
+        # queries against a remote database before the window appeared, of
+        # which the user was about to look at exactly one.
         self._content = QStackedWidget()
         self._content.setObjectName("contentArea")
         self._pages: dict[str, QWidget] = {}
-        for module in visible_modules:
-            page = _build_page(module.key, container)
-            self._pages[module.key] = page
-            self._content.addWidget(page)
-            if module.key == "profile":
-                # Reuses the exact same confirm+logout+session_ended
-                # sequence the header's Log Out already goes through —
-                # ProfilePage only ever emits the request, it never
-                # confirms or logs out on its own.
-                page.logout_requested.connect(self._on_logout_requested)
         right_layout.addWidget(self._content, stretch=1)
 
         self._status_bar = self.statusBar()
@@ -173,6 +184,7 @@ class MainWindow(QMainWindow):
 
         self._sidebar.module_selected.connect(self._on_module_selected)
         self._on_module_selected(visible_modules[0].key)
+        self._apply_responsive_layout()
 
         self._idle_timer = QTimer(self)
         self._idle_timer.timeout.connect(self._check_idle)
@@ -182,16 +194,79 @@ class MainWindow(QMainWindow):
         if app_instance is not None:
             app_instance.installEventFilter(self._activity_filter)
 
+        # Fetched after the window exists, not before it: it is one more
+        # database round trip and nothing but a footer label depends on it,
+        # so blocking the first paint on a remote query for it is a poor trade.
+        self._load_sidebar_tax_footer()
+
         if session is not None and session.must_change_password:
             QTimer.singleShot(0, self._force_password_change)
 
+    def _load_sidebar_tax_footer(self) -> None:
+        worker = Worker(lambda: self._container.organization_service()
+                        .get_current_organization().default_tax_percent)
+        worker.signals.finished.connect(self._sidebar.set_default_tax_percent)
+        worker.signals.error.connect(
+            lambda exc: _logger.warning("Could not load the organization tax setting "
+                                        "for the sidebar footer", exc_info=exc))
+        QThreadPool.globalInstance().start(worker)
+
+    # -- responsive shell -------------------------------------------------#
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt override
+        super().resizeEvent(event)
+        self._apply_responsive_layout()
+
+    def _apply_responsive_layout(self) -> None:
+        """Collapses the sidebar to icons when the window is narrow.
+
+        220px of permanent navigation is a fifth of the usable width on a
+        1092px logical desktop, and the transaction tables are the widest
+        thing in the app. Collapsing buys that back without hiding anything:
+        the icons stay clickable and the labels return as tooltips.
+        """
+        self._sidebar.set_collapsed(self.width() < scale(_SIDEBAR_COLLAPSE_WIDTH))
+
+    def _restore_geometry(self) -> None:
+        """Reinstates the size and position from last time, but only if it
+        still lands on a screen that exists -- otherwise unplugging an
+        external monitor leaves the window permanently off-screen."""
+        saved = QSettings().value("main_window/geometry")
+        if saved is None:
+            return
+        self.restoreGeometry(saved)
+        keep_on_screen(self)
+
+    def _save_geometry(self) -> None:
+        QSettings().setValue("main_window/geometry", self.saveGeometry())
+
+    def _page(self, key: str) -> QWidget:
+        """Builds `key`'s page the first time it is asked for, then caches
+        it — so state a user leaves behind (a filter, a half-typed bill)
+        survives navigating away and back."""
+        page = self._pages.get(key)
+        if page is None:
+            page = _build_page(key, self._container)
+            self._pages[key] = page
+            self._content.addWidget(page)
+            if key == "profile":
+                # Reuses the exact same confirm+logout+session_ended
+                # sequence the header's Log Out already goes through —
+                # ProfilePage only ever emits the request, it never
+                # confirms or logs out on its own.
+                page.logout_requested.connect(self._on_logout_requested)
+        return page
+
     def _on_module_selected(self, key: str) -> None:
-        self._content.setCurrentWidget(self._pages[key])
+        page = self._page(key)
+        self._content.setCurrentWidget(page)
         label = next(m.label for m in MODULES if m.key == key)
         self._header.breadcrumb.set_path(["Home", label])
-        page = self._pages[key]
-        if hasattr(page, "refresh"):
+        # Skipped on the very first visit: the page has just been built and
+        # its constructor already kicked off the initial load, so refreshing
+        # now would run every one of those queries a second time.
+        if getattr(page, "_built_and_loaded", False) and hasattr(page, "refresh"):
             page.refresh()
+        page._built_and_loaded = True
 
     def _check_idle(self) -> None:
         now = datetime.now(timezone.utc)
@@ -243,6 +318,7 @@ class MainWindow(QMainWindow):
         self._notifications.success("Password changed.")
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt override
+        self._save_geometry()
         # Stopped explicitly rather than relying on deleteLater() to reap
         # the timer eventually — a queued deleteLater() doesn't run until
         # the event loop's next pass, and a timer tick landing in that gap
@@ -281,8 +357,8 @@ def _build_page(key: str, container: Container) -> QWidget:
         return ProfilePage(container.auth_service(), container.user_service())
     if key == "inventory":
         from app.ui.pages.inventory_page import InventoryPage
-        return InventoryPage(container.stock_service(), container.inventory_service(),
-                             container.product_service(), container.sessions)
+        return InventoryPage(container.inventory_service(), container.product_service(),
+                             container.sessions)
     if key == "new_bill":
         from app.ui.pages.new_bill_page import NewBillPage
         return NewBillPage(container.sales_service(), container.inventory_service(),

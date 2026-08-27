@@ -29,6 +29,7 @@ from app.domain.sales import PaymentMethod
 from app.schemas.sales import InvoiceDocumentData, PaymentRequest
 from app.services.sales_service import SalesService
 from app.ui.theme import MUTED, RED, STYLESHEET
+from app.ui.widgets.responsive import constrain_dialog
 from app.workers.base_worker import Worker
 
 _logger = logging.getLogger(__name__)
@@ -41,7 +42,7 @@ class RecordPaymentDialog(QDialog):
         self._invoice_id = invoice_id
         self._amount_due: Decimal | None = None
         self.setWindowTitle("Record Payment")
-        self.setMinimumWidth(380)
+        constrain_dialog(self, 380)
         self.setStyleSheet(STYLESHEET)
 
         layout = QVBoxLayout(self)

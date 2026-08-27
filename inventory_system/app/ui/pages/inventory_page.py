@@ -1,10 +1,10 @@
 """Inventory page — live per-warehouse stock levels via InventoryService
 (the SQL-backed warehouse ledger, see app/services/inventory_service.py),
 plus "+ Stock In" and "Adjust Stock" actions that write to the same
-ledger. The legacy Excel-backed StockService (app.services.stock_service)
-still exists and still powers the old Tkinter app, but this page no
-longer reads from it — it was a second, disconnected stock number that a
-Stock In here never moved, which made Stock In look broken.
+ledger. This page used to also be handed the Excel-backed StockService,
+which it stored and never read — a second, disconnected stock number that
+a Stock In here never moved, which made Stock In look broken. That
+service, and the whole Excel backend behind it, has since been removed.
 
 "Adjust Stock" opens StockAdjustmentDialog, covering the rest of
 InventoryService's stock-changing operations (stock out, mark damaged,
@@ -49,7 +49,6 @@ from app.schemas.product import ProductFilter
 from app.security.session import SessionManager
 from app.services.inventory_service import InventoryService
 from app.services.product_service import ProductService
-from app.services.stock_service import StockService
 from app.ui import permission_hints
 from app.ui.widgets.async_content import AsyncContentArea
 from app.ui.widgets.page_header import PageHeader
@@ -62,10 +61,9 @@ _logger = logging.getLogger(__name__)
 
 
 class InventoryPage(QWidget):
-    def __init__(self, stock_service: StockService, inventory_service: InventoryService,
+    def __init__(self, inventory_service: InventoryService,
                 product_service: ProductService, sessions: SessionManager):
         super().__init__()
-        self._stock_service = stock_service
         self._inventory_service = inventory_service
         self._product_service = product_service
         self._sessions = sessions

@@ -69,7 +69,6 @@ from app.schemas.product import (
     UnitCreate,
     UnitOut,
 )
-from app.schemas.stock import StockLevel
 from app.schemas.user import (
     MembershipOut,
     RoleOut,
@@ -87,16 +86,6 @@ class BillRepository(Protocol):
     def exists(self, bill_no: str) -> bool: ...
 
     def list_all(self) -> list[BillOut]: ...
-
-
-class StockRepository(Protocol):
-    def on_hand(self, product: str) -> Decimal: ...
-
-    def adjust(self, product: str, qty: Decimal, add: bool) -> Decimal: ...
-
-    def product_names(self) -> list[str]: ...
-
-    def list_all(self) -> list[StockLevel]: ...
 
 
 class PartyRepository(Protocol):

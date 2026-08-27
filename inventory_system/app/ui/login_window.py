@@ -7,6 +7,8 @@ Emits login_succeeded(Session) rather than reaching into app.main itself —
 main.py owns the transition to MainWindow, this window only knows about
 authenticating.
 """
+import logging
+
 from PySide6.QtCore import Qt, QThreadPool, Signal
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import (
@@ -21,12 +23,17 @@ from PySide6.QtWidgets import (
 from app.core.exceptions import (
     AccountLockedError,
     AmbiguousOrganizationError,
+    AppError,
     InvalidCredentialsError,
 )
+from app.database.errors import user_message
 from app.security.session import Session
 from app.services.auth_service import AuthService
-from app.ui.theme import CONTENT_BG, MUTED, RED, STYLESHEET, TEXT
+from app.ui.theme import CONTENT_BG, MUTED, RED, STYLESHEET, TEXT, scale
+from app.ui.widgets.responsive import fit_to_screen
 from app.workers.base_worker import Worker
+
+_logger = logging.getLogger(__name__)
 
 
 class LoginWindow(QWidget):
@@ -38,9 +45,10 @@ class LoginWindow(QWidget):
         self.setWindowTitle("Inventory Management — Log In")
         # Minimum, not fixed: the organization picker (shown only for
         # multi-org accounts) and longer error/localized text need to be
-        # able to grow the window rather than clip within a hard cap.
-        self.setMinimumSize(420, 480)
-        self.resize(420, 480)
+        # able to grow the window rather than clip within a hard cap -- and
+        # the minimum itself is clamped to the screen, so it stays reachable
+        # on a small display at high scaling.
+        fit_to_screen(self, 420, 480, minimum_width=340, minimum_height=320)
         self.setObjectName("loginWindow")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setStyleSheet(STYLESHEET + f"QWidget#loginWindow {{ background: {CONTENT_BG}; }}")
@@ -50,7 +58,7 @@ class LoginWindow(QWidget):
 
         card = QWidget()
         card.setObjectName("card")
-        card.setFixedWidth(340)
+        card.setFixedWidth(scale(340))
         card_layout = QVBoxLayout(card)
         card_layout.setContentsMargins(32, 32, 32, 32)
         card_layout.setSpacing(6)
@@ -148,8 +156,15 @@ class LoginWindow(QWidget):
             self._show_org_picker(exc.organizations)
         elif isinstance(exc, AccountLockedError):
             self._show_error(str(exc))
+        elif isinstance(exc, AppError):
+            self._show_error(str(exc))
         else:
-            self._show_error("Something went wrong logging in. Please try again.")
+            # Almost always a connection problem — the login screen is the
+            # first thing to touch the database after startup, so an
+            # unplugged network or a suspended cloud instance surfaces here.
+            # "Please try again" for an offline machine is not advice.
+            _logger.exception("Login failed", exc_info=exc)
+            self._show_error(user_message(exc))
 
     def _show_org_picker(self, organizations: list[tuple]) -> None:
         self._org_combo.clear()

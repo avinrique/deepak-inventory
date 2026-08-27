@@ -20,12 +20,15 @@ import logging
 import os
 import shutil
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
 from sqlalchemy.engine import make_url
 
+from app.config.settings import settings
+from app.core.exceptions import AppError
+from app.core.paths import pg_bin_dir
 from app.domain.backup import format_backup_filename
 
 logger = logging.getLogger(__name__)
@@ -34,8 +37,15 @@ _SUBPROCESS_TIMEOUT_SECONDS = 30 * 60  # generous — real databases can be larg
 _CHECKSUM_CHUNK_SIZE = 1024 * 1024
 
 
-class BackupToolNotFoundError(Exception):
-    """pg_dump/pg_restore isn't on PATH — nothing ran."""
+class BackupToolNotFoundError(AppError):
+    """pg_dump/pg_restore could not be located — nothing ran.
+
+    An AppError, not a bare Exception: BackupService does not catch it, so
+    as a plain Exception it arrived at the UI's error slot as an
+    unrecognised type and was reported as an internal failure. On a normal
+    Windows PC with no PostgreSQL installation this is the *expected*
+    outcome of clicking Backup, so it has to read as actionable advice.
+    """
 
 
 @dataclass(frozen=True)
@@ -62,6 +72,11 @@ class _ConnectionParams:
     user: str
     password: str | None
     database: str
+    # The URL's query string (sslmode, channel_binding, ...). pg_dump takes
+    # no command-line flags for these, so they reach libpq as PG*
+    # environment variables instead. Dropping them silently downgraded a
+    # backup of a "sslmode=require" cloud database to libpq's default.
+    options: dict[str, str] = field(default_factory=dict)
 
 
 def _connection_params(database_url: str) -> _ConnectionParams:
@@ -69,16 +84,41 @@ def _connection_params(database_url: str) -> _ConnectionParams:
     return _ConnectionParams(
         host=url.host or "localhost", port=url.port or 5432,
         user=url.username or os.environ.get("USER", "postgres"),
-        password=url.password, database=url.database or "postgres")
+        password=url.password, database=url.database or "postgres",
+        options={key: str(value) for key, value in url.query.items()})
 
 
-def _subprocess_env(password: str | None) -> dict[str, str]:
+# libpq environment variables for the connection options a URL can carry.
+_LIBPQ_ENV_BY_OPTION = {
+    "sslmode": "PGSSLMODE",
+    "sslrootcert": "PGSSLROOTCERT",
+    "sslcert": "PGSSLCERT",
+    "sslkey": "PGSSLKEY",
+    "channel_binding": "PGCHANNELBINDING",
+    "application_name": "PGAPPNAME",
+    "connect_timeout": "PGCONNECT_TIMEOUT",
+}
+
+
+def _subprocess_env(password: str | None,
+                    options: dict[str, str] | None = None) -> dict[str, str]:
     env = os.environ.copy()
     if password:
         env["PGPASSWORD"] = password
     else:
         env.pop("PGPASSWORD", None)
+    for option, value in (options or {}).items():
+        variable = _LIBPQ_ENV_BY_OPTION.get(option.lower())
+        if variable:
+            env[variable] = value
     return env
+
+
+# Keeps a console window from flashing on screen every time a backup runs.
+# A --windowed build has no console of its own, so Windows creates one for
+# each child process -- a black box that appears and vanishes, including
+# during the automatic scheduled backup at startup.
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 def _loggable_command(argv: list[str]) -> str:
@@ -105,11 +145,36 @@ def _sanitize_output(text: str) -> str:
     return redacted.strip()
 
 
+def _tool_search_dirs() -> list[Path]:
+    """Where to look for pg_dump/pg_restore, highest priority first.
+
+    PATH alone was not enough. A machine running this app as a client has no
+    PostgreSQL installation of its own, so Backup and Restore were dead
+    features on every normal Windows PC. The installer now ships both
+    binaries with the app (paths.pg_bin_dir); an explicit INVENTORY_PG_BIN_DIR
+    still overrides that, for a site that would rather use its own server's
+    matching tools.
+    """
+    directories: list[Path] = []
+    if settings.pg_bin_dir:
+        directories.append(Path(settings.pg_bin_dir))
+    directories.append(pg_bin_dir())
+    return directories
+
+
 def _require_tool(name: str) -> str:
+    for directory in _tool_search_dirs():
+        for candidate in (directory / name, directory / f"{name}.exe"):
+            if candidate.is_file():
+                return str(candidate)
+
     path = shutil.which(name)
     if path is None:
         raise BackupToolNotFoundError(
-            f"{name} was not found on PATH — install the PostgreSQL client tools.")
+            f"The PostgreSQL backup tools ({name}) could not be found.\n\n"
+            "They are normally installed with this application — reinstalling "
+            "should restore them. An administrator can also set the folder "
+            "containing them in Settings.")
     return path
 
 
@@ -150,7 +215,8 @@ def verify_backup_file(backup_file_path: str) -> bool:
     try:
         result = subprocess.run([pg_restore, "--list", backup_file_path],
                                 capture_output=True, text=True,
-                                timeout=_SUBPROCESS_TIMEOUT_SECONDS, check=False)
+                                timeout=_SUBPROCESS_TIMEOUT_SECONDS, check=False,
+                                creationflags=_NO_WINDOW)
     except (OSError, subprocess.TimeoutExpired):
         return False
     return result.returncode == 0 and bool(result.stdout.strip())
@@ -171,9 +237,11 @@ def create_backup(database_url: str, backup_dir: str) -> BackupOutcome:
     logger.info("Running backup: %s", _loggable_command(argv))
 
     try:
-        result = subprocess.run(argv, env=_subprocess_env(params.password),
+        result = subprocess.run(argv,
+                                env=_subprocess_env(params.password, params.options),
                                 capture_output=True, text=True,
-                                timeout=_SUBPROCESS_TIMEOUT_SECONDS, check=False)
+                                timeout=_SUBPROCESS_TIMEOUT_SECONDS, check=False,
+                                creationflags=_NO_WINDOW)
     except subprocess.TimeoutExpired:
         out_path.unlink(missing_ok=True)
         message = "Backup timed out."
@@ -228,9 +296,11 @@ def restore_backup(database_url: str, backup_file_path: str) -> RestoreOutcome:
     logger.info("Running restore: %s", _loggable_command(argv))
 
     try:
-        result = subprocess.run(argv, env=_subprocess_env(params.password),
+        result = subprocess.run(argv,
+                                env=_subprocess_env(params.password, params.options),
                                 capture_output=True, text=True,
-                                timeout=_SUBPROCESS_TIMEOUT_SECONDS, check=False)
+                                timeout=_SUBPROCESS_TIMEOUT_SECONDS, check=False,
+                                creationflags=_NO_WINDOW)
     except subprocess.TimeoutExpired:
         message = "Restore timed out."
         logger.error(message)

@@ -16,6 +16,7 @@ from app.schemas.user import RoleOut, UserSummaryOut
 from app.services.user_service import UserService
 from app.ui.theme import RED, STYLESHEET
 from app.ui.widgets.combo_utils import select_by_data
+from app.ui.widgets.responsive import constrain_dialog
 from app.workers.base_worker import Worker
 
 
@@ -26,7 +27,7 @@ class ChangeUserRoleDialog(QDialog):
         self._user_service = user_service
         self._user = user
         self.setWindowTitle("Change Role")
-        self.setFixedWidth(360)
+        constrain_dialog(self, 360)
         self.setStyleSheet(STYLESHEET)
 
         layout = QVBoxLayout(self)

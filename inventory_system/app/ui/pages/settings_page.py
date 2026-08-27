@@ -30,7 +30,6 @@ from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
-    QFileDialog,
     QFormLayout,
     QHBoxLayout,
     QHeaderView,
@@ -56,12 +55,14 @@ from app.services.backup_service import BackupService
 from app.services.inventory_service import InventoryService
 from app.services.organization_service import OrganizationService
 from app.ui import permission_hints
-from app.ui.theme import DISABLED_BORDER, MUTED, RED
+from app.ui.theme import DISABLED_BORDER, MUTED, RED, scale
 from app.ui.widgets.async_content import AsyncContentArea
 from app.ui.widgets.combo_utils import select_by_data as _select_by_data
 from app.ui.widgets.confirm_dialog import confirm_typed
 from app.ui.widgets.page_header import PageHeader
 from app.ui.widgets.states import EmptyStateWidget
+from app.ui.widgets.responsive import wrap_in_scroll
+from app.ui.file_dialogs import ask_open_path
 from app.workers.base_worker import Worker
 
 _logger = logging.getLogger(__name__)
@@ -140,7 +141,7 @@ class SettingsPage(QWidget):
 
         card = QWidget()
         card.setObjectName("card")
-        card.setMaximumWidth(560)
+        card.setMaximumWidth(scale(560))
         form = QFormLayout(card)
         form.setContentsMargins(24, 20, 24, 20)
         form.setSpacing(12)
@@ -159,7 +160,7 @@ class SettingsPage(QWidget):
             save_button = QPushButton("Save Changes")
             save_button.setObjectName("primary")
             save_button.setCursor(Qt.CursorShape.PointingHandCursor)
-            save_button.setMaximumWidth(160)
+            save_button.setMaximumWidth(scale(160))
 
             def on_save():
                 data = build_update()
@@ -178,7 +179,11 @@ class SettingsPage(QWidget):
             outer.addWidget(save_button)
 
         outer.addStretch()
-        return container
+        # Scrolled because the tallest tabs (Company, Security) exceed a
+        # 1092x614 logical desktop -- the 1366x768-at-125% case -- and the
+        # Save button sits at the bottom of the tab, so without this it is
+        # simply not reachable.
+        return wrap_in_scroll(container)
 
     def _on_saved(self, status_label: QLabel, save_button: QPushButton) -> None:
         save_button.setEnabled(True)
@@ -200,9 +205,10 @@ class SettingsPage(QWidget):
         tabs.addTab(self._build_sales_tab(org, can_edit), "Sales")
         tabs.addTab(self._build_purchasing_tab(org, can_edit), "Purchasing")
         tabs.addTab(self._build_security_tab(org, can_edit), "Security")
-        tabs.addTab(_BackupPanel(self._backup_service, self._organization_service,
-                                 self._sessions, org, can_edit),
-                   "Backup && Restore")
+        tabs.addTab(
+            wrap_in_scroll(_BackupPanel(self._backup_service, self._organization_service,
+                                        self._sessions, org, can_edit)),
+            "Backup && Restore")
         return tabs
 
     # -- Company ------------------------------------------------------------#
@@ -396,7 +402,7 @@ class _LogoEditor(QWidget):
         layout.setSpacing(16)
 
         self._preview = QLabel("No logo")
-        self._preview.setFixedSize(_LOGO_PREVIEW_SIZE, _LOGO_PREVIEW_SIZE)
+        self._preview.setFixedSize(scale(_LOGO_PREVIEW_SIZE), scale(_LOGO_PREVIEW_SIZE))
         self._preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._preview.setStyleSheet(f"color: {MUTED}; border: 1px dashed {DISABLED_BORDER}; "
                                     "border-radius: 6px; font-size: 11px;")
@@ -437,16 +443,24 @@ class _LogoEditor(QWidget):
 
     def _set_preview(self, image_bytes: bytes) -> None:
         pixmap = QPixmap()
-        if pixmap.loadFromData(image_bytes):
-            self._preview.setPixmap(pixmap.scaled(
-                _LOGO_PREVIEW_SIZE, _LOGO_PREVIEW_SIZE, Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation))
-            self._preview.setText("")
+        if not pixmap.loadFromData(image_bytes):
+            return
+        # Scaled to *device* pixels and tagged with the ratio, rather than
+        # scaled to logical pixels: on a 200%-scaled display the latter
+        # produces a 96px image stretched over 192 device pixels, which
+        # looks visibly soft next to everything around it.
+        ratio = self.devicePixelRatioF() or 1.0
+        edge = round(scale(_LOGO_PREVIEW_SIZE) * ratio)
+        scaled = pixmap.scaled(edge, edge, Qt.AspectRatioMode.KeepAspectRatio,
+                               Qt.TransformationMode.SmoothTransformation)
+        scaled.setDevicePixelRatio(ratio)
+        self._preview.setPixmap(scaled)
+        self._preview.setText("")
 
     def _on_upload(self) -> None:
-        path, _filter = QFileDialog.getOpenFileName(
-            self, "Choose a logo image", "", "Images (*.png *.jpg *.jpeg *.gif *.bmp)")
-        if not path:
+        path = ask_open_path(self, "Choose a logo image",
+                             "Images (*.png *.jpg *.jpeg *.gif *.bmp)")
+        if path is None:
             return
         try:
             if os.path.getsize(path) > _LOGO_MAX_BYTES:
@@ -563,7 +577,7 @@ class _BackupPanel(QWidget):
     def _build_settings_card(self, org: OrganizationOut, can_edit: bool) -> QWidget:
         card = QWidget()
         card.setObjectName("card")
-        card.setMaximumWidth(560)
+        card.setMaximumWidth(scale(560))
         form = QFormLayout(card)
         form.setContentsMargins(24, 20, 24, 20)
         form.setSpacing(12)
@@ -602,7 +616,7 @@ class _BackupPanel(QWidget):
             save_button = QPushButton("Save Backup Settings")
             save_button.setObjectName("primary")
             save_button.setCursor(Qt.CursorShape.PointingHandCursor)
-            save_button.setMaximumWidth(200)
+            save_button.setMaximumWidth(scale(200))
 
             def on_save():
                 retention_text = retention_field.text().strip()

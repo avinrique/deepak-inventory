@@ -6,12 +6,25 @@ than hardcoding a fresh hex value, so the app reads as one consistent
 system, not a pile of one-off styles.
 """
 import platform
-from pathlib import Path
+
+from app.core.exceptions import ResourceMissingError
+from app.core.paths import resource_path
 
 MAC = platform.system() == "Darwin"
-FAMILY = "Helvetica Neue" if MAC else "Segoe UI"
 
-STYLES_DIR = Path(__file__).resolve().parent / "styles"
+# Every "icon" in this UI is a literal emoji or symbol character in a Python
+# string (see app/ui/main_window.py's MODULES). Naming only the text face
+# leaves the fallback for those glyphs to Qt, which on Windows can land on a
+# font with different metrics and shift them off their baseline. Listing the
+# emoji and symbol faces explicitly, after the text face, keeps ordinary text
+# in Segoe UI and sends only the glyphs it lacks to the fonts built for them.
+FAMILY = ('"Helvetica Neue", "Apple Color Emoji"' if MAC
+          else '"Segoe UI", "Segoe UI Emoji", "Segoe UI Symbol"')
+
+# Resolved through app.core.paths so it works both from source and from
+# inside a PyInstaller bundle, where these files are unpacked next to the
+# code rather than sitting in the source tree.
+STYLES_DIR = resource_path("app", "ui", "styles")
 
 # Palette — dark sidebar / light content, the same system proven out on the
 # legacy Tkinter app's UI pass, carried over for visual continuity.
@@ -97,11 +110,69 @@ def load_qss(filename: str) -> str:
     placeholder with its value from the palette above. A plain string
     replace (not str.format) so the .qss files can use real QSS brace
     syntax without needing to escape every '{' / '}'.
+
+    Raises ResourceMissingError rather than FileNotFoundError, because this
+    runs at *import* time (see STYLESHEET below): if the .qss files were left
+    out of the PyInstaller bundle the app would otherwise die with a bare
+    traceback before QApplication exists, showing the user nothing at all.
+    app.main catches this and reports it as the packaging fault it is.
     """
-    text = (STYLES_DIR / filename).read_text(encoding="utf-8")
+    path = STYLES_DIR / filename
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ResourceMissingError(path) from exc
     for key, value in _TOKENS.items():
         text = text.replace(f"@{key}@", str(value))
     return text
+
+
+# -- density / DPI ------------------------------------------------------- #
+# Every hardcoded pixel size in this UI was written against a 13px base
+# font. scale() re-expresses those numbers in terms of the font the user's
+# machine actually renders, so a widget sized for one row of text still
+# fits one row of text at 150% Windows scaling or with "make text bigger"
+# turned on. Qt already scales QSS px by the display factor; what it cannot
+# know is that "40" in Python meant "tall enough for a line of text".
+_DESIGN_BASE_FONT_PX = 13
+_scale_factor: float | None = None
+
+
+def scale(pixels: int) -> int:
+    """A design-time pixel size, adjusted for the current UI font.
+
+    Cached on first use rather than computed at import: QApplication (and
+    therefore any real font metrics) does not exist when this module is
+    first imported. Falls back to the identity when there is no application
+    yet, which keeps it usable from constructors that run very early.
+    """
+    global _scale_factor
+    if _scale_factor is None:
+        _scale_factor = _measure_scale_factor()
+    return max(1, round(pixels * _scale_factor))
+
+
+def _measure_scale_factor() -> float:
+    try:
+        from PySide6.QtGui import QFontMetricsF
+        from PySide6.QtWidgets import QApplication
+
+        app = QApplication.instance()
+        if app is None:
+            return 1.0
+        # Cap the range: a very large accessibility font should loosen the
+        # layout, not multiply every margin until nothing fits on screen.
+        measured = QFontMetricsF(app.font()).height() / (_DESIGN_BASE_FONT_PX * 1.25)
+        return min(2.0, max(0.85, measured))
+    except Exception:  # noqa: BLE001 - never let styling break startup
+        return 1.0
+
+
+def reset_scale_cache() -> None:
+    """Forces the next scale() call to re-measure. For tests, and for a
+    font change applied while the app is running."""
+    global _scale_factor
+    _scale_factor = None
 
 
 STYLESHEET = load_qss("theme.qss")

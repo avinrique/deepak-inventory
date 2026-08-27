@@ -1,71 +1,83 @@
 #!/usr/bin/env python3
-"""Database initialization: runs Alembic migrations to head, then seeds the
-baseline Role/Permission catalog from app.security.permissions (the single
-source of truth — edit that module, not this script, to change the
-catalog). Idempotent — safe to re-run against an already-initialized
-database.
+"""Database initialization from the command line.
+
+Runs the Alembic migrations to head, seeds the baseline Role/Permission
+catalog, and can create the first Organization + OWNER account. Idempotent —
+safe to re-run against an already-initialized database.
+
+The actual work lives in app.database.bootstrap, which the first-run setup
+wizard also calls, so an administrator running this and a shop owner running
+the installer get identical results.
 
     cd inventory_system
-    python scripts/init_db.py
+    python scripts/init_db.py                  # schema + role catalog
+    python scripts/init_db.py --create-owner    # ...and the first account
+
+Most installations never need this: the application offers to do all of it
+on first launch.
 """
-import os
+import argparse
+import getpass
 import sys
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
-os.chdir(PROJECT_ROOT)  # so alembic.ini's relative script_location resolves
+# Running as a script, not a module, so the project directory has to be
+# importable. Deliberately no os.chdir(): app.database.bootstrap resolves
+# alembic.ini and migrations/ absolutely, via app.core.paths.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from alembic import command
-from alembic.config import Config
-
-from app.config.settings import settings
-from app.database.session import get_session
-from app.models import Permission, Role, RolePermission
-from app.security.permissions import PERMISSIONS, ROLE_PERMISSIONS
+from app.config import store  # noqa: E402
+from app.config.settings import settings  # noqa: E402
+from app.core.logging_config import configure_logging  # noqa: E402
+from app.database import bootstrap  # noqa: E402
 
 
-def run_migrations() -> None:
-    command.upgrade(Config(str(PROJECT_ROOT / "alembic.ini")), "head")
+def _prompt_owner() -> dict:
+    print("\nCreate the first administrator account.")
+    details = {
+        "organization_name": input("  Business name: ").strip(),
+        "full_name": input("  Your full name: ").strip(),
+        "email": input("  Email: ").strip(),
+    }
+    password = getpass.getpass("  Password: ")
+    if password != getpass.getpass("  Confirm password: "):
+        raise SystemExit("Passwords did not match.")
+    details["password"] = password
+    return details
 
 
-def seed_permissions(session) -> dict[str, Permission]:
-    by_code: dict[str, Permission] = {}
-    for perm_def in PERMISSIONS:
-        perm = session.query(Permission).filter_by(code=perm_def.code).one_or_none()
-        if perm is None:
-            perm = Permission(code=perm_def.code, description=perm_def.description)
-            session.add(perm)
-            session.flush()
-        by_code[perm_def.code] = perm
-    return by_code
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--create-owner", action="store_true",
+                        help="Also create the first organization and OWNER account.")
+    args = parser.parse_args()
 
+    configure_logging()
+    if not settings.database_url:
+        print("No database is configured. Set INVENTORY_DATABASE_URL, or run the "
+              "application and use the setup wizard.", file=sys.stderr)
+        return 1
 
-def seed_roles(session, permissions_by_code: dict[str, Permission]) -> None:
-    for name, codes in ROLE_PERMISSIONS.items():
-        role = session.query(Role).filter_by(name=name).one_or_none()
-        if role is None:
-            role = Role(name=name, is_system=True)
-            session.add(role)
-            session.flush()
-        already_granted = {rp.permission_id for rp in role.permissions}
-        for code in codes:
-            perm = permissions_by_code[code]
-            if perm.id not in already_granted:
-                session.add(RolePermission(role_id=role.id, permission_id=perm.id))
+    # Redacted: this used to print the full URL, password included, which
+    # then landed in shell history, CI logs and screenshots.
+    print(f"Target database: {store.redacted_url(settings.database_url)}")
 
-
-def main() -> None:
-    print(f"Running migrations against {settings.database_url} ...")
-    run_migrations()
+    print("Running migrations ...")
+    bootstrap.run_migrations(settings.database_url)
 
     print("Seeding baseline roles/permissions ...")
-    with get_session() as session:
-        permissions_by_code = seed_permissions(session)
-        seed_roles(session, permissions_by_code)
+    bootstrap.seed_catalog()
+
+    if args.create_owner:
+        if bootstrap.has_any_users():
+            print("This database already has user accounts — skipping owner creation.")
+        else:
+            bootstrap.create_first_owner(**_prompt_owner())
+            print("Administrator account created.")
 
     print("Database initialized.")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

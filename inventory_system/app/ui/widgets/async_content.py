@@ -11,6 +11,7 @@ from typing import Any
 from PySide6.QtCore import QThreadPool
 from PySide6.QtWidgets import QStackedWidget, QWidget
 
+from app.database.errors import user_message
 from app.ui.widgets.states import ErrorStateWidget, LoadingStateWidget
 from app.workers.base_worker import Worker
 
@@ -70,4 +71,8 @@ class AsyncContentArea(QStackedWidget):
         if generation != self._generation:
             return
         _logger.exception("Loading data failed", exc_info=exc)
+        # Replaces the generic placeholder with the actual cause where we
+        # can name it — "the database server could not be reached" points at
+        # the network; "couldn't load this data" points at nothing.
+        self._error_widget.set_message(user_message(exc))
         self.setCurrentWidget(self._error_widget)

@@ -1,5 +1,3 @@
-"""Database plumbing: SQLAlchemy engine/session — Phase 2.
-
-Named `database` (not `db`) to avoid clashing with the `import storage as db`
-alias already used throughout inventory_app.py/storage.py.
+"""Database plumbing: SQLAlchemy engine/session, the startup schema check,
+and translation of driver errors into user-facing AppErrors.
 """

@@ -57,7 +57,8 @@ from app.schemas.inventory import WarehouseOut
 from app.schemas.product import BrandOut, CategoryOut, ProductCreate, ProductFilter, ProductOut, UnitOut
 from app.security.authorization import PermissionDeniedError
 from app.services.product_service import ProductService
-from app.ui.theme import AMBER_DARK, MUTED, RED, STYLESHEET
+from app.ui.theme import AMBER_DARK, MUTED, RED, STYLESHEET, scale
+from app.ui.widgets.responsive import fit_to_screen
 from app.workers.base_worker import Worker
 
 _logger = logging.getLogger(__name__)
@@ -129,8 +130,7 @@ class AddProductDialog(QDialog):
         self._name_ack: str | None = None
 
         self.setWindowTitle("Add Product")
-        self.setMinimumSize(560, 640)
-        self.resize(640, 760)
+        fit_to_screen(self, 640, 760, minimum_width=480, minimum_height=380)
         self.setStyleSheet(STYLESHEET)
 
         outer = QVBoxLayout(self)
@@ -172,7 +172,7 @@ class AddProductDialog(QDialog):
         row.addStretch()
         close_button = QPushButton("✕")
         close_button.setObjectName("flat")
-        close_button.setFixedSize(32, 32)
+        close_button.setFixedSize(scale(32), scale(32))
         close_button.setCursor(Qt.CursorShape.PointingHandCursor)
         close_button.clicked.connect(self.reject)
         row.addWidget(close_button)
@@ -270,7 +270,7 @@ class AddProductDialog(QDialog):
 
         self._description = QTextEdit()
         self._description.setPlaceholderText("Optional notes about this product…")
-        self._description.setFixedHeight(72)
+        self._description.setFixedHeight(scale(72))
         card.form.addRow("Description", self._description)
 
         return card
@@ -429,7 +429,7 @@ class AddProductDialog(QDialog):
         self._save_button = QPushButton("Save Product")
         self._save_button.setObjectName("primary")
         self._save_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._save_button.setMinimumHeight(40)
+        self._save_button.setMinimumHeight(scale(40))
         self._save_button.clicked.connect(self._submit)
         container.addWidget(self._save_button)
         return container

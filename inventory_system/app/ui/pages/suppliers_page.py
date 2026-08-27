@@ -32,7 +32,7 @@ from app.schemas.purchasing import SupplierOut, SupplierUpdate
 from app.security.session import SessionManager
 from app.services.purchase_service import PurchaseService
 from app.ui import permission_hints
-from app.ui.theme import GREEN_DARK, RED
+from app.ui.theme import GREEN_DARK, RED, scale
 from app.ui.widgets.async_content import AsyncContentArea
 from app.ui.widgets.confirm_dialog import confirm
 from app.ui.widgets.page_header import PageHeader
@@ -87,7 +87,7 @@ class SuppliersPage(QWidget):
 
         self._search = QLineEdit()
         self._search.setPlaceholderText("Search name, contact, phone, or email…")
-        self._search.setFixedWidth(260)
+        self._search.setFixedWidth(scale(260))
         self._search.textChanged.connect(self._on_search_changed)
         bar.addWidget(self._search)
         bar.addStretch()

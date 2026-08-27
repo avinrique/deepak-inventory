@@ -96,9 +96,8 @@ def _page(qapp, products, warehouses, levels=None):
     inventory_service = MagicMock()
     inventory_service.list_warehouses.return_value = warehouses
     inventory_service.list_all_levels.return_value = levels or []
-    stock_service = MagicMock()
 
-    page = InventoryPage(stock_service, inventory_service, product_service,
+    page = InventoryPage(inventory_service, product_service,
                          _fully_permissioned_sessions())
     return page, product_service, inventory_service
 

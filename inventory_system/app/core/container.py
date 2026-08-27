@@ -1,17 +1,19 @@
-"""Composition root: builds Services with the configured backend's
-repositories. This is the one place `excel/` vs `sql/` repository classes
-get chosen — Services and the UI only ever see the Protocols in
-app.repositories.interfaces, never a concrete implementation.
+"""Composition root: builds Services with their repositories.
 
-Note: `settings.backend` only selects where *inventory* (Bill/Stock/Party)
-data lives. Authentication (User/Role/...) has no Excel equivalent — it
-always talks to `settings.database_url` via SqlUserRepository, regardless
-of which inventory backend is active.
+Services and the UI only ever see the Protocols in
+app.repositories.interfaces, never a concrete implementation — this is the
+one place the concrete SQL classes are named.
+
+Everything talks to `settings.database_url`. The old INVENTORY_BACKEND flag
+that chose between an Excel backend and PostgreSQL is gone: the Excel path
+wrapped the legacy Tkinter app's storage.py, which lives outside this
+project and cannot be packaged, and the only service it still fed
+(StockService) had already been superseded by InventoryService's warehouse
+ledger and was no longer read by any page.
 """
 from datetime import timedelta
 
 from app.config.settings import settings
-from app.repositories.interfaces import StockRepository
 from app.repositories.sql.audit_log_repository import SqlAuditLogRepository
 from app.repositories.sql.backup_repository import SqlBackupRepository
 from app.repositories.sql.brand_repository import SqlBrandRepository
@@ -37,30 +39,7 @@ from app.services.product_service import ProductService
 from app.services.purchase_service import PurchaseService
 from app.services.reporting_service import ReportingService
 from app.services.sales_service import SalesService
-from app.services.stock_service import StockService
 from app.services.user_service import UserService
-
-
-def _build_excel_stock_repository() -> StockRepository:
-    # Imported lazily: importing app.repositories.excel first runs its
-    # sys.path shim, which is what makes `import storage` resolve to the
-    # legacy app's file — only needed for the excel backend, so postgres
-    # deployments never touch it. BillRepository/PartyRepository excel
-    # implementations (ExcelBillRepository/ExcelPartyRepository) backed the
-    # now-removed legacy BillingService/PartyService (superseded by the
-    # SQL-backed SalesService/PurchaseService/CustomerService/
-    # SupplierService) and are no longer constructed here — the excel/
-    # modules themselves are untouched and still covered by their own
-    # repository-level tests.
-    from app.repositories.excel.stock_repository import ExcelStockRepository
-
-    return ExcelStockRepository()
-
-
-def _build_sql_stock_repository() -> StockRepository:
-    raise NotImplementedError(
-        "postgres backend: Phase 2 — app/repositories/sql/stock.py is still a stub, "
-        "see docs/architecture.md")
 
 
 class Container:
@@ -72,13 +51,6 @@ class Container:
     """
 
     def __init__(self):
-        if settings.backend == "excel":
-            self.stock_repo = _build_excel_stock_repository()
-        elif settings.backend == "postgres":
-            self.stock_repo = _build_sql_stock_repository()
-        else:
-            raise ValueError(f"Unknown INVENTORY_BACKEND: {settings.backend!r}")
-
         self.user_repo = SqlUserRepository()
         self.category_repo = SqlCategoryRepository()
         self.brand_repo = SqlBrandRepository()
@@ -96,9 +68,6 @@ class Container:
         self.backup_repo = SqlBackupRepository()
         self.sessions = SessionManager(
             idle_timeout=timedelta(minutes=settings.session_idle_timeout_minutes))
-
-    def stock_service(self) -> StockService:
-        return StockService(self.stock_repo)
 
     def auth_service(self) -> AuthService:
         return AuthService(self.user_repo, self.sessions, self.audit_log_repo,

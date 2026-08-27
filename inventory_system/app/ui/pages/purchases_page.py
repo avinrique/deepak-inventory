@@ -20,7 +20,6 @@ from PySide6.QtCore import Qt, QThreadPool, QTimer
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QComboBox,
-    QFileDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -33,6 +32,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.database.errors import user_message
 from app.core.exceptions import ProductNotFoundError
 from app.domain.product import ProductStatus
 from app.domain.purchasing import PurchaseOrderStatus
@@ -55,6 +55,8 @@ from app.ui.widgets.receive_goods_dialog import ReceiveGoodsDialog
 from app.ui.widgets.states import EmptyStateWidget
 from app.ui.widgets.totals_table import TotalsTable
 from app.workers.base_worker import Worker
+from app.ui.theme import scale
+from app.ui.file_dialogs import ask_save_path
 
 _COLUMNS = ["Date", "H.S Code", "Invoice No.", "Reference", "Supplier",
            "Taxable Amount (Rs)", "Non Taxable Amount (Rs)", "VAT (Rs)", "Amount (Rs)",
@@ -153,7 +155,7 @@ class PurchasesPage(QWidget):
 
         self._search = QLineEdit()
         self._search.setPlaceholderText("Search order #, invoice #, reference, or supplier…")
-        self._search.setMinimumWidth(260)
+        self._search.setMinimumWidth(scale(260))
         self._search_debounce = QTimer(self)
         self._search_debounce.setSingleShot(True)
         self._search_debounce.setInterval(_SEARCH_DEBOUNCE_MS)
@@ -494,32 +496,40 @@ class PurchasesPage(QWidget):
 
     # -- export ---------------------------------------------------------------#
     def _export(self, fmt: str) -> None:
+        """Fetch *and* write happen on the worker.
+
+        The write used to run in the finished slot, i.e. back on the UI
+        thread: a large register serialised to .xlsx and pushed to a network
+        drive froze the window for as long as that took, which reads as a
+        crash rather than as progress.
+        """
         ext = "csv" if fmt == "csv" else "xlsx"
         filt = "CSV Files (*.csv)" if fmt == "csv" else "Excel Files (*.xlsx)"
-        path, _ = QFileDialog.getSaveFileName(self, "Export Purchases", f"purchases.{ext}", filt)
-        if not path:
+        path = ask_save_path(self, "Export Purchases", f"purchases.{ext}", filt)
+        if path is None:
             return
-        worker = Worker(self._purchase_service.export_purchase_transactions,
-                        self._build_filter())
-        worker.signals.finished.connect(lambda rows: self._on_export_loaded(rows, path, fmt))
+        worker = Worker(self._fetch_and_write_export, self._build_filter(), path, fmt)
+        worker.signals.finished.connect(self._on_exported)
         worker.signals.error.connect(self._on_export_error)
         QThreadPool.globalInstance().start(worker)
 
-    def _on_export_loaded(self, rows: list[TransactionListRow], path: str, fmt: str) -> None:
+    def _fetch_and_write_export(self, filters, path: str, fmt: str) -> str:
         from app.reporting.export import export_csv, export_excel
+
+        rows = self._purchase_service.export_purchase_transactions(filters)
         result = ReportResult(title="Purchase Register", generated_at=datetime.now(timezone.utc),
                               columns=_export_columns(),
                               rows=[_row_to_export_dict(r) for r in rows])
-        try:
-            (export_csv if fmt == "csv" else export_excel)(result, path)
-            QMessageBox.information(self, "Export Complete", f"Purchases exported to {path}")
-        except OSError as exc:
-            _logger.exception("Purchase export failed", exc_info=exc)
-            QMessageBox.warning(self, "Export Failed", "Couldn't write the export file.")
+        return (export_csv if fmt == "csv" else export_excel)(result, path)
+
+    def _on_exported(self, path: str) -> None:
+        QMessageBox.information(self, "Export Complete", f"Purchases exported to {path}")
 
     def _on_export_error(self, exc: Exception) -> None:
-        _logger.exception("Failed to load purchases for export", exc_info=exc)
-        QMessageBox.warning(self, "Export Failed", "Couldn't load purchases to export.")
+        # Covers both halves of the worker now: reading the purchases and
+        # writing the file.
+        _logger.exception("Exporting purchases failed", exc_info=exc)
+        QMessageBox.warning(self, "Export Failed", user_message(exc))
 
 
 def _export_columns() -> list[str]:

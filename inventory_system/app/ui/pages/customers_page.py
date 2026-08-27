@@ -21,7 +21,6 @@ from PySide6.QtCore import Qt, QThreadPool, QTimer
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QComboBox,
-    QFileDialog,
     QHBoxLayout,
     QHeaderView,
     QLineEdit,
@@ -35,6 +34,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.database.errors import user_message
 from app.core.exceptions import CustomerNotFoundError
 from app.domain.sales import CustomerType
 from app.schemas.reporting import ReportResult
@@ -42,13 +42,14 @@ from app.schemas.sales import CustomerOut
 from app.security.session import SessionManager
 from app.services.sales_service import SalesService
 from app.ui import permission_hints
-from app.ui.theme import GREEN_DARK, RED
+from app.ui.theme import GREEN_DARK, RED, scale
 from app.ui.widgets.async_content import AsyncContentArea
 from app.ui.widgets.confirm_dialog import confirm
 from app.ui.widgets.customer_form_dialog import CustomerFormDialog
 from app.ui.widgets.customer_history_dialog import CustomerHistoryDialog
 from app.ui.widgets.page_header import PageHeader
 from app.ui.widgets.states import EmptyStateWidget
+from app.ui.file_dialogs import ask_save_path
 from app.workers.base_worker import Worker
 
 _COLUMNS = ["Customer", "Code", "Phone", "Email", "Type", "Outstanding", "Credit Limit",
@@ -116,7 +117,7 @@ class CustomersPage(QWidget):
 
         self._search = QLineEdit()
         self._search.setPlaceholderText("Search name, code, phone, or email…")
-        self._search.setFixedWidth(240)
+        self._search.setFixedWidth(scale(240))
         self._search.textChanged.connect(self._on_search_changed)
         bar.addWidget(self._search)
 
@@ -328,31 +329,34 @@ class CustomersPage(QWidget):
 
     # -- export ------------------------------------------------------------#
     def _export_csv(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(self, "Export Customers", "customers.csv",
-                                              "CSV Files (*.csv)")
-        if not path:
+        path = ask_save_path(self, "Export Customers", "customers.csv",
+                             "CSV Files (*.csv)")
+        if path is None:
             return
-        worker = Worker(self._sales_service.export_customers)
-        worker.signals.finished.connect(lambda customers: self._on_export_loaded(customers, path))
+        worker = Worker(self._fetch_and_write_export, path)
+        worker.signals.finished.connect(self._on_exported)
         worker.signals.error.connect(self._on_export_error)
         QThreadPool.globalInstance().start(worker)
 
-    def _on_export_loaded(self, customers: list[CustomerOut], path: str) -> None:
+    def _fetch_and_write_export(self, path: str) -> str:
+        """Both the query and the file write run here, on the worker. The
+        write used to happen back on the UI thread in the finished slot."""
         from app.reporting.export import export_csv
+
+        customers = self._sales_service.export_customers()
         rows = [{"Name": c.name, "Code": c.customer_code, "Type": c.customer_type.value,
                 "Phone": c.phone, "Email": c.email, "Credit Limit": c.credit_limit,
                 "Opening Balance": c.opening_balance,
                 "Status": "Active" if c.is_active else "Inactive"} for c in customers]
         result = ReportResult(title="Customers", generated_at=datetime.now(timezone.utc),
-                              columns=["Name", "Code", "Type", "Phone", "Email", "Credit Limit",
-                                      "Opening Balance", "Status"], rows=rows)
-        try:
-            export_csv(result, path)
-            QMessageBox.information(self, "Export Complete", f"Customers exported to {path}")
-        except OSError as exc:
-            _logger.exception("Customer CSV export failed", exc_info=exc)
-            QMessageBox.warning(self, "Export Failed", "Couldn't write the export file.")
+                              columns=["Name", "Code", "Type", "Phone", "Email",
+                                       "Credit Limit", "Opening Balance", "Status"],
+                              rows=rows)
+        return export_csv(result, path)
+
+    def _on_exported(self, path: str) -> None:
+        QMessageBox.information(self, "Export Complete", f"Customers exported to {path}")
 
     def _on_export_error(self, exc: Exception) -> None:
-        _logger.exception("Failed to load customers for export", exc_info=exc)
-        QMessageBox.warning(self, "Export Failed", "Couldn't load customers to export.")
+        _logger.exception("Exporting customers failed", exc_info=exc)
+        QMessageBox.warning(self, "Export Failed", user_message(exc))

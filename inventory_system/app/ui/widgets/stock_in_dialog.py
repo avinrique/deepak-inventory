@@ -30,6 +30,7 @@ from app.schemas.product import ProductOut
 from app.security.authorization import PermissionDeniedError
 from app.services.inventory_service import InventoryService
 from app.ui.theme import MUTED, RED, STYLESHEET
+from app.ui.widgets.responsive import constrain_dialog
 from app.workers.base_worker import Worker
 
 
@@ -40,7 +41,7 @@ class StockInDialog(QDialog):
         self._inventory_service = inventory_service
         self.transaction: InventoryTransactionOut | None = None
         self.setWindowTitle("Stock In")
-        self.setMinimumWidth(380)
+        constrain_dialog(self, 380)
         self.setStyleSheet(STYLESHEET)
 
         layout = QVBoxLayout(self)

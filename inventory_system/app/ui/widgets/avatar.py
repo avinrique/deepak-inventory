@@ -8,7 +8,7 @@ that should vary by context).
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QLabel
 
-from app.ui.theme import ACCENT
+from app.ui.theme import ACCENT, scale
 
 
 def initials(full_name: str) -> str:
@@ -23,7 +23,7 @@ def initials(full_name: str) -> str:
 class AvatarLabel(QLabel):
     def __init__(self, full_name: str, size: int = 34, font_size: int = 12):
         super().__init__(initials(full_name))
-        self.setFixedSize(size, size)
+        self.setFixedSize(scale(size), scale(size))
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setStyleSheet(f"""
             background: {ACCENT}; color: white; border-radius: {size // 2}px;

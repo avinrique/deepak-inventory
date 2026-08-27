@@ -48,7 +48,7 @@ from app.schemas.user import RoleOut, UserSummaryOut
 from app.security.session import SessionManager
 from app.services.user_service import UserService
 from app.ui import permission_hints
-from app.ui.theme import GREEN_DARK, RED
+from app.ui.theme import GREEN_DARK, RED, scale
 from app.ui.widgets.async_content import AsyncContentArea
 from app.ui.widgets.avatar import AvatarLabel
 from app.ui.widgets.change_user_role_dialog import ChangeUserRoleDialog
@@ -154,7 +154,7 @@ class UsersPage(QWidget):
 
         self._search = QLineEdit()
         self._search.setPlaceholderText("Search name, username, or email…")
-        self._search.setFixedWidth(240)
+        self._search.setFixedWidth(scale(240))
         self._search.textChanged.connect(self._on_search_changed)
         bar.addWidget(self._search)
 
@@ -283,7 +283,7 @@ class UsersPage(QWidget):
         table = QTableWidget(len(result.items), len(_COLUMNS))
         table.setHorizontalHeaderLabels([label for label, _ in _COLUMNS])
         table.verticalHeader().setVisible(False)
-        table.verticalHeader().setDefaultSectionSize(48)
+        table.verticalHeader().setDefaultSectionSize(scale(48))
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)

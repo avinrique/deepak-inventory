@@ -40,6 +40,7 @@ from app.domain.sales import CustomerType
 from app.schemas.sales import CustomerCreate, CustomerOut, CustomerUpdate
 from app.services.sales_service import SalesService
 from app.ui.theme import MUTED, RED, STYLESHEET
+from app.ui.widgets.responsive import constrain_dialog
 from app.workers.base_worker import Worker
 
 
@@ -51,7 +52,7 @@ class CustomerFormDialog(QDialog):
         self._customer = customer
         self.setWindowTitle("View Customer" if read_only else
                             ("Edit Customer" if customer else "Add Customer"))
-        self.setMinimumWidth(420)
+        constrain_dialog(self, 420)
         self.setStyleSheet(STYLESHEET)
 
         layout = QVBoxLayout(self)

@@ -5,11 +5,14 @@ relevant to, see app.repositories.sql.reporting_repository), preview it in
 a table, then export to CSV/Excel/PDF or send it to the printer.
 
 No business logic here: every report call goes through ReportingService on
-a background Worker. CSV/Excel/PDF export and Print run synchronously on
-the click that triggers them — PDF/Print specifically build a QTextDocument
-and must run on the UI thread (Qt GUI objects aren't thread-safe), and
-CSV/Excel are fast enough locally that a background thread would add
-complexity without a real responsiveness benefit.
+a background Worker.
+
+Export threading is deliberately split. CSV and Excel are plain file writes
+and run on a Worker, because "fast enough locally" stops being true for a
+large report written to a network drive or a slow USB stick, and a frozen
+window there reads as a crash. PDF export and Print stay on the UI thread
+and must: both build a QTextDocument and drive a QPrinter, which are Qt GUI
+objects and not safe to use from a worker thread.
 """
 import logging
 
@@ -18,7 +21,6 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDateEdit,
-    QFileDialog,
     QGridLayout,
     QHBoxLayout,
     QHeaderView,
@@ -31,6 +33,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.database.errors import user_message
 from app.reporting.export import _format_cell, export_csv, export_excel, export_pdf, print_report
 from app.schemas.product import ProductFilter
 from app.schemas.reporting import ReportFilter, ReportResult
@@ -42,6 +45,7 @@ from app.services.reporting_service import ReportingService
 from app.services.sales_service import SalesService
 from app.ui.theme import MUTED
 from app.ui.widgets.page_header import PageHeader
+from app.ui.file_dialogs import ask_save_path
 from app.workers.base_worker import Worker
 
 _logger = logging.getLogger(__name__)
@@ -286,50 +290,58 @@ class ReportsPage(QWidget):
             return None
         return self._current_result
 
-    def _export_csv(self) -> None:
+    # One implementation for all three, differing only in where the write
+    # runs. They used to be three near-identical copies.
+    #   kind -> (dialog title, extension, filter, writer, safe off the UI thread)
+    _EXPORTS = {
+        "csv": ("Export CSV", "csv", "CSV Files (*.csv)", staticmethod(export_csv), True),
+        "excel": ("Export Excel", "xlsx", "Excel Files (*.xlsx)",
+                  staticmethod(export_excel), True),
+        # PDF is False: export_pdf builds a QTextDocument and renders it
+        # through a QPrinter, and those are Qt GUI objects. Running it on a
+        # worker would be a threading bug, not an optimisation.
+        "pdf": ("Export PDF", "pdf", "PDF Files (*.pdf)", staticmethod(export_pdf), False),
+    }
+
+    def _export(self, kind: str) -> None:
         result = self._require_result()
         if result is None:
             return
-        path, _ = QFileDialog.getSaveFileName(self, "Export CSV", f"{result.title}.csv",
-                                              "CSV Files (*.csv)")
-        if not path:
+        title, extension, file_filter, writer, off_thread = self._EXPORTS[kind]
+        write = writer.__func__
+        path = ask_save_path(self, title, f"{result.title}.{extension}", file_filter)
+        if path is None:
             return
-        try:
-            export_csv(result, path)
-            self._status_label.setText(f"Exported to {path}")
-        except Exception as exc:  # noqa: BLE001 - surfaced to the user, not swallowed
-            _logger.exception("CSV export failed", exc_info=exc)
-            QMessageBox.critical(self, "Export failed", str(exc))
+
+        if not off_thread:
+            try:
+                self._on_exported(write(result, path))
+            except Exception as exc:  # noqa: BLE001 - shown to the user, not swallowed
+                self._on_export_failed(exc, kind)
+            return
+
+        self._status_label.setText("Exporting…")
+        worker = Worker(write, result, path)
+        worker.signals.finished.connect(self._on_exported)
+        worker.signals.error.connect(lambda exc: self._on_export_failed(exc, kind))
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_exported(self, path: str) -> None:
+        self._status_label.setText(f"Exported to {path}")
+
+    def _on_export_failed(self, exc: Exception, kind: str) -> None:
+        _logger.exception("%s export failed", kind.upper(), exc_info=exc)
+        self._status_label.setText("")
+        QMessageBox.critical(self, "Export failed", user_message(exc))
+
+    def _export_csv(self) -> None:
+        self._export("csv")
 
     def _export_excel(self) -> None:
-        result = self._require_result()
-        if result is None:
-            return
-        path, _ = QFileDialog.getSaveFileName(self, "Export Excel", f"{result.title}.xlsx",
-                                              "Excel Files (*.xlsx)")
-        if not path:
-            return
-        try:
-            export_excel(result, path)
-            self._status_label.setText(f"Exported to {path}")
-        except Exception as exc:  # noqa: BLE001
-            _logger.exception("Excel export failed", exc_info=exc)
-            QMessageBox.critical(self, "Export failed", str(exc))
+        self._export("excel")
 
     def _export_pdf(self) -> None:
-        result = self._require_result()
-        if result is None:
-            return
-        path, _ = QFileDialog.getSaveFileName(self, "Export PDF", f"{result.title}.pdf",
-                                              "PDF Files (*.pdf)")
-        if not path:
-            return
-        try:
-            export_pdf(result, path)
-            self._status_label.setText(f"Exported to {path}")
-        except Exception as exc:  # noqa: BLE001
-            _logger.exception("PDF export failed", exc_info=exc)
-            QMessageBox.critical(self, "Export failed", str(exc))
+        self._export("pdf")
 
     def _print(self) -> None:
         result = self._require_result()

@@ -24,6 +24,7 @@ from app.core.exceptions import PurchaseOrderValidationError, SupplierNotFoundEr
 from app.schemas.purchasing import SupplierCreate, SupplierOut, SupplierUpdate
 from app.services.purchase_service import PurchaseService
 from app.ui.theme import MUTED, RED, STYLESHEET
+from app.ui.widgets.responsive import constrain_dialog
 from app.workers.base_worker import Worker
 
 
@@ -35,7 +36,7 @@ class SupplierFormDialog(QDialog):
         self._supplier = supplier
         self.setWindowTitle("View Supplier" if read_only else
                             ("Edit Supplier" if supplier else "Add Supplier"))
-        self.setMinimumWidth(420)
+        constrain_dialog(self, 420)
         self.setStyleSheet(STYLESHEET)
 
         layout = QVBoxLayout(self)

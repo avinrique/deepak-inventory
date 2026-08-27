@@ -1,0 +1,22 @@
+# Development and build tooling. NOT installed into the packaged
+# application — packaging/InventoryManagementSystem.spec excludes pytest and
+# pypdf explicitly, so a stray import of one from app/ fails the build's
+# self-test rather than silently shipping a test dependency.
+-r requirements.txt
+
+# Test suite.
+pytest>=8.0
+pytest-cov>=5.0
+# PDF text extraction, used only by tests/reports/test_sales_invoice_pdf.py
+# to assert on what the generated invoice actually says.
+pypdf>=5.0
+
+# Building the Windows executable.
+pyinstaller>=6.6
+
+# Icon generation (packaging/make_icon.py). Not needed for a normal build —
+# app.ico is committed — only to regenerate it.
+pillow>=10.0
+
+# Linting.
+ruff>=0.4

@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QDialog, QLabel, QLineEdit, QPushButton, QVBoxLayo
 from app.core.exceptions import InvalidCredentialsError
 from app.services.auth_service import AuthService
 from app.ui.theme import MUTED, RED, STYLESHEET
+from app.ui.widgets.responsive import constrain_dialog
 from app.workers.base_worker import Worker
 
 
@@ -17,7 +18,7 @@ class ChangePasswordDialog(QDialog):
         super().__init__(parent)
         self._auth_service = auth_service
         self.setWindowTitle("Change Password")
-        self.setFixedWidth(360)
+        constrain_dialog(self, 360)
         self.setStyleSheet(STYLESHEET)
         if mandatory:
             self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowCloseButtonHint)

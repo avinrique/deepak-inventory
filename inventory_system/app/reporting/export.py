@@ -1,21 +1,22 @@
 """Turns a ReportResult into CSV/Excel/PDF files, or sends it to a printer.
 
-Pandas is used here — and only here — for exactly the tabular-I/O job it's
-good at: shaping already-SQL-aggregated rows into a DataFrame so
-to_csv()/to_excel() can handle quoting, encoding, and the .xlsx container
-format correctly. No aggregation happens in this module; every row already
-arrived pre-computed from app.repositories.sql.reporting_repository.
+Written against the standard library's csv module and openpyxl directly.
+This used to build a pandas DataFrame first, which brought pandas and numpy
+into the installer — roughly 90 MB and a second of import time — to do four
+things pandas was never needed for: no aggregation happens here, every row
+arrives pre-computed from app.repositories.sql.reporting_repository, and the
+quoting/encoding/.xlsx work is what csv and openpyxl already do.
 
 PDF export and the Print action both render the same HTML table through
 Qt's own QTextDocument + QtPrintSupport (QPrinter/QPrintDialog) — already a
 project dependency (PySide6), so no reportlab/wkhtmltopdf install needed,
 and "export to PDF" and "print" share one rendering path instead of two.
+
 """
+import csv as csv_lib
 import html as html_lib
 from datetime import date, datetime
 from decimal import Decimal
-
-import pandas as pd
 
 from app.schemas.reporting import ReportResult
 
@@ -48,33 +49,49 @@ def _format_cell(value) -> str:
     return str(value)
 
 
-def to_dataframe(result: ReportResult) -> pd.DataFrame:
+def _coerce(value):
     """Decimal -> float at this boundary only: spreadsheet cells need to be
     numeric (so a user can sum/format them in Excel), and the underlying
     calculation was already done in Decimal upstream — this conversion is
     purely for display, not further financial computation.
     """
-    def _coerce(value):
-        if isinstance(value, Decimal):
-            return float(value)
-        if isinstance(value, str):
-            return _neutralize_formula(value)
-        return value
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, str):
+        return _neutralize_formula(value)
+    return value
 
-    if not result.rows:
-        return pd.DataFrame(columns=result.columns)
-    coerced = [{k: _coerce(v) for k, v in row.items()} for row in result.rows]
-    return pd.DataFrame(coerced, columns=result.columns)
+
+def to_rows(result: ReportResult) -> list[list]:
+    """Rows as flat lists in `result.columns` order, coerced for a
+    spreadsheet. A column a row does not carry becomes an empty cell rather
+    than a KeyError — reports assemble their rows per query, and a missing
+    optional column should not fail the export."""
+    return [[_coerce(row.get(column)) for column in result.columns]
+            for row in result.rows]
 
 
 def export_csv(result: ReportResult, path: str) -> str:
-    to_dataframe(result).to_csv(path, index=False)
+    # newline="" is required by the csv module: without it, its own \r\n
+    # line endings get translated again on Windows, giving every row a blank
+    # line after it.
+    with open(path, "w", newline="", encoding="utf-8-sig") as handle:
+        writer = csv_lib.writer(handle)
+        writer.writerow(result.columns)
+        writer.writerows(to_rows(result))
     return path
 
 
 def export_excel(result: ReportResult, path: str) -> str:
-    sheet_name = (result.title or "Report")[:31]  # Excel's sheet-name length limit
-    to_dataframe(result).to_excel(path, index=False, sheet_name=sheet_name, engine="openpyxl")
+    from openpyxl import Workbook
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = (result.title or "Report")[:31]  # Excel's sheet-name length limit
+    sheet.append(list(result.columns))
+    for row in to_rows(result):
+        sheet.append(row)
+    workbook.save(path)
     return path
 
 

@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.ui.theme import STYLESHEET
+from app.ui.widgets.responsive import constrain_dialog
 
 
 def confirm(parent: QWidget, title: str, message: str, confirm_label: str = "Confirm",
@@ -49,7 +50,7 @@ def confirm_typed(parent: QWidget, title: str, message: str, required_text: str,
     dialog = QDialog(parent)
     dialog.setWindowTitle(title)
     dialog.setModal(True)
-    dialog.setMinimumWidth(380)
+    constrain_dialog(dialog, 380)
 
     layout = QVBoxLayout(dialog)
     layout.setContentsMargins(20, 20, 20, 20)

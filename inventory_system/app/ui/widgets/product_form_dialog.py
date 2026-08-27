@@ -40,8 +40,9 @@ from app.core.exceptions import (
 )
 from app.schemas.product import BrandOut, CategoryOut, ProductCreate, ProductOut, ProductUpdate, UnitOut
 from app.services.product_service import ProductService
-from app.ui.theme import RED, STYLESHEET
+from app.ui.theme import RED, STYLESHEET, scale
 from app.ui.widgets.combo_utils import select_by_data
+from app.ui.widgets.responsive import constrain_dialog
 from app.workers.base_worker import Worker
 
 _NONE_ITEM = "—"
@@ -58,7 +59,7 @@ class ProductFormDialog(QDialog):
         self._read_only = read_only
         self.setWindowTitle("View Product" if read_only else
                             ("Edit Product" if product else "Add Product"))
-        self.setMinimumWidth(420)
+        constrain_dialog(self, 420)
         self.setStyleSheet(STYLESHEET)
 
         layout = QVBoxLayout(self)
@@ -79,7 +80,7 @@ class ProductFormDialog(QDialog):
 
         self._description = QTextEdit(product.description if product and product.description
                                       else "")
-        self._description.setFixedHeight(60)
+        self._description.setFixedHeight(scale(60))
         form.addRow("Description", self._description)
 
         self._category = QComboBox()

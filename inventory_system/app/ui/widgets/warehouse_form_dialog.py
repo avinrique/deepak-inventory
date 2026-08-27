@@ -33,6 +33,7 @@ from app.core.exceptions import (
 from app.schemas.inventory import WarehouseCreate, WarehouseOut, WarehouseUpdate
 from app.services.inventory_service import InventoryService
 from app.ui.theme import MUTED, RED, STYLESHEET
+from app.ui.widgets.responsive import constrain_dialog
 from app.workers.base_worker import Worker
 
 
@@ -44,7 +45,7 @@ class WarehouseFormDialog(QDialog):
         self._warehouse = warehouse
         self.setWindowTitle("View Warehouse" if read_only else
                             ("Edit Warehouse" if warehouse else "Add Warehouse"))
-        self.setMinimumWidth(380)
+        constrain_dialog(self, 380)
         self.setStyleSheet(STYLESHEET)
 
         layout = QVBoxLayout(self)

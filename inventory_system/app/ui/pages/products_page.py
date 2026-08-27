@@ -42,6 +42,7 @@ from app.ui.widgets.add_product_dialog import AddProductDialog
 from app.ui.widgets.product_form_dialog import ProductFormDialog
 from app.ui.widgets.states import EmptyStateWidget
 from app.workers.base_worker import Worker
+from app.ui.theme import scale
 
 _COLUMNS = [
     ("SKU", None), ("Name", "name"), ("Category", None), ("Brand", None), ("Unit", None),
@@ -124,7 +125,7 @@ class ProductsPage(QWidget):
 
         self._search = QLineEdit()
         self._search.setPlaceholderText("Search SKU, barcode, or name…")
-        self._search.setFixedWidth(240)
+        self._search.setFixedWidth(scale(240))
         self._search.textChanged.connect(self._on_search_changed)
         bar.addWidget(self._search)
 

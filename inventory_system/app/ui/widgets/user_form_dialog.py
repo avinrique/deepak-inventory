@@ -47,6 +47,7 @@ from app.domain.user import validate_user
 from app.schemas.user import RoleOut, UserSummaryOut, UserUpdate
 from app.services.user_service import UserService
 from app.ui.theme import MUTED, RED, STYLESHEET
+from app.ui.widgets.responsive import constrain_dialog
 from app.workers.base_worker import Worker
 
 DEFAULT_PASSWORD_POLICY = PasswordPolicy(min_length=8, require_uppercase=False,
@@ -77,7 +78,7 @@ class UserFormDialog(QDialog):
         self._password_policy = password_policy
         self.setWindowTitle("View User" if read_only else
                             ("Edit User" if user else "Add User"))
-        self.setMinimumWidth(420)
+        constrain_dialog(self, 420)
         self.setStyleSheet(STYLESHEET)
 
         layout = QVBoxLayout(self)

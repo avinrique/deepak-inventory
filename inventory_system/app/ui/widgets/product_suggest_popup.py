@@ -22,7 +22,7 @@ import uuid
 from decimal import Decimal
 
 from PySide6.QtCore import QEvent, QPoint, Qt, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QGuiApplication
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (
 
 from app.schemas.inventory import InventoryLevel
 from app.schemas.product import ProductOut
-from app.ui.theme import ACCENT, MUTED, RED
+from app.ui.theme import ACCENT, MUTED, RED, scale
 
 # Sentinel stored in a QListWidgetItem's Qt.UserRole to mark the pinned
 # "+ Add Product" row, distinguishing it from a row carrying a real
@@ -66,22 +66,22 @@ class _SuggestionRow(QWidget):
 
         sku = QLabel(product.sku)
         sku.setStyleSheet(f"color: {MUTED};")
-        sku.setMinimumWidth(90)
+        sku.setMinimumWidth(scale(90))
         layout.addWidget(sku)
 
         hsn = QLabel(product.hsn_code or "—")
         hsn.setStyleSheet(f"color: {MUTED};")
-        hsn.setMinimumWidth(70)
+        hsn.setMinimumWidth(scale(70))
         layout.addWidget(hsn)
 
         stock = QLabel(self._stock_text(level))
-        stock.setMinimumWidth(90)
+        stock.setMinimumWidth(scale(90))
         stock.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         stock.setStyleSheet(f"color: {self._stock_color(level)};")
         layout.addWidget(stock)
 
         price = QLabel(_money(getattr(product, price_field)))
-        price.setMinimumWidth(80)
+        price.setMinimumWidth(scale(80))
         price.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         layout.addWidget(price)
 
@@ -146,7 +146,7 @@ class ProductSuggestPopup(QFrame):
 
         self._products_by_id: dict[uuid.UUID, ProductOut] = {}
         self._anchor: QWidget | None = None
-        self.setMinimumWidth(420)
+        self.setMinimumWidth(scale(420))
         self.hide()
 
         # Installed on the QApplication only while visible — closes the
@@ -265,16 +265,50 @@ class ProductSuggestPopup(QFrame):
 
     # -- visibility / positioning -------------------------------------------#
     def reposition_below(self, anchor: QWidget) -> None:
+        """Drops the popup under `anchor`, or above it when there is no room.
+
+        The previous version moved to the anchor's bottom-left with no
+        reference to the screen at all. On a short display -- or simply with
+        the search box low in a long form -- the list opened past the bottom
+        edge, so the suggestions it existed to show were not visible.
+        """
         self._anchor = anchor
-        bottom_left = anchor.mapToGlobal(QPoint(0, anchor.height()))
         self.setFixedWidth(max(anchor.width(), self.minimumWidth()))
-        self.move(bottom_left)
+
+        screen = self.screen() or anchor.screen() or QGuiApplication.primaryScreen()
+        below = anchor.mapToGlobal(QPoint(0, anchor.height()))
+        if screen is None:  # pragma: no cover - no screen (offscreen platform)
+            self.move(below)
+            return
+
+        bounds = screen.availableGeometry()
+        height = self.height() or self.sizeHint().height()
+
+        # Flip above the anchor when the space below cannot hold the popup
+        # but the space above can.
+        space_below = bounds.bottom() - below.y()
+        above_y = anchor.mapToGlobal(QPoint(0, 0)).y() - height
+        if space_below < height and above_y >= bounds.top():
+            below.setY(above_y)
+        else:
+            below.setY(min(below.y(), max(bounds.top(), bounds.bottom() - height)))
+
+        # And never let it run off the right-hand edge.
+        below.setX(min(max(below.x(), bounds.left()),
+                       max(bounds.left(), bounds.right() - self.width())))
+        self.move(below)
 
     def _resize_to_content(self) -> None:
         total_height = sum(self._list.sizeHintForRow(r) for r in range(self._list.count()))
         # Capped so a large result page never grows the popup off-screen;
-        # the list itself scrolls beyond this.
-        self.setFixedHeight(min(total_height + 8, 320))
+        # the list itself scrolls beyond this. The screen is part of the cap
+        # because 320 design pixels can still exceed the space available on
+        # a short display at high scaling.
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        limit = scale(320)
+        if screen is not None:
+            limit = min(limit, int(screen.availableGeometry().height() * 0.5))
+        self.setFixedHeight(min(total_height + scale(8), limit))
 
     def show_popup(self) -> None:
         if not self.isVisible():

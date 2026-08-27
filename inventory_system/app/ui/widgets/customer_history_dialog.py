@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 from app.schemas.sales import CustomerOut
 from app.services.sales_service import SalesService
 from app.ui.theme import GREEN_DARK, MUTED, RED, STYLESHEET
+from app.ui.widgets.responsive import fit_to_screen
 from app.workers.base_worker import Worker
 
 _KIND_LABELS = {"sales_order": "Sales Order", "invoice": "Invoice", "payment": "Payment",
@@ -37,7 +38,7 @@ class CustomerHistoryDialog(QDialog):
         self._sales_service = sales_service
         self._customer = customer
         self.setWindowTitle(f"Customer History — {customer.name}")
-        self.setMinimumSize(640, 520)
+        fit_to_screen(self, 640, 520, minimum_width=460, minimum_height=340)
         self.setStyleSheet(STYLESHEET)
 
         layout = QVBoxLayout(self)

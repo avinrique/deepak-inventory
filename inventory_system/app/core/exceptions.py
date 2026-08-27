@@ -7,6 +7,56 @@ class AppError(Exception):
     """Base class for expected application-level errors."""
 
 
+class DatabaseError(AppError):
+    """Base for "we could not talk to the database" conditions.
+
+    These are deliberately distinct from SchemaVersionMismatchError. The old
+    code lumped them together — app.database.schema_check caught
+    OperationalError while probing for the alembic_version table, so an
+    unreachable host, a wrong password and a blocked port all surfaced to the
+    user as "Database schema out of date. Run: alembic upgrade head", advice
+    that is both useless and alarming. Each cause now carries its own
+    message and its own remedy.
+
+    ``detail`` is the underlying driver text: logged and available in a
+    dialog's Details pane, never the headline shown to a user.
+    """
+
+    def __init__(self, message: str, detail: str = ""):
+        self.detail = detail
+        super().__init__(message)
+
+
+class DatabaseUnavailableError(DatabaseError):
+    """No route to the server: host unknown, connection refused, port
+    blocked, or the machine is offline."""
+
+
+class DatabaseAuthenticationError(DatabaseError):
+    """The server answered and rejected the credentials, or refused access
+    to that database. Distinct from Unavailable because the remedy is
+    "check the username/password", not "check the network"."""
+
+
+class DatabaseTimeoutError(DatabaseError):
+    """The server accepted the TCP connection but did not complete the
+    handshake in time — a suspended cloud instance, or a saturated link."""
+
+
+class ResourceMissingError(AppError):
+    """A file that must be inside the application bundle is not there —
+    a stylesheet, alembic.ini, the migrations tree. Always a packaging
+    defect (something missing from the PyInstaller spec's datas), never
+    anything the user did, so the message says so.
+    """
+
+    def __init__(self, path: object):
+        self.path = path
+        super().__init__(
+            f"A required application file is missing: {path}\n\n"
+            "This installation is incomplete. Reinstalling should fix it.")
+
+
 class SchemaVersionMismatchError(AppError):
     """Raised at startup when the database's alembic_version doesn't match
     the migration the running code expects. This has already caused a real

@@ -1,29 +1,28 @@
-# Upgrade Architecture
+# Architecture
 
-Status: **Phase 0 — scaffold only.** `../inventory_app.py` and
-`../storage.py` (the legacy app, one directory up) are untouched and run
-exactly as before. Nothing in `inventory_system/` is wired into the legacy
-GUI, and the PySide6 GUI here is a placeholder shell — no page does real
-work yet.
+Status: **shipping.** The migration this document describes is finished and
+the application is packaged as a Windows installer — see
+[`deployment.md`](deployment.md) for how a build is produced and deployed.
 
-## Goal
-
-Move gradually from:
-
-```
-Tkinter GUI  →  storage.py  →  Excel
-```
-
-toward:
+The architecture is:
 
 ```
 PySide6 GUI  →  Application Services  →  Business Logic  →  Repositories  →  SQLAlchemy  →  PostgreSQL
 ```
 
-without a rewrite: the legacy Tkinter app, `storage.py`, and the Excel
-files stay authoritative and working for real users through the entire
-migration, and are only retired once `inventory_system/` has been proven
-equivalent and feature-complete.
+It replaced:
+
+```
+Tkinter GUI  →  storage.py  →  Excel
+```
+
+The legacy Tkinter application still exists at the repository root
+(`../inventory_app.py`, `../storage.py`) and still runs, but **nothing in
+this project imports it**. The `excel/` repositories and the
+`INVENTORY_BACKEND` flag that chose between them and PostgreSQL have been
+deleted: the Excel path reached outside this directory through a `sys.path`
+shim, which cannot survive being packaged, and the only service it still fed
+had already been superseded by `InventoryService`'s warehouse ledger.
 
 ## Layers
 
@@ -32,144 +31,98 @@ equivalent and feature-complete.
 | UI | `app/ui` (PySide6) | Widgets, layout, user input/output only — no DB queries, no business logic | Services |
 | Application Services | `app/services` | One class per use case (create a sale, list stock...); orchestrates domain + repositories; the only thing UI code calls | Business Logic, Repositories |
 | Business Logic | `app/domain` | Pure calculation/validation rules (bill totals, VAT/ECS math, stock-sufficiency). No I/O, no framework, `Decimal` throughout | nothing |
-| Repositories | `app/repositories` | One `Protocol` interface per aggregate (`BillRepository`, `StockRepository`, `PartyRepository`), each with an `excel/` and a `sql/` implementation | Models (sql impl) / legacy `storage.py` (excel impl) |
+| Repositories | `app/repositories` | One `Protocol` interface per aggregate in `interfaces.py`, with a SQLAlchemy implementation in `sql/` | Models |
 | Models | `app/models` | SQLAlchemy 2.x declarative ORM classes | Database |
 | Schemas | `app/schemas` | Pydantic DTOs — the *only* objects that cross the UI ⇄ Service boundary | nothing |
 | Database | `app/database` | Engine/session plumbing, read from `app/config` | Models |
-| Config | `app/config` | Settings loaded from environment/`.env` — never hardcoded | nothing |
+| Config | `app/config` | Settings, layered environment > per-user config file > dev `.env` > defaults; the config file's database password is encrypted with Windows DPAPI | Core (paths) |
 | Security | `app/security` | `CurrentUser` context; single fixed local user today, real auth can be swapped in later without changing Service signatures | nothing |
 | Reports | `app/reports` | ReportLab PDF generation | Schemas |
 | Workers | `app/workers` | `QRunnable` background jobs so Excel/DB I/O never blocks the Qt UI thread | Services |
-| Core | `app/core` | DI composition root, app-wide exceptions, logging setup | everything (wires it together) |
+| Core | `app/core` | Path resolution, DI composition root, app-wide exceptions, logging, crash handler, version | everything (wires it together) |
 | Utilities | `app/utils` | `Decimal` parsing, shared text helpers | nothing |
 
 Rules enforced by this structure (see `app/ui/__init__.py`'s docstring):
-**no SQL/Excel access in widgets, no business logic in widgets.** A widget's
-constructor receives its Service(s); it never imports `storage`,
-`sqlalchemy`, or a repository directly.
+**no SQL access in widgets, no business logic in widgets.** A widget's
+constructor receives its Service(s); it never imports `sqlalchemy` or a
+repository directly.
 
 ## Folder structure
 
 ```
 deepak-inventory/                    (repo root)
-├── inventory_app.py                  # legacy Tkinter GUI — unchanged
-├── storage.py                        # legacy Excel I/O — unchanged
-├── requirements.txt                   # unchanged — still all the legacy app needs
+├── inventory_app.py                  # legacy Tkinter GUI — retired, still runnable
+├── storage.py                        # legacy Excel I/O — retired, no longer imported
+├── .github/workflows/
+│   └── windows-build.yml              # builds, self-tests and packages the app
 │
-└── inventory_system/                  # THIS project — production-grade rewrite
+└── inventory_system/                  # the application
     ├── README.md
     ├── pyproject.toml                  # pytest config, black/ruff settings
-    ├── requirements.txt                 # PySide6, sqlalchemy, alembic, pydantic, reportlab...
-    ├── .env.example                      # every setting app/config/settings.py reads
-    ├── .gitignore                         # .env, __pycache__, logs/, ...
-    ├── conftest.py
-    ├── alembic.ini                         # Phase 2 — not yet run against a real DB
-    ├── migrations/
-    │   ├── env.py
-    │   └── versions/                        # empty until Phase 2
+    ├── requirements.txt                 # runtime only — everything here ships
+    ├── requirements-dev.txt              # tests, PyInstaller, linting
+    ├── .env.example                       # development configuration only
+    ├── conftest.py                         # rootdir marker + headless Qt platform
+    ├── alembic.ini
+    ├── migrations/versions/                 # 19 revisions, shipped with the app
+    ├── packaging/
+    │   ├── InventoryManagementSystem.spec    # PyInstaller (onedir)
+    │   ├── installer.iss                      # Inno Setup
+    │   ├── app.ico / make_icon.py              # icon, generated from code
+    │   ├── make_version_info.py                 # Windows VERSIONINFO resource
+    │   ├── fetch_pgtools.py                      # stages pg_dump/pg_restore
+    │   └── build_windows.ps1                      # local build
     ├── scripts/
-    │   └── run_app.py                        # convenience launcher
-    ├── resources/                              # icons/stylesheets (currently empty)
-    ├── docs/architecture.md                     # this file
+    │   ├── run_app.py                              # convenience launcher
+    │   └── init_db.py                               # migrate, seed, create first owner
+    ├── docs/
+    │   ├── architecture.md                           # this file
+    │   └── deployment.md                              # build/install/operate
     ├── tests/
-    │   ├── domain/                              # pure, no I/O — fastest, run constantly
-    │   ├── repositories/                        # excel repo tests against the real legacy storage.py
-    │   └── services/                            # fake in-memory repos, no I/O
     └── app/
-        ├── main.py                              # QApplication entrypoint
-        ├── core/                                 # container.py, exceptions.py, logging_config.py
-        ├── config/                               # settings.py (pydantic-settings, reads .env)
-        ├── ui/                                    # PySide6: main_window.py, pages/, widgets/
-        ├── domain/                                # billing.py (Decimal math/validation)
-        ├── schemas/                               # bill.py, stock.py, party.py (Pydantic)
-        ├── repositories/
-        │   ├── interfaces.py                       # Protocol contracts
-        │   ├── excel/                               # thin adapters over ../../storage.py — real, working today
-        │   └── sql/                                  # SQLAlchemy-backed — stubs, Phase 2
-        ├── services/                                # billing_service.py, stock_service.py, party_service.py, report_service.py
-        ├── models/                                   # SQLAlchemy ORM: Bill, BillLine, StockItem, Party — Phase 2
-        ├── database/                                  # engine/session — Phase 2
-        ├── security/                                   # context.py — CurrentUser stub
-        ├── reports/                                     # invoice_pdf.py — Phase 3
-        ├── workers/                                      # base_worker.py — QRunnable, not wired up yet
-        └── utils/                                         # money.py, text.py
+        ├── main.py                                     # ordered startup sequence
+        ├── selftest.py                                  # verifies a packaged build
+        ├── __version__.py                                # the one place VERSION lives
+        ├── core/                                          # paths, container, exceptions,
+        │                                                   # logging, crash handler
+        ├── config/                                         # settings.py, store.py (DPAPI)
+        ├── ui/                                              # main_window, login, setup
+        │                                                     # wizard, pages/, widgets/
+        ├── domain/                                           # Decimal math and validation
+        ├── schemas/                                           # Pydantic DTOs
+        ├── repositories/{interfaces.py,sql/}
+        ├── services/
+        ├── models/
+        ├── database/                                           # session, schema_check,
+        │                                                        # errors, bootstrap
+        ├── security/
+        ├── reporting/ reports/ backup/
+        ├── workers/
+        └── utils/
 ```
 
-### Why `app/repositories/excel` reaches outside this project
+## How the application starts
 
-`app/repositories/excel/__init__.py` inserts the parent (`deepak-inventory/`)
-onto `sys.path` so `import storage` resolves to the legacy app's file. This
-is deliberate, not an oversight: `storage.py` is the single source of truth
-for the existing `.xlsx` format, and wrapping it avoids a second, divergent
-copy of that I/O code. It is the one place `inventory_system/` depends on
-something outside its own directory, and it is meant to be deleted (package
-and shim both) once the `sql/` backend is the default — see Phase 4 below.
+The sequence in `app/main.py` is ordered deliberately — each step can fail,
+and every failure has to reach the user as something they can act on rather
+than as a window that never appears:
 
-## Migration strategy: strangler fig via a backend flag
+1. create the per-user data directories (never inside the install directory);
+2. configure logging, so every later failure is recorded;
+3. install the crash handler, so an unhandled error is never silent;
+4. set the High-DPI rounding policy — must precede `QApplication`;
+5. create `QApplication`, set its identity and icon;
+6. load the theme, a bundled resource that a broken package can lack;
+7. ensure a database is configured, or run the setup wizard;
+8. connect and check the schema, distinguishing *unreachable* from
+   *wrong credentials* from *out of date*;
+9. build the container and show the login window.
 
-`app/repositories/interfaces.py` defines each repository as a `Protocol`.
-Services depend only on the Protocol, never on a concrete implementation, so
-`app/core/container.py` — the one place that chooses `excel/` vs `sql/` — is
-the only code that has to change to swap backends.
+Steps 6-8 are the ones that only exist because the application is packaged.
+Running from a source checkout, the stylesheet is always present, the `.env`
+is always found, and the developer knows what a stack trace means.
 
-1. **Phase 0 (this commit).** Scaffold only. `app/repositories/excel/*` are
-   real, thin wrappers around the legacy `storage.py` functions — no
-   duplicated logic, no behavior change to the legacy app.
-   `app/repositories/sql/*` exist as named stubs (`NotImplementedError`) so
-   the second implementation has an obvious home. `app/services` and
-   `app/domain` are real and tested. `app/ui` is a real, launchable PySide6
-   shell (sidebar + 5 pages) but every page is a placeholder — no page
-   reads or writes real data yet.
-2. **Phase 1.** Wire each page to its Service: New Bill gets real
-   forms/save via `BillingService` (on a `QRunnable` worker, not the UI
-   thread), Sales/Purchases/Stock/Parties get real tables via `list_all()`
-   (currently `NotImplementedError` in the `excel/` repositories — implement
-   when a page actually needs it, rather than speculatively). This phase
-   stays on the Excel backend — zero data-migration risk.
-3. **Phase 2 (database layer — in progress).** The identity/access-control
-   entities (`User`, `Role`, `Permission`, `RolePermission`, `Organization`,
-   `UserOrganization`, `AuditLog`) are implemented as real SQLAlchemy 2.0
-   models with UUID PKs, timezone-aware timestamps, FKs (with deliberate
-   `CASCADE`/`RESTRICT`/`SET NULL` policies per relationship — see each
-   model's docstring), unique/check constraints, and indexes — see
-   `app/models/`. The initial Alembic migration
-   (`migrations/versions/091eeb36e646_initial_schema.py`) was
-   autogenerated and applied against a real local PostgreSQL instance to
-   confirm it, not hand-written untested; `tests/models/` are real
-   integration tests against a live database proving transactions,
-   constraint enforcement, and relationship loading (skipped automatically
-   when `INVENTORY_BACKEND != "postgres"` or no database is reachable —
-   they do not run in this sandbox by default). `scripts/init_db.py` runs
-   the migration and idempotently seeds the Role/Permission catalog (see
-   Phase 2b below). Inventory-related entities (Bill, StockItem, Party —
-   tenant-scoped via `organization_id`, replacing the earlier
-   pre-Organization stubs) and `app/repositories/sql/{bill,stock,party}.py`
-   are the remaining Phase 2 work. Write **contract tests** once they land:
-   the same test bodies run against both `excel/` and `sql/`
-   implementations of each repository, proving parity. Add a one-time
-   importer (`excel repo.list_all()` → `sql repo.append()` per row) that
-   seeds Postgres from a user's existing `.xlsx` history.
-4. **Phase 2b (authentication/authorization — done).** `app/security/`:
-   Argon2id password hashing, an in-process idle-timeout `SessionManager`,
-   and the actual enforcement boundary, `@require_permission`. The 8-role
-   permission catalog, `AuthService`, `UserService`, and the first real
-   `sql/` repository (`SqlUserRepository` — User has no Excel equivalent to
-   fall back on, unlike Bill/Stock/Party) — see "Authentication/
-   authorization design" below.
-5. **Phase 3.** Implement `app/reports/invoice_pdf.py` (ReportLab) — a new,
-   additive capability the legacy app never had.
-6. **Phase 4.** Flip `INVENTORY_BACKEND=postgres` by default once parity
-   tests are green. Delete `app/repositories/excel/*` and its `sys.path`
-   shim; `inventory_system/` no longer depends on anything outside its own
-   directory. Retire the legacy Tkinter app once `inventory_system/` covers
-   its full feature set.
-7. **Phase 5 (optional).** Multi-organization self-service (today, an
-   `AuthService.login` caller resolves ambiguous multi-org accounts via an
-   explicit `organization_id`, and only `UserService` — already
-   `users.create`-gated — can create users, so there's no self-service
-   signup yet).
-
-## Why PySide6, and why not migrate the legacy app in place
+## Why PySide6
 
 PySide6 (Qt) was chosen for the production rewrite — richer table/tree
 widgets, proper threading (`QRunnable`/signals) so I/O never blocks the UI,
@@ -189,7 +142,7 @@ Excel path); `app/utils/money.to_decimal()` is its strict counterpart, used
 by everything under `app/` — it raises on unparseable input instead of
 silently returning `0`.
 
-## Identity/access-control schema (Phase 2)
+## Identity/access-control schema
 
 | Entity | Key design choices |
 |---|---|
@@ -222,7 +175,7 @@ a row via `psql` first, then confirming the corrected migration (adds with
 a `server_default`, then drops it, matching the model's client-side-only
 default) backfills it to `false` and applies cleanly.
 
-## Authentication/authorization design (Phase 2b)
+## Authentication/authorization design
 
 This is a desktop app, so "session" means **one user logged into the
 running GUI process at a time** — e.g. a shared terminal at a shop counter
@@ -282,63 +235,66 @@ databases, not existing grants.
 - `tests/security` — password hashing (Argon2id round-trip, `needs_rehash`),
   `SessionManager` (idle timeout, deterministic via injected `now`), and
   `@require_permission`/`check_permission` — no I/O.
-- `tests/repositories` — `excel/` repositories tested against the real
-  legacy `storage.py` using a temp directory (`INVENTORY_DATA_DIR`
-  override). `test_sql_user_repository.py` tests the real `SqlUserRepository`
-  (plus `AuthService`/`UserService` wired to it, not fakes) against a live
-  database — skips like `tests/models` without one. Once
-  `sql/{bill,stock,party}.py` exist, the same `excel/` test bodies run again
-  against them (contract tests) to prove parity.
-- `tests/services` — `BillingService`/`AuthService`/`UserService` tested
-  against hand-written fake repositories implementing the `Protocol`s — no
-  Excel, no database. This is where most authorization tests live: every
-  `UserService` method is exercised both as an authorized call (does the
-  right thing) and an unauthorized one (repository never touched).
-- `tests/models` — integration tests against a **real** PostgreSQL database.
-  Skipped automatically unless `INVENTORY_BACKEND=postgres` and
-  `INVENTORY_DATABASE_URL` points at a reachable database — they do not run
-  against SQLite (UUID/JSONB/INET are Postgres-specific types) and do not
-  run by default in this sandbox.
+- `tests/services` — Services tested against hand-written fake repositories
+  implementing the `Protocol`s — no database. This is where most
+  authorization tests live: every `UserService` method is exercised both as
+  an authorized call (does the right thing) and an unauthorized one
+  (repository never touched).
+- `tests/repositories`, `tests/models` — integration tests against a **real**
+  PostgreSQL database. They create and then drop every table, so they are
+  gated on `INVENTORY_TEST_DATABASE_URL` — deliberately a *different* setting
+  from the application's own `INVENTORY_DATABASE_URL`, so the suite cannot do
+  that to a real database. Unset (the default) skips them. They do not run
+  against SQLite: UUID/JSONB/INET are PostgreSQL-specific.
+- `tests/ui` — widget construction, layout and permission-driven visibility,
+  against `MagicMock` services. Includes `test_responsive_layout.py`, which
+  asserts that no window or dialog demands more space than a 1366x768 screen
+  offers at each Windows scaling factor, and `test_build_page_smoke.py`,
+  which constructs every page.
+- `tests/config`, `tests/core` — the packaging-critical behaviour: settings
+  precedence, the config file's password handling, path resolution, log
+  rotation and the crash handler.
 
-Run with:
+`conftest.py` selects Qt's offscreen platform when there is no display, so
+the UI tests genuinely run in CI instead of skipping themselves and leaving
+the build green.
 
 ```bash
 cd inventory_system
-pip install -r requirements.txt
-pytest                                    # tests/models, tests/repositories/test_sql_user_repository.py skip without Postgres
+pip install -r requirements-dev.txt
+pytest                                     # DB tests skip without a test database
 
-# to also run those and try the database layer for real:
-export INVENTORY_BACKEND=postgres
-export INVENTORY_DATABASE_URL=postgresql+psycopg://USER:PASSWORD@localhost:5432/inventory
-python scripts/init_db.py                 # runs migrations + seeds the 8-role catalog
+# to also exercise the database layer, against a scratch database only:
+export INVENTORY_TEST_DATABASE_URL=postgresql+psycopg://localhost:5432/inventory_test
 pytest
 ```
 
-## What's explicitly NOT done in this phase
+### Verifying a packaged build
 
-- No page in `app/ui` reads or writes real data — every page is a
-  `QLabel` placeholder, including a login screen: `AuthService`/
-  `SessionManager` exist and are fully tested, but nothing in `app/ui`
-  calls them yet.
-- `app/repositories/sql/{bill,stock,party}.py` still raise
-  `NotImplementedError` — `Container` still can't construct a working
-  `postgres`-backed `BillingService`. (`SqlUserRepository` is real.)
-- Inventory entities (`Bill`, `BillLine`, `StockItem`, `Party`) don't exist
-  yet in `app/models` — deliberately out of scope for both the database and
-  auth phases, per the requests that started them.
-- `app/reports/invoice_pdf.py` has a fixed signature but no PDF layout.
-- No account lockout / rate limiting after repeated failed logins — wasn't
-  requested and would need a decision on the right policy (lock the
-  account? the session? for how long?) rather than a default guess.
-- `AuditLog` isn't written to yet by anything in `app/security` or
-  `app/services` — the model exists (Phase 2) but login/logout/password
-  events aren't recorded there. A reasonable next step, not done here
-  because it wasn't asked for this turn and deserves its own pass (what
-  else should be audited, and whether it belongs inside the same
-  transaction as the write it's logging).
-- `app/workers/base_worker.py` exists but no page uses it yet — logging in
-  still runs on whatever thread calls `AuthService.login`.
-- No database migration seed data for inventory entities, no multi-tenant
-  row-level security, no read replicas or connection pooling tuning
-  (`app/database/session.py`'s engine is the SQLAlchemy default pool,
-  unconfigured for production load).
+The tests above run against the source tree, where the failures that matter
+most for a packaged application cannot happen: the stylesheet is always
+present, `openpyxl` is always importable, Alembic can always find its
+migrations. `app/selftest.py` covers that gap — `--self-test` loads every
+bundled resource, imports the drivers that are only ever named inside
+strings, renders a PDF and a spreadsheet, and constructs every page and
+window, then exits. CI runs it **against the built executable**, which is
+the only way those defects surface before a user finds them.
+
+## Deliberate limitations
+
+- **No auto-updater.** A fixed installer `AppId` means a newer installer
+  upgrades in place cleanly, which is enough for a handful of shop machines;
+  a background updater would need signing infrastructure and a release
+  channel that do not exist yet.
+- **The application is a database client.** It does not embed a database, so
+  an installation needs a PostgreSQL server reachable over the network —
+  cloud or LAN. There is no offline mode and no local cache.
+- **Connection settings roam, backups do not.** `config.json` is in roaming
+  AppData so a domain user keeps it between machines; logs and backups are
+  machine-local by design.
+- **No row-level security.** Multi-tenancy is enforced by `organization_id`
+  scoping in the repository layer, not by the database.
+- **Default connection pool.** `app/database/session.py` sets
+  `pool_pre_ping` and `pool_recycle` — which a long-idle desktop client
+  genuinely needs — but otherwise leaves SQLAlchemy's defaults, which are
+  sized for one user per process rather than tuned for load.

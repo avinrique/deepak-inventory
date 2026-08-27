@@ -49,6 +49,7 @@ from app.ui.widgets.change_password_dialog import ChangePasswordDialog
 from app.ui.widgets.confirm_dialog import confirm
 from app.ui.widgets.page_header import PageHeader
 from app.ui.widgets.states import EmptyStateWidget
+from app.ui.widgets.responsive import wrap_in_scroll
 from app.workers.base_worker import Worker
 
 _logger = logging.getLogger(__name__)
@@ -101,7 +102,9 @@ class ProfilePage(QWidget):
         outer.addWidget(self._build_edit_card(data.user))
         outer.addWidget(self._build_security_card())
         outer.addStretch()
-        return page
+        # Three stacked cards overflow a short window; without scrolling the
+        # Security card (which holds Change Password) falls off the bottom.
+        return wrap_in_scroll(page)
 
     def _build_identity_card(self, user: UserOut, role_name: str) -> QWidget:
         card = QWidget()

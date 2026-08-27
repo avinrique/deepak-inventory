@@ -1,29 +1,33 @@
-# Inventory System — production-grade rewrite (PySide6 + SQLAlchemy +
-# PostgreSQL), replacing the legacy Tkinter/Excel app incrementally. See
-# docs/architecture.md. This file is self-contained: the legacy app at the
-# repo root has its own requirements.txt and does not need any of this.
+# Runtime dependencies — everything the packaged application needs, and
+# nothing else. Anything added here ends up inside the Windows installer,
+# so keep it to what app/ actually imports at runtime.
 #
-# Needed right now (Phase 0/1 code actually imports these):
-PySide6>=6.7
-pydantic>=2.6
-pydantic-settings>=2.2
-python-dotenv>=1.0
-pytest>=8.0
+# Development and build tooling lives in requirements-dev.txt.
+# CI installs from requirements.lock.txt for a reproducible build.
 
-# Needed once Phase 2 (SQLAlchemy/PostgreSQL) is implemented:
-sqlalchemy>=2.0
+# GUI. Also supplies the PDF viewer (QtPdf), printing (QtPrintSupport) and
+# the dashboard charts (QtCharts) — no separate packages needed for those.
+PySide6>=6.7
+
+# Data access.
+SQLAlchemy>=2.0
 alembic>=1.13
 psycopg[binary]>=3.1
+
+# Settings and DTOs.
+pydantic>=2.6
+pydantic-settings>=2.2
+# Not imported directly: pydantic-settings needs it to read a .env file,
+# which is the development configuration path.
+python-dotenv>=1.0
+
+# Argon2id password hashing (app/security/passwords.py).
 argon2-cffi>=23.1
 
-# Reporting (app/reporting/export.py): CSV/Excel export. Charts, PDF
-# export, and Print use PySide6's own QtCharts/QtPdf/QtPrintSupport —
-# already covered by the PySide6 line above, no separate package needed.
-pandas>=2.2
+# Spreadsheet export (app/reporting/export.py). Referenced only from a
+# string there, so PyInstaller needs it listed as a hidden import too — see
+# packaging/InventoryManagementSystem.spec.
 openpyxl>=3.1
 
-# Invoice PDF generation (app/reports/sales_invoice_pdf.py):
+# Invoice PDF layout (app/reports/sales_invoice_pdf.py).
 reportlab>=4.1
-
-# Test-only: PDF text extraction for tests/reports/test_sales_invoice_pdf.py.
-pypdf>=5.0

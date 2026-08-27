@@ -53,10 +53,11 @@ from app.security.authorization import PermissionDeniedError
 from app.services.inventory_service import InventoryService
 from app.services.product_service import ProductService
 from app.services.purchase_service import PurchaseService
-from app.ui.theme import RED, STYLESHEET
+from app.ui.theme import RED, STYLESHEET, scale
 from app.ui.widgets.custom_fields_section import CustomFieldsSection
 from app.ui.widgets.order_form_style import ORDER_FORM_STYLESHEET, apply_card_shadow, field_label
 from app.ui.widgets.transaction_items_table import TransactionItemsTable
+from app.ui.widgets.responsive import fit_to_screen
 from app.workers.base_worker import Worker
 
 
@@ -93,8 +94,7 @@ class PurchaseOrderFormDialog(QDialog):
             self.setWindowTitle("Edit Purchase Order")
         else:
             self.setWindowTitle("Create Purchase Order")
-        self.setMinimumWidth(760)
-        self.resize(800, 680)
+        fit_to_screen(self, 800, 680, minimum_width=620, minimum_height=380)
         self.setStyleSheet(STYLESHEET + ORDER_FORM_STYLESHEET)
 
         outer = QVBoxLayout(self)
@@ -394,7 +394,7 @@ class PurchaseOrderFormDialog(QDialog):
         self._notes = QTextEdit()
         self._notes.setPlaceholderText("Optional — delivery instructions, special "
                                        "terms, etc.")
-        self._notes.setMaximumHeight(72)
+        self._notes.setMaximumHeight(scale(72))
         layout.addWidget(self._notes)
         return card
 

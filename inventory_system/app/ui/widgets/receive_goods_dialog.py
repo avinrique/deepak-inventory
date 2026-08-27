@@ -23,6 +23,7 @@ from app.schemas.purchasing import GoodsReceiptLineInput, PurchaseOrderOut, Rece
 from app.security.authorization import PermissionDeniedError
 from app.services.purchase_service import PurchaseService
 from app.ui.theme import RED, STYLESHEET
+from app.ui.widgets.responsive import constrain_dialog
 from app.workers.base_worker import Worker
 
 _QTY_COL = 2
@@ -38,7 +39,7 @@ class ReceiveGoodsDialog(QDialog):
                                    if item.quantity_outstanding > 0]
         self.receipt = None
         self.setWindowTitle("Receive Goods")
-        self.setMinimumWidth(460)
+        constrain_dialog(self, 460)
         self.setStyleSheet(STYLESHEET)
 
         layout = QVBoxLayout(self)

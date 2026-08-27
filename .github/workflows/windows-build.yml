@@ -1,0 +1,158 @@
+name: Windows build
+
+# Builds and verifies the Windows application and installer.
+#
+# This is the reference build. Development happens on macOS, where a Windows
+# executable cannot be produced at all — PyInstaller does not cross-compile
+# and Inno Setup is Windows-only — so this workflow is where the artefact a
+# customer actually receives gets made and tested.
+#
+# What it proves, in order:
+#   1. the test suite passes, with the UI tests genuinely running (offscreen)
+#      rather than skipping for want of a display;
+#   2. PyInstaller produces an executable;
+#   3. that *executable* passes its own self-test — which is the step that
+#      catches a stylesheet or hidden import missing from the .spec, none of
+#      which the source-tree tests can see;
+#   4. every screen renders at each Windows display-scaling factor, captured
+#      as downloadable screenshots;
+#   5. Inno Setup produces an installer.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: inventory_system
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            inventory_system/requirements.txt
+            inventory_system/requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Record the exact versions that produced this build
+        run: |
+          pip freeze > requirements.lock.txt
+          type requirements.lock.txt
+
+      - name: Lint
+        run: ruff check app scripts packaging
+        continue-on-error: true
+
+      - name: Run tests
+        env:
+          # Without this the UI tests cannot create a QApplication on a
+          # headless runner and skip themselves — ~180 tests silently not
+          # running while the job still reports success.
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest -q
+
+      - name: Stamp the build with the commit
+        # Ends up in the log header of every installed copy, so a bug report
+        # names the commit that produced the binary.
+        run: echo "INVENTORY_BUILD=${{ github.sha }}" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        shell: pwsh
+
+      - name: Generate the Windows version resource
+        run: python packaging/make_version_info.py
+
+      - name: Bundle the PostgreSQL backup tools
+        # windows-latest ships PostgreSQL, so pg_dump/pg_restore can be taken
+        # from there rather than downloaded. --optional keeps a runner image
+        # change from breaking the build outright; the self-test still passes
+        # and Backup reports the tools are missing instead of crashing.
+        run: python packaging/fetch_pgtools.py --optional
+
+      - name: Build the executable
+        run: python -m PyInstaller packaging/InventoryManagementSystem.spec --noconfirm --clean
+
+      - name: Self-test the packaged executable
+        env:
+          QT_QPA_PLATFORM: offscreen
+        # The heart of this workflow. Runs the built .exe — not the source —
+        # and checks that it can load both stylesheets, find alembic.ini and
+        # the migration scripts, import psycopg/openpyxl/argon2, render a PDF
+        # and a spreadsheet, and construct every page and window.
+        run: .\dist\InventoryManagementSystem\InventoryManagementSystem.exe --self-test
+        shell: pwsh
+
+      - name: Capture every screen at each Windows scaling factor
+        env:
+          QT_QPA_PLATFORM: offscreen
+        # 100% / 125% / 150% / 200% are the settings Windows offers on the
+        # target hardware. The PNGs are attached to the run so clipped text or
+        # an unreachable button can be spotted without a test having to
+        # predict it.
+        run: |
+          foreach ($scale in @("1", "1.25", "1.5", "2")) {
+            $env:QT_SCALE_FACTOR = $scale
+            $dir = "dpi-screenshots\scale-$($scale -replace '\.','_')"
+            Write-Host "Capturing at $scale"
+            .\dist\InventoryManagementSystem\InventoryManagementSystem.exe --self-test --screenshot-dir $dir
+            if ($LASTEXITCODE -ne 0) { throw "self-test failed at scale $scale" }
+          }
+        shell: pwsh
+
+      - name: Build the installer
+        run: |
+          $version = (Select-String -Path app\__version__.py -Pattern '^VERSION\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          Write-Host "Building installer for $version"
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$version" packaging\installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
+        shell: pwsh
+
+      - name: Upload the installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer
+          path: inventory_system/dist/installer/*.exe
+          if-no-files-found: error
+
+      - name: Upload the application directory
+        uses: actions/upload-artifact@v4
+        with:
+          name: application
+          path: inventory_system/dist/InventoryManagementSystem/
+          if-no-files-found: error
+
+      - name: Upload the DPI screenshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: dpi-screenshots
+          path: inventory_system/dpi-screenshots/
+          if-no-files-found: warn
+
+      - name: Upload the resolved dependency versions
+        uses: actions/upload-artifact@v4
+        with:
+          name: requirements-lock
+          path: inventory_system/requirements.lock.txt
+
+      - name: Attach the installer to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: inventory_system/dist/installer/*.exe
+          generate_release_notes: true

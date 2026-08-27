@@ -19,6 +19,7 @@ user scrolls or resizes a column.
 """
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QAbstractItemView, QHeaderView, QTableWidget, QVBoxLayout, QWidget
+from app.ui.theme import scale
 
 
 class TotalsTable(QWidget):
@@ -48,7 +49,7 @@ class TotalsTable(QWidget):
         self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.table.horizontalHeader().setStretchLastSection(False)
-        self.table.horizontalHeader().setMinimumSectionSize(70)
+        self.table.horizontalHeader().setMinimumSectionSize(scale(70))
         self.table.horizontalHeader().sectionClicked.connect(self.sort_requested)
         self.table.itemSelectionChanged.connect(self.selection_changed)
         layout.addWidget(self.table, stretch=1)
@@ -64,7 +65,7 @@ class TotalsTable(QWidget):
         self._totals.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._totals.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._totals.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._totals.setFixedHeight(40)
+        self._totals.setFixedHeight(scale(40))
         layout.addWidget(self._totals)
 
         self.table.horizontalHeader().sectionResized.connect(self._sync_column_width)
@@ -91,7 +92,7 @@ class TotalsTable(QWidget):
                 header.setSectionResizeMode(col, QHeaderView.ResizeMode.Stretch)
             elif col in fixed:
                 header.setSectionResizeMode(col, QHeaderView.ResizeMode.Fixed)
-                self.table.setColumnWidth(col, fixed[col])
+                self.table.setColumnWidth(col, scale(fixed[col]))
             else:
                 header.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
         self.table.setSortingEnabled(False)  # sorting is server-side — see the pages

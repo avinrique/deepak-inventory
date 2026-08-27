@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
 
 from app.schemas.reporting import DashboardMetrics
 from app.services.reporting_service import ReportingService
-from app.ui.theme import ACCENT, AMBER, CARD_BG, GREEN, MUTED, RED, TEXT
+from app.ui.theme import ACCENT, AMBER, CARD_BG, GREEN, MUTED, RED, TEXT, scale
 from app.ui.widgets.async_content import AsyncContentArea
 from app.ui.widgets.page_header import PageHeader
 from app.ui.widgets.stat_card import StatCard
@@ -78,7 +78,7 @@ def _empty_chart_view(title: str) -> QChartView:
     _style_chart(chart)
     view = QChartView(chart)
     view.setRenderHint(QPainter.RenderHint.Antialiasing)
-    view.setMinimumHeight(_CHART_MIN_HEIGHT)
+    view.setMinimumHeight(scale(_CHART_MIN_HEIGHT))
     return view
 
 
@@ -108,7 +108,7 @@ def _line_chart(title: str, categories: list[str], values: list[float]) -> QChar
 
     view = QChartView(chart)
     view.setRenderHint(QPainter.RenderHint.Antialiasing)
-    view.setMinimumHeight(_CHART_MIN_HEIGHT)
+    view.setMinimumHeight(scale(_CHART_MIN_HEIGHT))
     return view
 
 
@@ -140,7 +140,7 @@ def _bar_chart(title: str, categories: list[str], values: list[float],
 
     view = QChartView(chart)
     view.setRenderHint(QPainter.RenderHint.Antialiasing)
-    view.setMinimumHeight(_CHART_MIN_HEIGHT)
+    view.setMinimumHeight(scale(_CHART_MIN_HEIGHT))
     return view
 
 
@@ -161,7 +161,7 @@ def _pie_chart(title: str, labels: list[str], values: list[float]) -> QChartView
 
     view = QChartView(chart)
     view.setRenderHint(QPainter.RenderHint.Antialiasing)
-    view.setMinimumHeight(_CHART_MIN_HEIGHT)
+    view.setMinimumHeight(scale(_CHART_MIN_HEIGHT))
     return view
 
 
@@ -264,7 +264,8 @@ class DashboardPage(QWidget):
                                    else Qt.GlobalColor.darkRed)
             table.setItem(row, 4, qty_item)
             table.setItem(row, 5, QTableWidgetItem(tx.performed_by_email))
-        table.setMinimumHeight(min(400, 44 + 32 * max(1, len(metrics.recent_transactions))))
+        table.setMinimumHeight(scale(min(400, 44 + 32 * max(
+            1, len(metrics.recent_transactions)))))
         if not metrics.recent_transactions:
             table.setRowCount(0)
         outer.addWidget(table)

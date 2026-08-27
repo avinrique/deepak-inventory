@@ -12,7 +12,7 @@
  */
 
 * {
-    font-family: "@FAMILY@";
+    font-family: @FAMILY@;
     color: @TEXT@;
 }
 QMainWindow, QDialog {

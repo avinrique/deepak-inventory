@@ -34,6 +34,7 @@ from app.schemas.product import ProductOut
 from app.security.authorization import PermissionDeniedError
 from app.services.inventory_service import InventoryService
 from app.ui.theme import MUTED, RED, STYLESHEET
+from app.ui.widgets.responsive import constrain_dialog
 from app.workers.base_worker import Worker
 
 
@@ -52,7 +53,7 @@ class StockAdjustmentDialog(QDialog):
         self.transaction = None  # InventoryTransactionOut, or a pair for Transfer
         self.mode: StockAdjustmentMode | None = None
         self.setWindowTitle("Adjust Stock")
-        self.setMinimumWidth(400)
+        constrain_dialog(self, 400)
         self.setStyleSheet(STYLESHEET)
 
         layout = QVBoxLayout(self)

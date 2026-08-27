@@ -7,13 +7,14 @@ from app.schemas.product import BrandCreate, CategoryCreate, UnitCreate
 from app.services.catalog_service import CatalogService
 from app.ui.theme import STYLESHEET
 from app.ui.widgets.crud_list_panel import CrudListPanel
+from app.ui.widgets.responsive import fit_to_screen
 
 
 class CatalogManagerDialog(QDialog):
     def __init__(self, catalog_service: CatalogService, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Manage Catalog")
-        self.resize(560, 420)
+        fit_to_screen(self, 560, 420, minimum_width=420, minimum_height=300)
         self.setStyleSheet(STYLESHEET)
 
         layout = QVBoxLayout(self)

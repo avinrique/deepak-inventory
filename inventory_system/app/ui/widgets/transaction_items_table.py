@@ -38,6 +38,7 @@ from decimal import Decimal, InvalidOperation
 from PySide6.QtCore import QEvent, QObject, QThreadPool, Qt, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -61,7 +62,7 @@ from app.schemas.inventory import InventoryLevel
 from app.schemas.product import ProductFilter, ProductOut
 from app.services.inventory_service import InventoryService
 from app.services.product_service import ProductService
-from app.ui.theme import GREEN, MUTED, RED
+from app.ui.theme import GREEN, MUTED, RED, scale
 from app.ui.widgets.product_suggest_popup import ProductSuggestPopup
 from app.workers.base_worker import Worker
 
@@ -139,7 +140,12 @@ class TransactionItemsTable(QWidget):
         self._table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self._table.horizontalHeader().setSectionResizeMode(
             _COL_PRODUCT, QHeaderView.ResizeMode.Stretch)
-        self._table.setMinimumHeight(160)
+        self._table.setMinimumHeight(scale(160))
+        # 12-14 columns do not fit a 1366px screen, let alone a scaled one.
+        # Per-pixel horizontal scrolling (rather than per-column jumps) is
+        # what makes the far-right Amount and Action columns usable there.
+        self._table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self._table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         layout.addWidget(self._table, stretch=1)
 
         empty_hint = QLabel("Search for a product above and click “+ Add” to start "

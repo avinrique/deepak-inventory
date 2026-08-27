@@ -73,7 +73,7 @@ from app.services.organization_service import OrganizationService
 from app.services.product_service import ProductService
 from app.services.sales_service import SalesService
 from app.ui import permission_hints
-from app.ui.theme import GREEN, MUTED, STYLESHEET
+from app.ui.theme import GREEN, MUTED, STYLESHEET, scale
 from app.ui.widgets.add_product_dialog import AddProductDialog
 from app.ui.widgets.custom_fields_section import CustomFieldsSection
 from app.ui.widgets.customer_form_dialog import CustomerFormDialog
@@ -86,6 +86,7 @@ from app.ui.widgets.order_form_style import (
 from app.ui.widgets.page_header import PageHeader
 from app.ui.widgets.record_payment_dialog import RecordPaymentDialog
 from app.ui.widgets.transaction_items_table import TransactionItemsTable
+from app.ui.widgets.responsive import wrap_in_scroll
 from app.workers.base_worker import Worker
 
 _logger = logging.getLogger(__name__)
@@ -162,7 +163,10 @@ class NewBillPage(QWidget):
         outer.addWidget(splitter, stretch=1)
 
         splitter.addWidget(self._build_left_column())
-        splitter.addWidget(self._build_right_column())
+        # Both columns scroll. The left one already did; the right (totals +
+        # payment) is the taller of the two on a short window, and the
+        # actions bar below the splitter has to stay visible regardless.
+        splitter.addWidget(wrap_in_scroll(self._build_right_column()))
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 2)
 
@@ -313,7 +317,7 @@ class NewBillPage(QWidget):
 
         self._notes_edit = QTextEdit()
         self._notes_edit.setPlaceholderText("Notes for this bill (optional)")
-        self._notes_edit.setMaximumHeight(72)
+        self._notes_edit.setMaximumHeight(scale(72))
         layout.addWidget(self._notes_edit)
         return card
 

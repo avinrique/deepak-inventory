@@ -2,7 +2,12 @@ __pycache__/
 *.pyc
 build/
 dist/
+# PyInstaller writes a throwaway .spec next to any script it is pointed at.
+# The real build definition, inventory_system/packaging/*.spec, is committed
+# and is what CI builds from — without this exception it would be silently
+# left out of the repository and the Windows build would fail.
 *.spec
+!inventory_system/packaging/*.spec
 inventory_data/
 *.xlsx
 .DS_Store

@@ -33,6 +33,7 @@ from app.schemas.product import ProductOut
 from app.schemas.sales import SalesOrderOut
 from app.services.sales_service import SalesService
 from app.ui.theme import MUTED, RED, STYLESHEET
+from app.ui.widgets.responsive import constrain_dialog
 from app.workers.base_worker import Worker
 
 _logger = logging.getLogger(__name__)
@@ -49,7 +50,7 @@ class SalesReturnDialog(QDialog):
                                   if item.quantity_fulfilled > 0]
 
         self.setWindowTitle("Record Return")
-        self.setMinimumWidth(400)
+        constrain_dialog(self, 400)
         self.setStyleSheet(STYLESHEET)
 
         layout = QVBoxLayout(self)

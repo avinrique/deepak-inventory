@@ -25,7 +25,6 @@ from PySide6.QtPdfWidgets import QPdfView
 from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from PySide6.QtWidgets import (
     QDialog,
-    QFileDialog,
     QHBoxLayout,
     QLabel,
     QMessageBox,
@@ -36,6 +35,8 @@ from PySide6.QtWidgets import (
 from app.reports.sales_invoice_pdf import render_invoice_pdf
 from app.services.sales_service import SalesService
 from app.ui.theme import MUTED
+from app.ui.widgets.responsive import fit_to_screen
+from app.ui.file_dialogs import ask_save_path
 from app.workers.base_worker import Worker
 
 _logger = logging.getLogger(__name__)
@@ -75,9 +76,10 @@ class InvoicePreviewDialog(QDialog):
     def __init__(self, sales_service: SalesService, invoice_id: uuid.UUID, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Invoice Preview")
-        self.resize(760, 920)
+        fit_to_screen(self, 760, 920, minimum_width=420, minimum_height=360)
         self._sales_service = sales_service
         self._invoice_id = invoice_id
+        self._invoice_number: str | None = None
         self._pdf_document = QPdfDocument(self)
         self._current_path: str | None = None
 
@@ -121,14 +123,15 @@ class InvoicePreviewDialog(QDialog):
 
         def work():
             data = self._sales_service.get_invoice_document(self._invoice_id)
-            return render_invoice_pdf(data, path)
+            return render_invoice_pdf(data, path), data.invoice_number
 
         worker = Worker(work)
         worker.signals.finished.connect(self._on_generated)
         worker.signals.error.connect(self._on_error)
         QThreadPool.globalInstance().start(worker)
 
-    def _on_generated(self, path: str) -> None:
+    def _on_generated(self, generated: tuple[str, str]) -> None:
+        path, self._invoice_number = generated
         self._set_busy(False)
         previous = self._current_path
         self._current_path = path
@@ -146,12 +149,21 @@ class InvoicePreviewDialog(QDialog):
         self._status_label.setText("Failed to generate invoice.")
         QMessageBox.critical(self, "Couldn't generate invoice", str(exc))
 
+    def _suggested_filename(self) -> str:
+        """"INV-2026-0042.pdf" rather than "invoice.pdf" — otherwise every
+        invoice a user saves collides with the last one."""
+        if not self._invoice_number:
+            return "invoice.pdf"
+        safe = "".join(c if c.isalnum() or c in "-_" else "-"
+                       for c in self._invoice_number).strip("-")
+        return f"{safe or 'invoice'}.pdf"
+
     def _save_as(self) -> None:
         if self._current_path is None:
             return
-        path, _ = QFileDialog.getSaveFileName(self, "Save Invoice PDF", "invoice.pdf",
-                                              "PDF Files (*.pdf)")
-        if not path:
+        path = ask_save_path(self, "Save Invoice PDF", self._suggested_filename(),
+                             "PDF Files (*.pdf)")
+        if path is None:
             return
         try:
             shutil.copyfile(self._current_path, path)
