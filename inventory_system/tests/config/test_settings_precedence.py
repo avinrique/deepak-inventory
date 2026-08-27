@@ -83,10 +83,15 @@ def test_a_relative_log_dir_is_anchored_to_user_data_not_the_cwd(monkeypatch, tm
     assert result.log_dir == str(data_dir() / "logs")
 
 
-def test_an_absolute_log_dir_is_left_alone(monkeypatch):
-    monkeypatch.setenv("INVENTORY_LOG_DIR", "/var/log/inventory")
+def test_an_absolute_log_dir_is_left_alone(monkeypatch, tmp_path):
+    """The path has to be absolute *for the platform running the test*.
+    "/var/log/inventory" is not absolute on Windows — it has no drive — so
+    hardcoding it made this assert the opposite of its name there.
+    """
+    absolute = str(tmp_path / "inventory-logs")
+    monkeypatch.setenv("INVENTORY_LOG_DIR", absolute)
 
-    assert _settings().log_dir == "/var/log/inventory"
+    assert _settings().log_dir == absolute
 
 
 def test_a_broken_config_file_is_reported_not_silently_ignored(tmp_path):

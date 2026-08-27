@@ -20,20 +20,37 @@ name: Windows build
 
 on:
   push:
-    branches: [main]
+    # Every branch, not just main. A Windows executable cannot be produced on
+    # the machine this is developed on, so CI is the only place the packaged
+    # application exists at all — waiting until a merge to find out it does
+    # not build would be leaving the whole point of the workflow untested.
+    branches: ["**"]
     tags: ["v*"]
   pull_request:
     branches: [main]
   workflow_dispatch:
 
+# A branch push that is also an open pull request would otherwise start two
+# identical builds; and a second push makes the first one's artifacts stale.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 defaults:
   run:
     working-directory: inventory_system
+
+# Read-only by default. The release step needs to write, and asks for it
+# explicitly below rather than the whole workflow running with write access.
+permissions:
+  contents: read
 
 jobs:
   build:
     runs-on: windows-latest
     timeout-minutes: 45
+    permissions:
+      contents: write   # only used by "Attach the installer to the release"
 
     steps:
       - uses: actions/checkout@v4
@@ -61,13 +78,44 @@ jobs:
         run: ruff check app scripts packaging
         continue-on-error: true
 
+      - name: Bundle the PostgreSQL backup tools
+        # Before the tests, not after: the tests that exercise pg_restore
+        # skip themselves when it cannot be found, and the runner has
+        # PostgreSQL installed but not on PATH. Staging first is what makes
+        # them actually run here.
+        #
+        # --optional keeps a runner-image change from breaking the build
+        # outright; the packaged app then reports that Backup is unavailable
+        # rather than crashing.
+        run: python packaging/fetch_pgtools.py --optional
+
       - name: Run tests
         env:
           # Without this the UI tests cannot create a QApplication on a
           # headless runner and skip themselves — ~180 tests silently not
           # running while the job still reports success.
           QT_QPA_PLATFORM: offscreen
-        run: python -m pytest -q
+          # This codebase is full of em-dashes, arrows and emoji (the sidebar
+          # icons are literal emoji characters). Windows still defaults to a
+          # legacy code page for stdout, so printing a failure containing any
+          # of them raises UnicodeEncodeError and buries the real error.
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: "utf-8"
+        # Failures are re-emitted as ::error:: workflow commands so they show
+        # up as annotations on the run. Downloading the full log needs admin
+        # rights on the repository; annotations do not, which means anyone
+        # looking at a failed build can see *which* test failed without
+        # having to be an owner.
+        run: |
+          $output = python -m pytest -q --tb=short 2>&1 | Out-String
+          Write-Host $output
+          if ($LASTEXITCODE -ne 0) {
+            $output -split "`r?`n" |
+              Where-Object { $_ -match '^(FAILED|ERROR) ' } |
+              ForEach-Object { Write-Host "::error::$_" }
+            throw "pytest failed"
+          }
+        shell: pwsh
 
       - name: Stamp the build with the commit
         # Ends up in the log header of every installed copy, so a bug report
@@ -77,13 +125,6 @@ jobs:
 
       - name: Generate the Windows version resource
         run: python packaging/make_version_info.py
-
-      - name: Bundle the PostgreSQL backup tools
-        # windows-latest ships PostgreSQL, so pg_dump/pg_restore can be taken
-        # from there rather than downloaded. --optional keeps a runner image
-        # change from breaking the build outright; the self-test still passes
-        # and Backup reports the tools are missing instead of crashing.
-        run: python packaging/fetch_pgtools.py --optional
 
       - name: Build the executable
         run: python -m PyInstaller packaging/InventoryManagementSystem.spec --noconfirm --clean
@@ -95,7 +136,29 @@ jobs:
         # and checks that it can load both stylesheets, find alembic.ini and
         # the migration scripts, import psycopg/openpyxl/argon2, render a PDF
         # and a spreadsheet, and construct every page and window.
-        run: .\dist\InventoryManagementSystem\InventoryManagementSystem.exe --self-test
+        #
+        # Start-Process -Wait -PassThru, not "& the.exe". The application is
+        # built windowed (console=False), and PowerShell does not wait for a
+        # GUI-subsystem process: calling it directly returns immediately and
+        # leaves $LASTEXITCODE reflecting something else entirely, so the step
+        # passed without ever learning what the executable did. For the same
+        # reason the executable has no stdout to print to, hence --report.
+        run: |
+          $exe = ".\dist\InventoryManagementSystem\InventoryManagementSystem.exe"
+          $process = Start-Process -FilePath $exe `
+            -ArgumentList '--self-test','--report','selftest-report.txt' `
+            -Wait -PassThru -NoNewWindow
+          if (Test-Path selftest-report.txt) {
+            Get-Content selftest-report.txt | ForEach-Object { Write-Host $_ }
+            Get-Content selftest-report.txt |
+              Where-Object { $_ -match 'FAIL' } |
+              ForEach-Object { Write-Host "::error::packaged self-test: $_" }
+          } else {
+            Write-Host "::error::The packaged executable produced no report at all."
+          }
+          if ($process.ExitCode -ne 0) {
+            throw "the packaged application failed its self-test (exit $($process.ExitCode))"
+          }
         shell: pwsh
 
       - name: Capture every screen at each Windows scaling factor
@@ -105,13 +168,40 @@ jobs:
         # target hardware. The PNGs are attached to the run so clipped text or
         # an unreachable button can be spotted without a test having to
         # predict it.
+        # Screenshots are diagnostics, not a gate: a capture that fails says
+        # nothing about whether the application works, and failing the build
+        # over it would throw away an installer that is otherwise good. The
+        # real verification is the self-test step above.
+        continue-on-error: true
         run: |
+          $exe = ".\dist\InventoryManagementSystem\InventoryManagementSystem.exe"
           foreach ($scale in @("1", "1.25", "1.5", "2")) {
             $env:QT_SCALE_FACTOR = $scale
             $dir = "dpi-screenshots\scale-$($scale -replace '\.','_')"
             Write-Host "Capturing at $scale"
-            .\dist\InventoryManagementSystem\InventoryManagementSystem.exe --self-test --screenshot-dir $dir
-            if ($LASTEXITCODE -ne 0) { throw "self-test failed at scale $scale" }
+            $process = Start-Process -FilePath $exe `
+              -ArgumentList '--self-test','--screenshot-dir',$dir,'--report',"$dir\report.txt" `
+              -Wait -PassThru -NoNewWindow
+            if ($process.ExitCode -ne 0) {
+              Write-Host "::warning::self-test exited $($process.ExitCode) at scale $scale"
+              if (Test-Path "$dir\report.txt") { Get-Content "$dir\report.txt" }
+            }
+          }
+        shell: pwsh
+
+      - name: Ensure Inno Setup is available
+        # Present on the current windows-latest image, but not something the
+        # image is contracted to keep. Installing when it is missing costs a
+        # few seconds and stops a runner-image change from breaking releases.
+        run: |
+          $iscc = Get-ChildItem -Path "${env:ProgramFiles(x86)}", "${env:ProgramFiles}" `
+            -Filter ISCC.exe -Recurse -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+          if (-not $iscc) {
+            Write-Host "Inno Setup not found - installing"
+            choco install innosetup --no-progress -y
+          } else {
+            Write-Host "Found $($iscc.FullName)"
           }
         shell: pwsh
 
@@ -119,7 +209,11 @@ jobs:
         run: |
           $version = (Select-String -Path app\__version__.py -Pattern '^VERSION\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
           Write-Host "Building installer for $version"
-          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$version" packaging\installer.iss
+          $iscc = Get-ChildItem -Path "${env:ProgramFiles(x86)}", "${env:ProgramFiles}" `
+            -Filter ISCC.exe -Recurse -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+          if (-not $iscc) { throw "ISCC.exe not found after installation" }
+          & $iscc.FullName "/DAppVersion=$version" packaging\installer.iss
           if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
         shell: pwsh
 

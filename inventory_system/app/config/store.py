@@ -65,19 +65,52 @@ if sys.platform == "win32":
 
     _crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
     _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+    # Declared explicitly rather than left to ctypes' defaults. Without
+    # argtypes, ctypes marshals an untyped pointer argument as a C int, which
+    # on 64-bit Windows silently truncates it to 32 bits — so LocalFree would
+    # be handed half an address and corrupt the heap. The failure is
+    # intermittent and nowhere near the code that caused it.
+    _crypt32.CryptProtectData.argtypes = [
+        ctypes.POINTER(_Blob), wintypes.LPCWSTR, ctypes.POINTER(_Blob),
+        ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(_Blob)]
+    _crypt32.CryptProtectData.restype = wintypes.BOOL
+    _crypt32.CryptUnprotectData.argtypes = [
+        ctypes.POINTER(_Blob), ctypes.c_void_p, ctypes.POINTER(_Blob),
+        ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(_Blob)]
+    _crypt32.CryptUnprotectData.restype = wintypes.BOOL
+    _kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    _kernel32.LocalFree.restype = ctypes.c_void_p
+
     CRYPTPROTECT_UI_FORBIDDEN = 0x01
 
 
-def _to_blob(data: bytes) -> "_Blob":
+def _make_blob(data: bytes) -> tuple["_Blob", "ctypes.Array"]:
+    """Returns ``(blob, backing_buffer)``.
+
+    The caller **must** keep the buffer referenced for as long as Windows may
+    read the blob. A DATA_BLOB holds nothing but a length and a raw pointer,
+    so if the only reference to the buffer is that pointer, CPython frees it
+    the moment this function returns and the API reads released memory —
+    which produces corrupt ciphertext or an access violation, depending on
+    what happens to reuse the allocation first.
+    """
     buffer = ctypes.create_string_buffer(data, len(data))
-    return _Blob(len(data), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_char)))
+    blob = _Blob(len(data), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_char)))
+    return blob, buffer
 
 
-def _from_blob(blob: "_Blob") -> bytes:
+def _take_blob(blob: "_Blob") -> bytes:
+    """Copies an output blob's contents out, then frees it.
+
+    Windows allocated pbData with LocalAlloc and hands ownership over, so
+    not freeing it leaks the plaintext password into the process heap for
+    the rest of the session.
+    """
     try:
         return ctypes.string_at(blob.pbData, blob.cbData)
     finally:
-        _kernel32.LocalFree(blob.pbData)
+        _kernel32.LocalFree(ctypes.cast(blob.pbData, ctypes.c_void_p))
 
 
 def secrets_are_encrypted() -> bool:
@@ -95,15 +128,20 @@ def _encrypt(plaintext: str) -> str:
                         sys.platform, config_file())
         return base64.b64encode(raw).decode("ascii")
 
+    source, source_buffer = _make_blob(raw)
+    entropy, entropy_buffer = _make_blob(_ENTROPY)
     out = _Blob()
-    ok = _crypt32.CryptProtectData(ctypes.byref(_to_blob(raw)), None,
-                                   ctypes.byref(_to_blob(_ENTROPY)), None, None,
-                                   CRYPTPROTECT_UI_FORBIDDEN, ctypes.byref(out))
+    ok = _crypt32.CryptProtectData(ctypes.byref(source), None, ctypes.byref(entropy),
+                                   None, None, CRYPTPROTECT_UI_FORBIDDEN,
+                                   ctypes.byref(out))
+    # Referenced explicitly so neither backing buffer can be collected before
+    # the call above has read it. See _make_blob.
+    del source_buffer, entropy_buffer
     if not ok:
         raise ConfigError(
             f"Windows could not encrypt the database password "
             f"(error {ctypes.get_last_error()}).")
-    return base64.b64encode(_from_blob(out)).decode("ascii")
+    return base64.b64encode(_take_blob(out)).decode("ascii")
 
 
 def _decrypt(stored: str) -> str:
@@ -111,10 +149,13 @@ def _decrypt(stored: str) -> str:
     if not secrets_are_encrypted():
         return raw.decode("utf-8")
 
+    source, source_buffer = _make_blob(raw)
+    entropy, entropy_buffer = _make_blob(_ENTROPY)
     out = _Blob()
-    ok = _crypt32.CryptUnprotectData(ctypes.byref(_to_blob(raw)), None,
-                                     ctypes.byref(_to_blob(_ENTROPY)), None, None,
-                                     CRYPTPROTECT_UI_FORBIDDEN, ctypes.byref(out))
+    ok = _crypt32.CryptUnprotectData(ctypes.byref(source), None, ctypes.byref(entropy),
+                                     None, None, CRYPTPROTECT_UI_FORBIDDEN,
+                                     ctypes.byref(out))
+    del source_buffer, entropy_buffer
     if not ok:
         # Overwhelmingly the "copied config.json from another PC or another
         # Windows account" case: the ciphertext is fine, this user just is
@@ -122,7 +163,7 @@ def _decrypt(stored: str) -> str:
         raise ConfigError(
             "The saved database password could not be decrypted on this Windows "
             "account. Re-enter it in Settings -> Database.")
-    return _from_blob(out).decode("utf-8")
+    return _take_blob(out).decode("utf-8")
 
 
 # -- file I/O ------------------------------------------------------------- #

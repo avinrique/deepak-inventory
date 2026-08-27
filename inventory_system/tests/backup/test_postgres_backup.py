@@ -11,6 +11,7 @@ tests/conftest.py's docstring for the same safety rule applied to every
 other live-DB test in this suite.
 """
 import hashlib
+import sys
 from pathlib import Path
 
 import pytest
@@ -104,20 +105,69 @@ def test_create_backup_never_overwrites_an_existing_file(tmp_path, live_db, monk
 
 # -- missing tool ---------------------------------------------------------#
 
-def test_require_tool_raises_when_not_on_path(monkeypatch):
-    import shutil
+def test_require_tool_raises_when_the_tool_is_nowhere_to_be_found(monkeypatch, tmp_path):
+    """Discovery has three sources — the configured directory, the copy
+    shipped alongside the application, and PATH — so all three have to be
+    empty for this to mean anything. Stubbing only shutil.which stopped
+    proving anything the moment the shipped copy was added: on a machine
+    where the tools had been staged, _require_tool found them and the test
+    failed with DID NOT RAISE.
+    """
+    import app.backup.postgres_backup as backup_module
 
-    monkeypatch.setattr(shutil, "which", lambda _name: None)
+    monkeypatch.setattr(backup_module.settings, "pg_bin_dir", None)
+    monkeypatch.setattr(backup_module, "pg_bin_dir", lambda: tmp_path / "no-such-dir")
+    monkeypatch.setattr(backup_module.shutil, "which", lambda _name: None)
+
     with pytest.raises(BackupToolNotFoundError):
         _require_tool("pg_dump")
 
 
+def test_require_tool_prefers_the_shipped_copy_over_path(monkeypatch, tmp_path):
+    """The whole point of bundling them: a machine with an unrelated (and
+    possibly mismatched) PostgreSQL on PATH must still use the version that
+    ships with the application."""
+    import app.backup.postgres_backup as backup_module
+
+    shipped = tmp_path / "pgtools"
+    shipped.mkdir()
+    name = "pg_dump.exe" if sys.platform == "win32" else "pg_dump"
+    (shipped / name).write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(backup_module.settings, "pg_bin_dir", None)
+    monkeypatch.setattr(backup_module, "pg_bin_dir", lambda: shipped)
+    monkeypatch.setattr(backup_module.shutil, "which",
+                        lambda _name: str(tmp_path / "elsewhere" / name))
+
+    assert _require_tool("pg_dump") == str(shipped / name)
+
+
 # -- verify_backup_file (no live DB needed — reads the file directly) -----#
 
+def _pg_restore_available() -> bool:
+    try:
+        _require_tool("pg_restore")
+    except BackupToolNotFoundError:
+        return False
+    return True
+
+
+# These assert what pg_restore concludes about a file, so they need the real
+# program — there is nothing to test without it. Previously they simply
+# failed on any machine that lacked it, which included the CI runner (it has
+# PostgreSQL installed but not on PATH), while passing locally purely because
+# Homebrew had put pg_restore on the developer's PATH.
+needs_pg_restore = pytest.mark.skipif(
+    not _pg_restore_available(),
+    reason="pg_restore is not installed — run packaging/fetch_pgtools.py")
+
+
+@needs_pg_restore
 def test_verify_backup_file_false_for_missing_file(tmp_path):
     assert verify_backup_file(str(tmp_path / "does_not_exist.dump")) is False
 
 
+@needs_pg_restore
 def test_verify_backup_file_false_for_garbage_file(tmp_path):
     garbage = tmp_path / "garbage.dump"
     garbage.write_bytes(b"not a real pg_dump file")
