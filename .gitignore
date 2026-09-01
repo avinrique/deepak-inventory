@@ -10,6 +10,8 @@ dist/
 !inventory_system/packaging/*.spec
 inventory_data/
 *.xlsx
+*.xlsx.bak
 .DS_Store
 .venv/
 venv/
+.pytest_cache/

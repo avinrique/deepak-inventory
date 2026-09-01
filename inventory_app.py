@@ -15,10 +15,18 @@ more product lines. Each line: Product, Quantity, Rate -> Amount = Qty x Rate.
 VAT defaults to 13% of the subtotal; Total = Subtotal + ECS + VAT Amount.
 On the New Bill page a side list lets you pick an existing party (auto-fill)
 or just type a new one.
+
+Nothing is ever deleted. A mistaken bill is cancelled with Void Bill, which
+appends a reversing entry and recomputes stock and party totals from the
+ledgers. Those totals can also be rebuilt on demand from the Stock and
+Parties pages if they are ever suspected of having drifted.
 """
 
 import os
+import sys
+import logging
 import platform
+import traceback
 import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import date
@@ -45,11 +53,13 @@ NAV_ACTIVE = "#2563eb"
 CONTENT_BG = "#eef1f5"
 CARD_BG = "#ffffff"
 GROUP_BG = "#eef2ff"
+VOID_FG = "#9ca3af"
 ACCENT = "#2563eb"
 ACCENT_DK = "#1d4ed8"
 GREEN = "#059669"
 GREEN_DK = "#047857"
 RED = "#dc2626"
+AMBER = "#b45309"
 TEXT = "#111827"
 MUTED = "#6b7280"
 BORDER = "#e2e6ec"
@@ -57,6 +67,12 @@ BORDER = "#e2e6ec"
 DEFAULT_VAT = "13"
 RIGHT_COLS = {"Quantity", "Rate", "Amount", "Subtotal", "ECS",
               "VAT %", "VAT Amount", "Total"}
+# Columns of the ledger that are meaningful to a person reading the table.
+TXN_VIEW = ["Date", "Bill No", "PAN No", "Vendor Name", "Vendor Address",
+            "Product Name", "Quantity", "Rate", "Amount",
+            "Subtotal", "ECS", "VAT %", "VAT Amount", "Total", "Entered At"]
+
+log = logging.getLogger("inventory")
 
 
 class InventoryApp(tk.Tk):
@@ -70,6 +86,8 @@ class InventoryApp(tk.Tk):
         self.geometry("1200x880")
         self.minsize(1060, 720)
         self.configure(bg=CONTENT_BG)
+        self.report_callback_exception = self._on_callback_error
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._init_style()
 
         # entry-form state
@@ -87,6 +105,7 @@ class InventoryApp(tk.Tk):
         self._all_parties = []          # cached party rows for the picker
         self._party_view = []           # currently shown (filtered) party rows
         self._saving = False
+        self._pending_warning = None    # a warning that must survive clear_form
 
         self.frames, self.nav_buttons, self.refreshers = {}, {}, {}
         self._build_layout()
@@ -94,9 +113,40 @@ class InventoryApp(tk.Tk):
         self.show("new")
 
     # ------------------------------------------------------------------ #
+    # failure handling
+    # ------------------------------------------------------------------ #
+    def _on_callback_error(self, exc_type, exc_value, exc_tb) -> None:
+        """Catch anything raised inside a Tk callback.
+
+        Without this Tk prints the traceback to stderr and carries on -- and a
+        --windowed build has no stderr, so the app would appear to do nothing
+        at all when a button failed.
+        """
+        log.error("unhandled error in a UI action",
+                  exc_info=(exc_type, exc_value, exc_tb))
+        detail = "".join(traceback.format_exception_only(exc_type, exc_value)).strip()
+        messagebox.showerror(
+            "Something went wrong",
+            f"{detail}\n\nThe details were written to:\n{_log_path()}\n\n"
+            f"Your saved data has not been changed by this error.")
+
+    def _on_close(self) -> None:
+        if self._saving:
+            messagebox.showinfo("Please wait",
+                                "A bill is being saved. Try again in a moment.")
+            return
+        if self.lines and not messagebox.askyesno(
+                "Discard bill?",
+                f"This bill has {len(self.lines)} unsaved product line(s).\n\n"
+                "Close anyway and lose them?"):
+            return
+        log.info("application closed")
+        self.destroy()
+
+    # ------------------------------------------------------------------ #
     # styling
     # ------------------------------------------------------------------ #
-    def _init_style(self):
+    def _init_style(self) -> None:
         st = ttk.Style(self)
         st.theme_use("clam")
         st.configure(".", font=F_BASE)
@@ -137,7 +187,7 @@ class InventoryApp(tk.Tk):
     # ------------------------------------------------------------------ #
     # layout scaffolding
     # ------------------------------------------------------------------ #
-    def _build_layout(self):
+    def _build_layout(self) -> None:
         sidebar = tk.Frame(self, bg=SIDEBAR_BG, width=210)
         sidebar.pack(side="left", fill="y")
         sidebar.pack_propagate(False)
@@ -159,15 +209,14 @@ class InventoryApp(tk.Tk):
         self.container.columnconfigure(0, weight=1)
 
         self.frames["new"] = self._build_new()
-        self.frames["sales"] = self._build_txn("sales", "Sales", db.SALES_FILE)
-        self.frames["purchases"] = self._build_txn(
-            "purchases", "Purchases", db.PURCHASES_FILE)
+        self.frames["sales"] = self._build_txn("sales", "Sales", True)
+        self.frames["purchases"] = self._build_txn("purchases", "Purchases", False)
         self.frames["stock"] = self._build_stock()
         self.frames["parties"] = self._build_parties()
         for f in self.frames.values():
             f.grid(row=0, column=0, sticky="nsew")
 
-    def show(self, key):
+    def show(self, key: str) -> None:
         self.frames[key].tkraise()
         for k, btn in self.nav_buttons.items():
             btn.configure(style="NavActive.TButton" if k == key else "Nav.TButton")
@@ -177,7 +226,7 @@ class InventoryApp(tk.Tk):
         elif key in self.refreshers:
             self.refreshers[key]()
 
-    def _page(self, key, title, subtitle=""):
+    def _page(self, title: str, subtitle: str = "") -> tk.Frame:
         frame = tk.Frame(self.container, bg=CONTENT_BG)
         bar = tk.Frame(frame, bg=CONTENT_BG)
         bar.pack(fill="x", padx=28, pady=(22, 6))
@@ -188,7 +237,7 @@ class InventoryApp(tk.Tk):
                      font=F_SMALL).pack(side="left", padx=12, pady=(14, 0))
         return frame
 
-    def _card(self, parent, title=None, fill="x", expand=False):
+    def _card(self, parent, title=None, fill="x", expand=False) -> tk.Frame:
         outer = tk.Frame(parent, bg=CONTENT_BG)
         outer.pack(fill="both" if expand else fill, expand=expand, padx=28, pady=7)
         if title:
@@ -202,7 +251,7 @@ class InventoryApp(tk.Tk):
         return inner
 
     @staticmethod
-    def _flabel(parent, text, r, c, bold=False):
+    def _flabel(parent, text, r, c, bold=False) -> None:
         tk.Label(parent, text=text, bg=CARD_BG, fg=TEXT,
                  font=F_BOLD if bold else F_BASE, anchor="e").grid(
             row=r, column=c, sticky="e", padx=(6, 8), pady=7)
@@ -210,14 +259,15 @@ class InventoryApp(tk.Tk):
     # ------------------------------------------------------------------ #
     # NEW BILL page
     # ------------------------------------------------------------------ #
-    def _build_new(self):
-        page = self._page("new", "New Bill",
+    def _build_new(self) -> tk.Frame:
+        page = self._page("New Bill",
                           "Pick a party or type one, add products, then save.")
 
         # status + actions pinned to the bottom FIRST so the expanding
         # Products card below can never push them off-screen.
         self.status = tk.Label(page, text="Ready.", bg=CONTENT_BG, fg=GREEN,
-                               font=F_BASE)
+                               font=F_BASE, anchor="w", justify="left",
+                               wraplength=980)
         self.status.pack(side="bottom", anchor="w", padx=28, pady=(2, 12))
         act = tk.Frame(page, bg=CONTENT_BG)
         act.pack(side="bottom", fill="x", padx=28, pady=(6, 4))
@@ -228,8 +278,9 @@ class InventoryApp(tk.Tk):
                                        style="Primary.TButton",
                                        command=self.save_purchase)
         self.btn_purchase.pack(side="left", padx=(0, 10))
-        ttk.Button(act, text="Clear Bill", style="Ghost.TButton",
-                   command=self.clear_form).pack(side="left")
+        self.btn_clear = ttk.Button(act, text="Clear Bill", style="Ghost.TButton",
+                                    command=self.clear_form)
+        self.btn_clear.pack(side="left")
 
         # --- bill details + party picker (side by side) ---
         bd = self._card(page, "Bill Details")
@@ -327,31 +378,36 @@ class InventoryApp(tk.Tk):
         self._flabel(tt, "Total:", 2, 0, bold=True)
         ttk.Entry(tt, textvariable=self.total, width=16, font=F_BOLD,
                   state="readonly").grid(row=2, column=1, sticky="w", pady=7)
-        ttk.Button(tt, text="Calculate Total", style="Ghost.TButton",
-                   command=self.calculate_total).grid(
+        tk.Label(tt, text="Total = Subtotal + ECS + VAT — calculated for you.",
+                 bg=CARD_BG, fg=MUTED, font=F_SMALL).grid(
             row=2, column=2, columnspan=2, sticky="w", padx=8)
         for w in (ee, ve):
             w.bind("<KeyRelease>", lambda e: self.calculate_total())
         return page
 
     # -- party picker --------------------------------------------------- #
-    def _refresh_parties_picker(self):
+    def _refresh_parties_picker(self) -> None:
         if not hasattr(self, "party_lb"):
             return
         try:
             self._all_parties = db.read_rows(db.PARTY_FILE, db.PARTY_HEADERS)
-        except Exception:
+        except db.StorageError as exc:
+            # Must not fail silently: an empty picker looks like "no parties
+            # yet", so the user retypes one and creates a duplicate row.
             self._all_parties = []
+            log.warning("party picker could not load: %s", exc)
+            self._warn(f"Party list unavailable — {exc} "
+                       f"Pick nothing and check the Parties page.")
         self._render_party_list()
 
-    def _render_party_list(self):
+    def _render_party_list(self) -> None:
         if not hasattr(self, "party_lb"):
             return
         q = self.party_search.get().strip().lower()
         self.party_lb.delete(0, "end")
         self._party_view = []
         for r in self._all_parties:
-            pan, name = str(r[0] or ""), str(r[1] or "")
+            pan, name = str(r[db.P_PAN] or ""), str(r[db.P_NAME] or "")
             if not q or q in name.lower() or q in pan.lower():
                 self._party_view.append(r)
                 label = name or pan or "(unnamed)"
@@ -359,25 +415,27 @@ class InventoryApp(tk.Tk):
                     label += f"   ·   {pan}"
                 self.party_lb.insert("end", label)
 
-    def _on_party_pick(self, _event=None):
+    def _on_party_pick(self, _event=None) -> None:
         sel = self.party_lb.curselection()
         if not sel:
             return
         r = self._party_view[sel[0]]
-        self.hdr["pan"].set(r[0] or "")
-        self.hdr["vendor"].set(r[1] or "")
-        self.hdr["address"].set(r[2] or "")
+        self.hdr["pan"].set(r[db.P_PAN] or "")
+        self.hdr["vendor"].set(r[db.P_NAME] or "")
+        self.hdr["address"].set(r[db.P_ADDR] or "")
 
-    def _refresh_products(self):
+    def _refresh_products(self) -> None:
         if not hasattr(self, "product_cb"):
             return
         try:
             self.product_cb["values"] = db.product_names()
-        except Exception:
-            pass  # keep last list if stock.xlsx is momentarily locked
+        except db.StorageError as exc:
+            log.warning("product list could not load: %s", exc)
+            self._warn(f"Product list unavailable — {exc} "
+                       f"You can still type the product name.")
 
     # -- line items ----------------------------------------------------- #
-    def add_product(self):
+    def add_product(self) -> bool:
         product = self.line["product"].get().strip()
         qty = db.num(self.line["qty"].get())
         rate = db.num(self.line["rate"].get())
@@ -394,7 +452,11 @@ class InventoryApp(tk.Tk):
                 "Zero rate", "Rate is 0 (or blank) — this adds quantity to stock "
                 "for no money. Add this line anyway?"):
             return False
-        amount = round(qty * rate, 2)
+        try:
+            amount = db.line_amount(qty, rate)
+        except ValueError as exc:
+            messagebox.showerror("Number too large", str(exc))
+            return False
         self.lines.append({"product": product, "qty": qty,
                            "rate": rate, "amount": amount})
         self.items.insert("", "end", values=(
@@ -405,7 +467,7 @@ class InventoryApp(tk.Tk):
         self.product_cb.focus_set()
         return True
 
-    def remove_selected(self):
+    def remove_selected(self) -> None:
         for item in self.items.selection():
             idx = self.items.index(item)
             self.items.delete(item)
@@ -413,16 +475,23 @@ class InventoryApp(tk.Tk):
         self.calculate_total()
 
     # -- totals --------------------------------------------------------- #
-    def calculate_total(self):
-        subtotal = round(sum(ln["amount"] for ln in self.lines), 2)
-        vat_amount = round(subtotal * db.num(self.vat_pct.get()) / 100.0, 2)
-        total = round(subtotal + db.num(self.ecs.get()) + vat_amount, 2)
-        self.subtotal.set(self._fmt(subtotal))
-        self.vat_amt.set(self._fmt(vat_amount))
-        self.total.set(self._fmt(total))
+    def _totals(self) -> dict:
+        """Bill figures from storage — the single definition of the math."""
+        return db.bill_totals(self.lines, db.num(self.ecs.get()),
+                              db.num(self.vat_pct.get()))
+
+    def calculate_total(self) -> None:
+        try:
+            t = self._totals()
+        except ValueError as exc:
+            self._warn(str(exc))
+            return
+        self.subtotal.set(self._fmt(t["subtotal"]))
+        self.vat_amt.set(self._fmt(t["vat_amount"]))
+        self.total.set(self._fmt(t["total"]))
 
     @staticmethod
-    def _fmt(value):
+    def _fmt(value) -> str:
         try:
             value = float(value)
         except (TypeError, ValueError):
@@ -435,16 +504,22 @@ class InventoryApp(tk.Tk):
 
     # -- save ----------------------------------------------------------- #
     def _gather(self):
-        if self.line["product"].get().strip() and db.num(self.line["qty"].get()) > 0:
+        # A product typed but not yet added is part of the bill the user
+        # believes they are saving. Push it through the same validation the
+        # Add Product button uses rather than discarding it silently.
+        if self.line["product"].get().strip():
             if not self.add_product():
+                self._warn("Not saved — finish or clear the product line above.")
                 return None
         if not self.lines:
             messagebox.showerror("No products",
                                  "Add at least one product to the bill.")
+            self._warn("Not saved — the bill has no products.")
             return None
         if not self.hdr["pan"].get().strip() and not self.hdr["vendor"].get().strip():
             messagebox.showerror("Missing party",
                                  "Enter a PAN No or Vendor Name (or pick a party).")
+            self._warn("Not saved — enter a PAN No or Vendor Name.")
             return None
         if not self.vat_pct.get().strip():
             self.vat_pct.set(DEFAULT_VAT)
@@ -457,90 +532,141 @@ class InventoryApp(tk.Tk):
             "address": self.hdr["address"].get().strip(),
         }
 
-    def save_sale(self):
+    def save_sale(self) -> None:
         header = self._gather()
         if header is None:
             return
-        short = []
-        for ln in self.lines:
-            have = db.stock_on_hand(ln["product"])
-            if ln["qty"] > have:
-                short.append(f"  {ln['product']}: have {self._fmt(have)}, "
-                             f"selling {self._fmt(ln['qty'])}")
+        try:
+            short = db.shortages(self.lines)
+        except db.StorageError as exc:
+            self._fail(f"Could not check stock levels — {exc} Nothing was saved.")
+            return
         if short and not messagebox.askyesno(
                 "Low stock", "These products will go negative:\n\n"
-                + "\n".join(short) + "\n\nSave anyway?"):
+                + "\n".join(f"  {s['product']}: have {self._fmt(s['have'])}, "
+                            f"selling {self._fmt(s['selling'])}" for s in short)
+                + "\n\nSave anyway?"):
+            self._warn("Not saved — you chose not to sell below stock.")
             return
-        self._do_save(db.SALES_FILE, header, add_stock=False, is_sale=True,
-                      label="Sale")
+        self._do_save(is_sale=True, header=header, label="Sale")
 
-    def save_purchase(self):
+    def save_purchase(self) -> None:
         header = self._gather()
         if header is None:
             return
-        self._do_save(db.PURCHASES_FILE, header, add_stock=True, is_sale=False,
-                      label="Purchase")
+        self._do_save(is_sale=False, header=header, label="Purchase")
 
-    def _do_save(self, path, header, add_stock, is_sale, label):
+    def _do_save(self, is_sale: bool, header: dict, label: str) -> None:
         if self._saving:
             return
-        self._set_saving(True)
+        ledger = db.SALES_FILE if is_sale else db.PURCHASES_FILE
         try:
-            committed = self._commit(path, header, add_stock, is_sale)
-        except db.FileLockedError as e:
-            self._fail(f"Could not save — {os.path.basename(e.path)} is open in "
-                       "Excel/LibreOffice. Close it and try again. "
-                       "Nothing was saved.")
-            return
-        except Exception as e:  # noqa: BLE001
-            self._fail(f"Save failed: {e}")
-            return
-        finally:
-            self._set_saving(False)
-        if committed:
-            self._ok(f"{label} saved: {len(self.lines)} product(s), "
-                     f"total {self.total.get()}.")
-
-    def _commit(self, path, header, add_stock, is_sale):
-        try:
-            duplicate = db.bill_exists(path, header["bill"])
-        except Exception:
+            duplicate = db.bill_exists(ledger, header["bill"])
+        except db.StorageError as exc:
+            log.warning("duplicate-bill check failed: %s", exc)
+            if not messagebox.askyesno(
+                    "Could not check for duplicates",
+                    f"{exc}\n\nThe app could not confirm whether Bill No "
+                    f"{header['bill']} has already been entered.\n\nSave anyway?"):
+                self._warn("Not saved — the duplicate check could not run.")
+                return
             duplicate = False
         if duplicate and not messagebox.askyesno(
                 "Duplicate bill", f"Bill No {header['bill']} already exists in "
                 "this ledger.\n\nSave it again anyway?"):
-            return False
-        # Abort before writing anything if any target file is locked.
-        db.assert_writable(path, db.STOCK_FILE, db.PARTY_FILE)
-        subtotal = round(sum(ln["amount"] for ln in self.lines), 2)
-        ecs = db.num(self.ecs.get())
-        vat_pct = db.num(self.vat_pct.get())
-        vat_amount = round(subtotal * vat_pct / 100.0, 2)
-        total = round(subtotal + ecs + vat_amount, 2)
-        db.append_bill(path, header, self.lines, subtotal, ecs, vat_pct,
-                       vat_amount, total)
-        for ln in self.lines:
-            db.update_stock(ln["product"], ln["qty"], add=add_stock)
-        db.update_party(header["pan"], header["vendor"], header["address"],
-                        total, is_sale=is_sale)
-        return True
+            self._warn(f"Not saved — Bill No {header['bill']} already exists.")
+            return
 
-    def _set_saving(self, on):
+        count = len(self.lines)
+        totals, saved, error = None, None, None
+        self._set_saving(True)
+        try:
+            totals = self._totals()
+            saved = db.commit_bill(is_sale, header, self.lines, totals)
+        except Exception as exc:  # noqa: BLE001 - dispatched below
+            error = exc
+        finally:
+            # Always restore the buttons and the flag BEFORE any dialog runs,
+            # so a close attempt during the error modal is not told that a save
+            # is still in progress.
+            self._set_saving(False)
+
+        if error is not None:
+            self._report_save_error(error)
+            return
+
+        self._ok(f"{label} saved as Bill {saved['bill_no']} — {count} "
+                 f"product(s), total {self._fmt(totals['total'])}.")
+
+    def _report_save_error(self, exc: Exception) -> None:
+        """Turn a commit failure into an accurate message.
+
+        The distinction that matters: an interrupted swap means the bill may
+        ALREADY be in the ledger, so telling the user nothing was saved would
+        invite them to enter it twice.
+        """
+        if isinstance(exc, db.CommitInterruptedError):
+            log.error("commit interrupted: %s", exc)
+            msg = (f"Save interrupted — {exc} Do NOT re-enter this bill. "
+                   f"Close and reopen the app; it finishes the pending save on "
+                   f"startup.")
+            self.status.configure(text=msg, fg=RED)
+            messagebox.showerror("Save interrupted", msg)
+            return
+        if isinstance(exc, db.FileLockedError):
+            self._fail(f"Not saved — {exc} Close it and try again. "
+                       f"Nothing was changed.")
+            return
+        if isinstance(exc, db.DataIntegrityError):
+            self._fail(f"Not saved — {exc} Nothing was changed.")
+            return
+        if isinstance(exc, db.StorageError):
+            log.error("save failed", exc_info=exc)
+            self._fail(f"Not saved — {exc}")
+            return
+        if isinstance(exc, ValueError):
+            self._fail(f"Not saved — {exc}")
+            return
+        # exc_info=exc, not log.exception(): this runs outside the except
+        # block, where the ambient exception state is already cleared.
+        log.error("unexpected error while saving", exc_info=exc)
+        self._fail(f"Not saved — unexpected error: {exc} "
+                   f"The details are in {_log_path()}.")
+
+    def _set_saving(self, on: bool) -> None:
         self._saving = on
         state = "disabled" if on else "normal"
-        self.btn_sale.configure(state=state)
-        self.btn_purchase.configure(state=state)
+        for btn in (self.btn_sale, self.btn_purchase, self.btn_clear):
+            btn.configure(state=state)
+        if on:
+            self.status.configure(text="Saving — please wait…", fg=ACCENT)
+        elif str(self.status.cget("text")).startswith("Saving"):
+            # Never leave "Saving…" on screen once the attempt has finished.
+            self.status.configure(text="Ready.", fg=MUTED)
         self.update_idletasks()
 
-    def _ok(self, msg):
-        self.status.configure(text=msg, fg=GREEN)
+    def _ok(self, msg: str) -> None:
+        log.info("%s", msg)
+        self._pending_warning = None
         self.clear_form()
+        if self._pending_warning:
+            # clear_form reloads the pickers; if that failed, say so alongside
+            # the success rather than overwriting it with green text.
+            self.status.configure(text=f"{msg}   ⚠ {self._pending_warning}",
+                                  fg=AMBER)
+        else:
+            self.status.configure(text=msg, fg=GREEN)
 
-    def _fail(self, msg):
+    def _warn(self, msg: str) -> None:
+        self._pending_warning = msg
+        self.status.configure(text=msg, fg=AMBER)
+
+    def _fail(self, msg: str) -> None:
+        log.error("%s", msg)
         self.status.configure(text=msg, fg=RED)
         messagebox.showerror("Not saved", msg)
 
-    def clear_form(self):
+    def clear_form(self) -> None:
         for v in self.hdr.values():
             v.set("")
         self.hdr["date"].set(date.today().strftime("%d/%m/%Y"))
@@ -553,28 +679,30 @@ class InventoryApp(tk.Tk):
         self.vat_pct.set(DEFAULT_VAT)
         self.vat_amt.set("0")
         self.total.set("0")
+        self._pending_warning = None
+        self.status.configure(text="Ready.", fg=GREEN)
         self._refresh_products()
         self._refresh_parties_picker()
 
     # ------------------------------------------------------------------ #
     # SALES / PURCHASES — grouped by bill
     # ------------------------------------------------------------------ #
-    def _build_txn(self, key, title, path):
-        page = self._page(key, title,
-                          "Grouped by bill — each bill shows its products and total.")
+    def _build_txn(self, key: str, title: str, is_sale: bool) -> tk.Frame:
+        page = self._page(title,
+                          "Grouped by bill — select a bill to cancel it.")
         body = self._card(page, fill="both", expand=True)
         wrap = tk.Frame(body, bg=CARD_BG)
         wrap.pack(fill="both", expand=True)
-        headers = db.TXN_HEADERS
-        tree = ttk.Treeview(wrap, columns=headers, show="tree headings")
+        tree = ttk.Treeview(wrap, columns=TXN_VIEW, show="tree headings")
         tree.heading("#0", text="Bill")
-        tree.column("#0", width=110, anchor="w", stretch=False)
-        for h in headers:
+        tree.column("#0", width=130, anchor="w", stretch=False)
+        for h in TXN_VIEW:
             tree.heading(h, text=h)
             tree.column(h, width=92, anchor="e" if h in RIGHT_COLS else "w",
                         stretch=False)
         tree.tag_configure("bill", background=GROUP_BG,
                            font=(FAMILY, 11, "bold"))
+        tree.tag_configure("void", foreground=VOID_FG)
         ysb = ttk.Scrollbar(wrap, orient="vertical", command=tree.yview)
         xsb = ttk.Scrollbar(wrap, orient="horizontal", command=tree.xview)
         tree.configure(yscrollcommand=ysb.set, xscrollcommand=xsb.set)
@@ -585,42 +713,110 @@ class InventoryApp(tk.Tk):
         wrap.columnconfigure(0, weight=1)
 
         grand = tk.StringVar(value="")
+        node_bill = {}          # tree item id -> (bill_id, human description)
 
-        def refresh():
+        def refresh() -> None:
             tree.delete(*tree.get_children())
-            rows = self._safe_rows(path, headers)
-            i, total = 0, 0.0
-            while i < len(rows):
-                base = rows[i][0:5]                  # date,bill,pan,vendor,addr
-                group = [rows[i]]
-                j = i + 1
-                while j < len(rows) and rows[j][0:5] == base:
-                    group.append(rows[j])
-                    j += 1
-                f = group[0]
-                head_vals = [f[0], f[1], f[2], f[3], f[4], "", "", "", "",
-                             f[9], f[10], f[11], f[12], f[13]]
-                billtxt = str(f[1]) if f[1] not in (None, "") else "—"
-                pid = tree.insert("", "end", text=billtxt, open=True,
-                                  tags=("bill",),
+            node_bill.clear()
+            path = db.SALES_FILE if is_sale else db.PURCHASES_FILE
+            try:
+                found = db.bills(path)
+            except db.StorageError as exc:
+                messagebox.showerror("Could not read the ledger", str(exc))
+                grand.set("Grand total: unavailable")
+                return
+            total, orphans = 0.0, 0
+            for bill in found:
+                h, t = bill["header"], bill["totals"]
+                cancelled = bool(bill["voided_by"]) or bool(bill["voids"])
+                head_vals = [h["date"], h["bill"], h["pan"], h["vendor"],
+                             h["address"], "", "", "", "",
+                             t["subtotal"], t["ecs"], t["vat_pct"],
+                             t["vat_amount"], t["total"], h["entered"]]
+                label = str(h["bill"] or "—")
+                if bill["synthetic"]:
+                    label += "  (no Bill ID)"
+                    orphans += 1
+                elif bill["voided_by"]:
+                    label += "  (cancelled)"
+                elif bill["voids"]:
+                    label += "  (cancels)"
+                # Identify the bill the way the user sees it, not by the
+                # internal Bill ID, which appears in no visible column.
+                desc = (f"{h['bill'] or '(no Bill No)'} dated "
+                        f"{h['date'] or '(no date)'}"
+                        f"{' — ' + str(h['vendor']) if h['vendor'] else ''}, "
+                        f"total {self._fmt(t['total'])}")
+                tags = ("bill", "void") if cancelled else ("bill",)
+                pid = tree.insert("", "end", text=label, open=True, tags=tags,
                                   values=[self._cell(v) for v in head_vals])
-                for r in group:
-                    line_vals = ["", "", "", "", "", r[5], r[6], r[7], r[8],
-                                 "", "", "", "", ""]
-                    tree.insert(pid, "end", text="",
-                                values=[self._cell(v) for v in line_vals])
-                total += db.num(f[13])
-                i = j
-            grand.set(f"Grand total:  {self._fmt(total)}")
+                node_bill[pid] = (bill["bill_id"], desc)
+                for ln in bill["lines"]:
+                    line_vals = ["", "", "", "", "", ln["product"], ln["qty"],
+                                 ln["rate"], ln["amount"], "", "", "", "", "", ""]
+                    cid = tree.insert(pid, "end", text="",
+                                      tags=("void",) if cancelled else (),
+                                      values=[self._cell(v) for v in line_vals])
+                    node_bill[cid] = (bill["bill_id"], desc)
+                total += t["total"]
+            suffix = (f"    ({orphans} row(s) with no Bill ID)" if orphans else "")
+            grand.set(f"Grand total:  {self._fmt(round(total, 2))}{suffix}")
         self.refreshers[key] = refresh
+
+        def void_selected() -> None:
+            sel = tree.selection()
+            if not sel:
+                messagebox.showinfo("Nothing selected",
+                                    "Select the bill you want to cancel.")
+                return
+            bill_id, desc = node_bill.get(sel[0], (None, ""))
+            if bill_id is None:
+                messagebox.showerror(
+                    "Cannot cancel this row",
+                    "This row has no Bill ID, so the app cannot tell which "
+                    "other rows belong with it. Cancel it by hand in Excel, "
+                    "then press Recalculate from Ledgers on the Stock and "
+                    "Parties pages.")
+                return
+            if not messagebox.askyesno(
+                    "Cancel this bill?",
+                    f"Cancel bill {desc}?\n\nA reversing entry will be added. "
+                    f"The original rows stay in the ledger for your records, "
+                    f"and stock and party totals are recalculated."):
+                return
+            path = db.SALES_FILE if is_sale else db.PURCHASES_FILE
+            try:
+                db.void_bill(is_sale, bill_id)
+            except db.RebuildFailedError as exc:
+                # The reversal is recorded; only the recalculation failed.
+                log.error("void rebuild failed", exc_info=exc)
+                messagebox.showwarning(
+                    "Cancelled, but totals not recalculated",
+                    f"{exc}\n\nDo not cancel it again. Press Recalculate from "
+                    f"Ledgers on the Stock and Parties pages once the problem "
+                    f"is fixed.")
+                refresh()
+                return
+            except (db.StorageError, ValueError) as exc:
+                messagebox.showerror("Could not cancel the bill", str(exc))
+                return
+            log.info("cancelled bill %s in %s", bill_id, path)
+            messagebox.showinfo(
+                "Bill cancelled",
+                f"Bill {desc} was cancelled.\n\nStock and party totals have "
+                f"been recalculated.")
+            refresh()
 
         bar = tk.Frame(page, bg=CONTENT_BG)
         bar.pack(fill="x", padx=28, pady=(2, 16))
         ttk.Button(bar, text="Open in Excel", style="Primary.TButton",
-                   command=lambda: self._open_excel(path, headers)).pack(side="left",
-                                                                         padx=(0, 10))
+                   command=lambda: self._open_excel(
+                       db.SALES_FILE if is_sale else db.PURCHASES_FILE,
+                       db.TXN_HEADERS)).pack(side="left", padx=(0, 10))
         ttk.Button(bar, text="Refresh", style="Ghost.TButton",
-                   command=refresh).pack(side="left")
+                   command=refresh).pack(side="left", padx=(0, 10))
+        ttk.Button(bar, text="Void Bill", style="Ghost.TButton",
+                   command=void_selected).pack(side="left")
         tk.Label(bar, textvariable=grand, bg=CONTENT_BG, fg=TEXT,
                  font=F_BOLD).pack(side="right")
         return page
@@ -628,17 +824,33 @@ class InventoryApp(tk.Tk):
     # ------------------------------------------------------------------ #
     # STOCK page
     # ------------------------------------------------------------------ #
-    def _build_stock(self):
-        page = self._page("stock", "Stock", "Current quantity on hand.")
+    def _build_stock(self) -> tk.Frame:
+        page = self._page("Stock", "Current quantity on hand.")
         body = self._card(page, fill="both", expand=True)
         tree = self._make_table(body, db.STOCK_HEADERS, width=240,
-                                 anchors={"Quantity": "e"})
+                                anchors={"Quantity": "e"})
 
-        def refresh():
+        def refresh() -> None:
             tree.delete(*tree.get_children())
             for r in self._safe_rows(db.STOCK_FILE, db.STOCK_HEADERS):
                 tree.insert("", "end", values=[self._cell(v) for v in r])
         self.refreshers["stock"] = refresh
+
+        def rebuild() -> None:
+            if not messagebox.askyesno(
+                    "Recalculate stock?",
+                    "Stock will be recomputed from every sale and purchase in "
+                    "the ledgers.\n\nUse this if the quantities look wrong. The "
+                    "current file is kept as stock.xlsx.bak.\n\nProceed?"):
+                return
+            try:
+                count = db.rebuild_stock()
+            except db.StorageError as exc:
+                messagebox.showerror("Could not rebuild stock", str(exc))
+                return
+            messagebox.showinfo("Stock recalculated",
+                                f"{count} product(s) recomputed from the ledgers.")
+            refresh()
 
         bar = tk.Frame(page, bg=CONTENT_BG)
         bar.pack(fill="x", padx=28, pady=(2, 16))
@@ -647,14 +859,16 @@ class InventoryApp(tk.Tk):
                        db.STOCK_FILE, db.STOCK_HEADERS)).pack(side="left",
                                                               padx=(0, 10))
         ttk.Button(bar, text="Refresh", style="Ghost.TButton",
-                   command=refresh).pack(side="left")
+                   command=refresh).pack(side="left", padx=(0, 10))
+        ttk.Button(bar, text="Recalculate from Ledgers", style="Ghost.TButton",
+                   command=rebuild).pack(side="left")
         return page
 
     # ------------------------------------------------------------------ #
     # PARTIES page
     # ------------------------------------------------------------------ #
-    def _build_parties(self):
-        page = self._page("parties", "Parties", "Running totals per vendor.")
+    def _build_parties(self) -> tk.Frame:
+        page = self._page("Parties", "Running totals per vendor.")
         sb = tk.Frame(page, bg=CONTENT_BG)
         sb.pack(fill="x", padx=28, pady=(0, 2))
         tk.Label(sb, text="Search (PAN or Name):", bg=CONTENT_BG, fg=TEXT,
@@ -668,19 +882,36 @@ class InventoryApp(tk.Tk):
         tree = self._make_table(body, db.PARTY_HEADERS, width=130, anchors=anchors)
         store = {"rows": []}
 
-        def render(*_):
+        def render(*_) -> None:
             q = query.get().strip().lower()
             tree.delete(*tree.get_children())
             for r in store["rows"]:
-                pan, name = str(r[0] or "").lower(), str(r[1] or "").lower()
+                pan = str(r[db.P_PAN] or "").lower()
+                name = str(r[db.P_NAME] or "").lower()
                 if not q or q in pan or q in name:
                     tree.insert("", "end", values=[self._cell(v) for v in r])
 
-        def refresh():
+        def refresh() -> None:
             store["rows"] = self._safe_rows(db.PARTY_FILE, db.PARTY_HEADERS)
             render()
         self.refreshers["parties"] = refresh
         query.trace_add("write", render)
+
+        def rebuild() -> None:
+            if not messagebox.askyesno(
+                    "Recalculate party totals?",
+                    "Every party's totals will be recomputed from the sales and "
+                    "purchase ledgers.\n\nThe current file is kept as "
+                    "party.xlsx.bak.\n\nProceed?"):
+                return
+            try:
+                count = db.rebuild_party_totals()
+            except db.StorageError as exc:
+                messagebox.showerror("Could not rebuild party totals", str(exc))
+                return
+            messagebox.showinfo("Party totals recalculated",
+                                f"{count} part(ies) recomputed from the ledgers.")
+            refresh()
 
         bar = tk.Frame(page, bg=CONTENT_BG)
         bar.pack(fill="x", padx=28, pady=(2, 16))
@@ -689,13 +920,15 @@ class InventoryApp(tk.Tk):
                        db.PARTY_FILE, db.PARTY_HEADERS)).pack(side="left",
                                                               padx=(0, 10))
         ttk.Button(bar, text="Refresh", style="Ghost.TButton",
-                   command=refresh).pack(side="left")
+                   command=refresh).pack(side="left", padx=(0, 10))
+        ttk.Button(bar, text="Recalculate from Ledgers", style="Ghost.TButton",
+                   command=rebuild).pack(side="left")
         return page
 
     # ------------------------------------------------------------------ #
     # shared helpers
     # ------------------------------------------------------------------ #
-    def _make_table(self, parent, headers, width=100, anchors=None):
+    def _make_table(self, parent, headers, width=100, anchors=None) -> ttk.Treeview:
         anchors = anchors or {}
         wrap = tk.Frame(parent, bg=CARD_BG)
         wrap.pack(fill="both", expand=True)
@@ -713,15 +946,15 @@ class InventoryApp(tk.Tk):
         wrap.columnconfigure(0, weight=1)
         return tree
 
-    def _safe_rows(self, path, headers):
+    def _safe_rows(self, path: str, headers: list) -> list:
         try:
             return db.read_rows(path, headers)
-        except Exception as e:  # noqa: BLE001
-            messagebox.showerror("File busy",
-                                 f"Could not read {os.path.basename(path)}.\n\n{e}")
+        except db.StorageError as exc:
+            messagebox.showerror("Could not read the file",
+                                 f"{os.path.basename(path)}\n\n{exc}")
             return []
 
-    def _open_excel(self, path, headers):
+    def _open_excel(self, path: str, headers: list) -> None:
         ok, err = db.open_file(path, headers)
         if not ok:
             messagebox.showerror("Could not open file",
@@ -729,12 +962,119 @@ class InventoryApp(tk.Tk):
 
     @staticmethod
     def _cell(value):
+        """Render a stored value for a table cell."""
         if value is None:
             return ""
-        if isinstance(value, float) and value == int(value):
-            return int(value)
+        if isinstance(value, float):
+            if value != value or value in (float("inf"), float("-inf")):
+                return ""
+            if value == int(value):
+                return int(value)
+            return f"{value:.2f}"       # money never shows 656.9899999999999
         return value
 
 
+# --------------------------------------------------------------------------- #
+# Entry point
+# --------------------------------------------------------------------------- #
+def _log_path() -> str:
+    try:
+        return os.path.join(db.data_dir(), "app.log")
+    except Exception:  # noqa: BLE001 - only used inside an error message
+        return "(the application data folder)"
+
+
+def _report_startup_failure(exc: BaseException, title: str = None) -> None:
+    """Show a startup failure to the user, however little still works.
+
+    A --windowed build has no console, so an unhandled exception here would
+    otherwise mean the exe simply never appears.
+    """
+    try:
+        log.error("startup failed", exc_info=exc)
+    except Exception:  # noqa: BLE001
+        pass
+    if title:
+        message = str(exc)
+    else:
+        detail = "".join(
+            traceback.format_exception_only(type(exc), exc)).strip()
+        message = (f"Inventory Management could not start.\n\n{detail}\n\n"
+                   f"If this mentions a folder or permission, check the "
+                   f"INVENTORY_DATA_DIR setting or the app data folder.")
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror(title or "Inventory Management", message)
+        root.destroy()
+    except Exception:  # noqa: BLE001 - no display at all
+        print(message, file=sys.stderr)
+
+
+def _startup_notices() -> list:
+    """Do the once-per-launch housekeeping. Returns messages for the user."""
+    notices = []
+
+    # setup_logging first, so the legacy migration's own log lines are kept.
+    db.setup_logging()
+    log.info("starting up (data dir: %s)", db.data_dir())
+    db.acquire_single_instance_lock()
+
+    result = db.recover()
+    if result["message"]:
+        notices.append(result["message"])
+    elif result["recovered"]:
+        log.warning("an interrupted save was recovered on startup")
+        notices.append("A save that had been interrupted was completed, and "
+                       "stock and party totals were recalculated.")
+
+    if db.legacy_data_was_migrated():
+        # Files written by the previous version can carry duplicate product or
+        # party rows from a matching bug it had; the rebuild is what heals them.
+        log.info("legacy data migrated -- rebuilding derived totals once")
+        try:
+            db.rebuild_stock()
+            db.rebuild_party_totals()
+            notices.append(
+                f"Your existing data was copied into the app's data folder:\n"
+                f"{db.data_dir()}\n\nStock and party totals were recalculated "
+                f"from your sales and purchases. The old folder is left as it "
+                f"is and is no longer read.")
+        except db.StorageError as exc:
+            log.error("post-migration rebuild failed: %s", exc)
+            notices.append(f"Your existing data was copied in, but the totals "
+                           f"could not be recalculated: {exc} Press Recalculate "
+                           f"from Ledgers on the Stock and Parties pages.")
+
+    # Freeze any reconstructed Bill IDs on disk before anything reads them,
+    # so they cannot shift if the user re-sorts the sheet in Excel.
+    db.migrate_ledgers()
+    db.backup_daily()
+    return notices
+
+
+def main() -> int:
+    try:
+        notices = _startup_notices()
+    except db.AlreadyRunningError as exc:
+        _report_startup_failure(exc, title="Already running")
+        return 1
+    except Exception as exc:  # noqa: BLE001
+        _report_startup_failure(exc)
+        return 1
+    try:
+        app = InventoryApp()
+        for note in notices:
+            app.after(150, lambda m=note: messagebox.showinfo(
+                "Inventory Management", m))
+        app.mainloop()
+    except Exception as exc:  # noqa: BLE001
+        _report_startup_failure(exc)
+        return 1
+    finally:
+        db.release_single_instance_lock()
+    return 0
+
+
 if __name__ == "__main__":
-    InventoryApp().mainloop()
+    sys.exit(main())
