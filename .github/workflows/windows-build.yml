@@ -176,7 +176,21 @@ jobs:
         # initdb, start, CREATE DATABASE, migrations, the first owner, stop,
         # and a second ensure_running() in between to prove it adopts a
         # server that is already up instead of starting a second one.
-        run: python scripts/check_local_server.py
+        #
+        # Same annotation treatment as the tests: the tail of the output,
+        # which carries the traceback and the PostgreSQL log the script
+        # dumps on failure, is re-emitted so it is readable on the checks
+        # page without push access to download the job log.
+        run: |
+          $output = python scripts/check_local_server.py 2>&1 | Out-String
+          Write-Host $output
+          if ($LASTEXITCODE -ne 0) {
+            $output -split "`r?`n" |
+              Where-Object { $_.Trim() } |
+              Select-Object -Last 40 |
+              ForEach-Object { Write-Host "::error::localdb: $_" }
+            throw "the bundled database could not be exercised"
+          }
         shell: pwsh
 
       - name: Stamp the build with the commit

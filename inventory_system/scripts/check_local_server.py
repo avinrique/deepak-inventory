@@ -167,6 +167,50 @@ def _check_recovers_when_the_password_is_lost(root: Path) -> None:
     print(f"   data intact ({before!r}), credentials rebuilt, scram restored")
 
 
+def _dump_diagnostics(root: Path) -> None:
+    """Everything a failure here needs, printed where it can be read.
+
+    This runs on a CI machine that is destroyed minutes later, so anything
+    not on stdout is gone. Deliberately defensive: it is an error path, and
+    a diagnostic that raises hides the fault it was meant to explain.
+    """
+    from app.database import local_server
+
+    print("\n" + "=" * 60)
+    print("DIAGNOSTICS")
+    print("=" * 60)
+    try:
+        print(f"server dir : {local_server.pg_server_dir()}")
+        print(f"bundled    : {local_server.is_bundled()} "
+              f"(major {local_server.bundled_major_version()})")
+        print(f"pgdata     : {local_server.pgdata_path()} "
+              f"(initialised: {local_server.is_initialized()})")
+    except Exception as exc:  # noqa: BLE001 - diagnostics must not mask the fault
+        print(f"could not describe the bundle: {exc}")
+
+    for label, path in (("server log", root / "logs" / "pgserver.log"),
+                        ("startup log", local_server.pgdata_path() / "log")):
+        try:
+            if path.is_file():
+                print(f"\n--- {label} ({path}) ---")
+                print(path.read_text(encoding="utf-8", errors="replace")[-4000:])
+            elif path.is_dir():
+                for entry in sorted(path.iterdir())[-2:]:
+                    print(f"\n--- {label}: {entry.name} ---")
+                    print(entry.read_text(encoding="utf-8", errors="replace")[-4000:])
+            else:
+                print(f"\n--- {label}: not present at {path} ---")
+        except Exception as exc:  # noqa: BLE001
+            print(f"\n--- {label}: unreadable ({exc}) ---")
+
+    try:
+        listing = sorted(p.name for p in (root / "pgdata").iterdir())
+        print(f"\npgdata contents: {listing}")
+    except Exception:  # noqa: BLE001 - absent is itself the answer
+        print("\npgdata contents: directory absent")
+    print("=" * 60)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--keep", action="store_true",
@@ -178,7 +222,15 @@ def main() -> int:
     print(f"scratch directory: {root}")
     _redirect(root)
     try:
-        _check(root)
+        try:
+            _check(root)
+        except BaseException:
+            # The exception text carries initdb's stderr, but pg_ctl writes
+            # the server's own startup failures to its log file instead --
+            # and on CI nobody can go and read that file afterwards. Print
+            # it here or the reason is simply lost.
+            _dump_diagnostics(root)
+            raise
     finally:
         # Never leave a server running behind us, whatever went wrong.
         from app.database import local_server
