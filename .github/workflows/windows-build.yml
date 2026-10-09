@@ -41,7 +41,8 @@ defaults:
     working-directory: inventory_system
 
 env:
-  # The PostgreSQL major version shipped inside the installer.
+  # The PostgreSQL major version shipped inside the installer. 17 is what
+  # the windows-latest image (Windows Server 2025) provides.
   #
   # Changing this number is a data migration, not a version bump. PostgreSQL
   # will not open a data directory created by a different major version, so
@@ -50,10 +51,12 @@ env:
   # and refuses to start, with a message telling the user to back up under
   # the old version first.
   #
-  # So: if the runner image's PostgreSQL moves on, this build *should* fail.
-  # Pick the new version deliberately, together with an upgrade path for
-  # people who already have data, rather than following the image.
-  POSTGRES_MAJOR: "16"
+  # So: if the runner image's PostgreSQL moves on, this build *should* fail,
+  # and the failure is the feature. Pick the new version deliberately,
+  # together with an upgrade path for anyone who already has data, rather
+  # than letting the image decide. (It was free to pick this one: the
+  # bundled database had not shipped yet, so there was no data anywhere.)
+  POSTGRES_MAJOR: "17"
 
 # Read-only by default. The release step needs to write, and asks for it
 # explicitly below rather than the whole workflow running with write access.
@@ -113,7 +116,23 @@ jobs:
         # and the next release would fail to start against every existing
         # customer's database. Failing the build is the right outcome:
         # raising this number is a migration, not a version bump.
-        run: python packaging/fetch_pgserver.py --require-major ${{ env.POSTGRES_MAJOR }}
+        #
+        # Output is re-emitted as a ::error:: annotation so the reason shows
+        # on the checks page itself. Downloading the full log needs push
+        # access to the repository; annotations do not, and "which PostgreSQL
+        # did the runner actually have?" is the entire question when this
+        # step fails.
+        run: |
+          $output = python packaging/fetch_pgserver.py `
+            --require-major $env:POSTGRES_MAJOR 2>&1 | Out-String
+          Write-Host $output
+          if ($LASTEXITCODE -ne 0) {
+            $output -split "`r?`n" |
+              Where-Object { $_.Trim() } |
+              ForEach-Object { Write-Host "::error::pgserver: $_" }
+            throw "staging the PostgreSQL server failed"
+          }
+        shell: pwsh
 
       - name: Run tests
         env:
