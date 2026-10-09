@@ -96,6 +96,28 @@ begin
   Result := True;
 end;
 
+function FindPgCtl(): String;
+var
+  Candidate: String;
+begin
+  // PyInstaller 6 puts everything except the .exe into a contents
+  // directory named _internal, so the bundled server is at
+  // {app}\_internal\pgsql, not {app}\pgsql. Both are checked rather than
+  // one being assumed: getting it wrong here fails silently -- the file is
+  // simply not found, the server is never stopped, and the only symptom is
+  // an upgrade that cannot replace a locked postgres.exe, months later.
+  Result := '';
+  Candidate := ExpandConstant('{app}\_internal\pgsql\bin\pg_ctl.exe');
+  if FileExists(Candidate) then
+  begin
+    Result := Candidate;
+    Exit;
+  end;
+  Candidate := ExpandConstant('{app}\pgsql\bin\pg_ctl.exe');
+  if FileExists(Candidate) then
+    Result := Candidate;
+end;
+
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   PgCtl, PgData: String;
@@ -121,9 +143,9 @@ begin
   // in which case pg_ctl exits non-zero and that is the expected outcome;
   // blocking an install over it would be worse than the file lock it is
   // meant to avoid.
-  PgCtl := ExpandConstant('{app}\pgsql\bin\pg_ctl.exe');
+  PgCtl := FindPgCtl();
   PgData := ExpandConstant('{localappdata}\{#AppDirName}\pgdata');
-  if FileExists(PgCtl) and DirExists(PgData) then
+  if (PgCtl <> '') and DirExists(PgData) then
   begin
     Exec(PgCtl, '-D "' + PgData + '" -m fast -w -t 30 stop', '',
          SW_HIDE, ewWaitUntilTerminated, ResultCode);
