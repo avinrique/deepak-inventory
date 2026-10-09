@@ -11,8 +11,15 @@ they can act on rather than as a window that never appears:
     5. create QApplication, set identity + icon
     6. load the theme                            (bundled resource; may be missing)
     7. ensure a database is configured           (else: setup wizard)
-    8. connect and check the schema              (distinguishing the ways it fails)
-    9. build the container, show the login window
+    8. start the built-in database server        (only when this install uses one)
+    9. connect and check the schema              (distinguishing the ways it fails)
+   10. build the container, show the login window
+
+Step 8 exists for the second and every later launch. On a fresh install the
+setup wizard has already started the server by the time step 7 returns, but
+a configured install skips the wizard entirely -- and the server is a
+process that died when the app last closed, so something has to start it
+before step 9 tries to connect to it.
 
 Run from source with `python -m app.main`. `--self-test` exercises the whole
 UI without a database and exits, which is how CI verifies the *packaged*
@@ -116,6 +123,134 @@ def _run_setup_wizard(allow_cancel: bool) -> bool:
 
     wizard = SetupWizard(allow_cancel=allow_cancel)
     return wizard.exec() == SetupWizard.DialogCode.Accepted
+
+
+def _register_local_server_shutdown(app: QApplication) -> None:
+    """Arranges for the built-in database to be shut down when we exit.
+
+    Registered before the setup wizard can run, because the wizard itself
+    starts the server -- so a user who picks "on this computer" and then
+    cancels at the owner-account page would otherwise leave a postgres
+    process behind with no app to go with it. local_server.stop() is a no-op
+    when there is nothing to stop.
+
+    Both hooks, deliberately. aboutToQuit covers the normal case and runs
+    while the event loop is still alive. atexit covers every path in main()
+    that returns *without* ever calling app.exec() -- a cancelled wizard or a
+    failed startup check -- where aboutToQuit can never fire. stop() is
+    idempotent, so whichever comes first does the work.
+    """
+    import atexit
+
+    from app.database import local_server
+
+    app.aboutToQuit.connect(local_server.stop)
+    atexit.register(local_server.stop)
+
+
+def _start_local_server_with_progress() -> None:
+    """Runs local_server.ensure_running() without freezing the UI.
+
+    Usually this is one pg_ctl status call and returns immediately. The case
+    worth handling is the first launch after a reboot, where the server is
+    genuinely down and pg_ctl waits for it to finish crash recovery before
+    reporting ready -- up to a minute on a slow disk, with no main window on
+    screen yet. Running that on the GUI thread gets the process painted grey
+    and labelled "Not Responding" by Windows.
+
+    Re-raises whatever the worker raised, so the caller's error handling is
+    the same as if this were a plain call.
+    """
+    from PySide6.QtCore import QEventLoop, QThreadPool
+    from PySide6.QtWidgets import QProgressDialog
+
+    from app.database import local_server
+    from app.workers.base_worker import Worker
+
+    dialog = QProgressDialog("Starting the database on this computer…", "", 0, 0)
+    dialog.setWindowTitle(APP_NAME)
+    # No Cancel: there is nothing safe to do with a half-started server, and
+    # a button that cannot be honoured is worse than no button.
+    dialog.setCancelButton(None)
+    dialog.setMinimumDuration(0)
+    dialog.setWindowModality(Qt.WindowModality.ApplicationModal)
+
+    loop = QEventLoop()
+    outcome: dict = {}
+
+    def done(_result) -> None:
+        outcome["finished"] = True
+        loop.quit()
+
+    def failed(exc: Exception) -> None:
+        outcome["finished"] = True
+        outcome["error"] = exc
+        loop.quit()
+
+    worker = Worker(local_server.ensure_running)
+    worker.signals.finished.connect(done)
+    worker.signals.error.connect(failed)
+    QThreadPool.globalInstance().start(worker)
+
+    dialog.show()
+    # The guard is load-bearing, not defensive clutter. quit() on a loop that
+    # is not running yet does nothing at all, so a worker that finishes
+    # before exec() is reached -- the *normal* case here, since the usual
+    # outcome is one fast pg_ctl status call -- would leave exec() waiting
+    # for a signal that has already been and gone, hanging startup forever.
+    # Nothing between this check and exec() can deliver the signal, because
+    # queued delivery only happens inside an event loop.
+    if not outcome.get("finished"):
+        loop.exec()
+    dialog.close()
+
+    if "error" in outcome:
+        raise outcome["error"]
+
+
+def _ensure_local_server() -> bool:
+    """Starts the database this installation manages itself.
+
+    Deliberately the same three choices as _connect_and_check_schema below
+    -- Try Again, change the database, or quit -- because the situations are
+    the same shape: something about the database is wrong, and the only
+    things that can help are retrying, pointing somewhere else, or giving up.
+    """
+    from app.database.local_server import LocalServerError
+
+    while True:
+        try:
+            _start_local_server_with_progress()
+            return True
+        except LocalServerError as exc:
+            message = str(exc)
+        except Exception as exc:  # noqa: BLE001 - must not reach the crash handler
+            _logger.exception("Unexpected failure starting the local database")
+            message = ("The database on this computer could not be started.\n\n"
+                       f"{exc}")
+
+        _logger.error("Local database startup failed: %s", message.splitlines()[0])
+        box = QMessageBox()
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Cannot start the database")
+        box.setText(message)
+        retry = box.addButton("Try Again", QMessageBox.ButtonRole.AcceptRole)
+        change = box.addButton("Database Settings…", QMessageBox.ButtonRole.ActionRole)
+        quit_button = box.addButton("Quit", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(retry)
+        box.exec()
+
+        clicked = box.clickedButton()
+        if clicked is quit_button:
+            return False
+        if clicked is change:
+            if not _run_setup_wizard(allow_cancel=True):
+                return False
+            # The wizard may have moved this install to a remote server, in
+            # which case there is no longer a local server to start.
+            if not settings.database_managed_locally:
+                return True
+        # "Try Again" falls through and re-runs the attempt.
 
 
 def _connect_and_check_schema() -> bool:
@@ -261,6 +396,11 @@ def main(argv: list[str] | None = None) -> int:
         return run_self_test(app, screenshot_dir=options.screenshot_dir,
                              report_path=options.report)
 
+    # After the --self-test return, deliberately: a diagnostic run must not
+    # shut down the server a normally-running copy of the app is using.
+    # Still before the setup wizard, which can start the server itself.
+    _register_local_server_shutdown(app)
+
     if settings_module.config_error is not None:
         # A config file exists but could not be used. Say so explicitly
         # rather than silently starting the wizard, which would look like
@@ -272,6 +412,9 @@ def main(argv: list[str] | None = None) -> int:
     if not settings.is_configured() and not _run_setup_wizard(allow_cancel=False):
         _logger.info("Setup cancelled before a database was configured")
         return EXIT_CANCELLED
+
+    if settings.database_managed_locally and not _ensure_local_server():
+        return EXIT_STARTUP_FAILED
 
     if not _connect_and_check_schema():
         return EXIT_STARTUP_FAILED

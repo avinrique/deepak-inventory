@@ -106,17 +106,41 @@ def icon_path() -> Path:
     return resource_path("packaging", "app.ico")
 
 
+def pg_server_dir() -> Path:
+    """The bundled PostgreSQL *server* tree: bin/, lib/ and share/.
+
+    This is what makes "keep the database on this computer" possible without
+    the user installing PostgreSQL -- app.database.local_server runs initdb
+    and pg_ctl out of here. Staged by packaging/fetch_pgserver.py.
+
+    Same dev/frozen split as icon_path(): PyInstaller flattens it to the
+    bundle root, the staging script writes it under packaging/.
+    """
+    bundled = resource_path("pgsql")
+    if bundled.is_dir():
+        return bundled
+    return resource_path("packaging", "pgsql")
+
+
 def pg_bin_dir() -> Path:
     """Where pg_dump/pg_restore are shipped. Checked before PATH by
     app.backup.postgres_backup, so Backup works on a machine with no
     PostgreSQL installation of its own.
 
-    Same dev/frozen split as icon_path(): PyInstaller flattens the directory
-    to the bundle root, but packaging/fetch_pgtools.py stages it under
-    packaging/ in a source checkout. Checking only the frozen location meant
-    the tools were invisible when running from source even after staging
-    them, so the backup tests could never see them.
+    The server bundle is preferred because it already contains pg_dump and
+    pg_restore alongside initdb/pg_ctl/postgres -- staging them a second
+    time under pgtools/ would ship the same ~20 MB twice. pgtools/ remains
+    the fallback for a build that deliberately omits the server.
+
+    Same dev/frozen split as icon_path(): PyInstaller flattens these to the
+    bundle root, but the staging scripts write them under packaging/ in a
+    source checkout. Checking only the frozen location meant the tools were
+    invisible when running from source even after staging them, so the
+    backup tests could never see them.
     """
+    server_bin = pg_server_dir() / "bin"
+    if server_bin.is_dir():
+        return server_bin
     bundled = resource_path("pgtools")
     if bundled.is_dir():
         return bundled

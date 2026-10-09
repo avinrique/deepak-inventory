@@ -41,6 +41,17 @@ class Settings(BaseSettings):
     # must fail into the setup wizard, not quietly connect somewhere.
     database_url: str = ""
 
+    # True when database_url points at the PostgreSQL server this
+    # application installed and runs itself (app.database.local_server),
+    # rather than one somebody else administers.
+    #
+    # An explicit flag rather than something inferred from the URL: a host
+    # of 127.0.0.1 is equally what you get when the user installed
+    # PostgreSQL themselves, and running pg_ctl against a data directory
+    # this app never created would fail. Defaults False, so an existing
+    # install that already points at a remote server upgrades untouched.
+    database_managed_locally: bool = False
+
     # Seconds to wait for a TCP connection before giving up. Without this,
     # an unreachable host blocks on the OS timeout (~2 minutes on Windows)
     # with the splash screen up and no way to cancel.

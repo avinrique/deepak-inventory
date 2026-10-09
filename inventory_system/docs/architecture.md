@@ -70,11 +70,13 @@ deepak-inventory/                    (repo root)
     │   ├── installer.iss                      # Inno Setup
     │   ├── app.ico / make_icon.py              # icon, generated from code
     │   ├── make_version_info.py                 # Windows VERSIONINFO resource
-    │   ├── fetch_pgtools.py                      # stages pg_dump/pg_restore
-    │   └── build_windows.ps1                      # local build
+    │   ├── fetch_pgserver.py                     # stages the whole PostgreSQL server
+    │   ├── fetch_pgtools.py                       # stages pg_dump/pg_restore alone
+    │   └── build_windows.ps1                       # local build
     ├── scripts/
-    │   ├── run_app.py                              # convenience launcher
-    │   └── init_db.py                               # migrate, seed, create first owner
+    │   ├── run_app.py                               # convenience launcher
+    │   ├── check_local_server.py                      # real initdb/pg_ctl cycle (CI)
+    │   └── init_db.py                                  # migrate, seed, create first owner
     ├── docs/
     │   ├── architecture.md                           # this file
     │   └── deployment.md                              # build/install/operate
@@ -286,12 +288,34 @@ the only way those defects surface before a user finds them.
   upgrades in place cleanly, which is enough for a handful of shop machines;
   a background updater would need signing infrastructure and a release
   channel that do not exist yet.
-- **The application is a database client.** It does not embed a database, so
-  an installation needs a PostgreSQL server reachable over the network —
-  cloud or LAN. There is no offline mode and no local cache.
-- **Connection settings roam, backups do not.** `config.json` is in roaming
-  AppData so a domain user keeps it between machines; logs and backups are
-  machine-local by design.
+- **PostgreSQL only, but it can be our own.** The schema and migrations
+  assume PostgreSQL (an earlier Excel backend and a SQLite one were both
+  removed). An installation can either point at a server someone else
+  administers, or use the one the installer ships and
+  `app/database/local_server.py` manages — `initdb` on first run, `pg_ctl`
+  start/stop around the process lifetime, loopback-bound, data under
+  `%LOCALAPPDATA%\…\pgdata`. There is still no offline mode and no local
+  cache for the *remote* case: the app talks to a live server either way.
+- **The built-in server is single-machine.** It listens on `127.0.0.1` and
+  nothing else, so two PCs cannot share it. That is a choice, not an
+  oversight: exposing it would mean a firewall rule, `pg_hba` entries for a
+  subnet, and a security story this application does not have. Two tills
+  means a real server and the remote option.
+- **The built-in cluster is initialised with `--locale=C`.** On a Windows
+  machine whose code page is not UTF-8, `initdb -E UTF8` against the system
+  locale fails outright, which is most Windows machines; `C` always matches.
+  The cost is byte-order text collation, so `ORDER BY name` sorts uppercase
+  before lowercase. Switching to the ICU provider would fix the ordering and
+  is the route if it ever matters.
+- **No major-version upgrade path for the built-in database.** PostgreSQL
+  will not open a cluster created by a different major version, so the
+  bundled major is pinned in CI (`POSTGRES_MAJOR`) and the app refuses to
+  start with an explanation if it ever mismatches. Raising it needs a
+  `pg_upgrade` or dump/restore step that does not exist yet.
+- **Connection settings roam, the database does not.** `config.json` is in
+  roaming AppData so a domain user keeps it between machines; logs, backups
+  and `pgdata` are machine-local by design — roaming a live database would
+  be actively harmful.
 - **No row-level security.** Multi-tenancy is enforced by `organization_id`
   scoping in the repository layer, not by the database.
 - **Default connection pool.** `app/database/session.py` sets

@@ -68,10 +68,22 @@ try {
     & python packaging\make_version_info.py
     if ($LASTEXITCODE -ne 0) { throw "make_version_info.py failed" }
 
-    Write-Step "Staging PostgreSQL backup tools"
-    # --optional: a machine without PostgreSQL still produces a working
-    # build, just one where Backup reports the tools are missing.
-    & python packaging\fetch_pgtools.py --optional
+    Write-Step "Staging the PostgreSQL server"
+    # Supersedes fetch_pgtools.py: pg_dump and pg_restore are in the same
+    # bin/ as the server, so staging both would ship them twice.
+    #
+    # --optional, unlike CI: a developer's machine without PostgreSQL still
+    # produces a working build, just one where the setup wizard's "on this
+    # computer" option is greyed out and Backup reports its tools missing.
+    # A *release* must not be built this way, which is why the workflow
+    # passes --require-major instead and the packaged self-test asserts the
+    # server is present.
+    & python packaging\fetch_pgserver.py --optional
+    # --optional makes "no PostgreSQL on this machine" exit 0, so a non-zero
+    # code here means it found one and could not produce a usable bundle from
+    # it — which must not be ignored, or the build ships a server that cannot
+    # initialise a database.
+    if ($LASTEXITCODE -ne 0) { throw "staging the PostgreSQL server failed" }
 
     Write-Step "Building the executable"
     Remove-Item -Recurse -Force build, dist -ErrorAction SilentlyContinue

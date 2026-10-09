@@ -80,9 +80,21 @@ datas = [
     (str(PROJECT_ROOT / "packaging" / "app.ico"), "."),
 ]
 
+# The PostgreSQL server, if the release process has staged it: bin/, lib/
+# and share/, which together are what lets the application run a database on
+# the user's own machine instead of asking them for a server to connect to.
+# See packaging/fetch_pgserver.py, and app.database.local_server for what
+# reads it. A build without it still works — the setup wizard disables its
+# "on this computer" option and says why.
+_pgsql = PROJECT_ROOT / "packaging" / "pgsql"
+if _pgsql.is_dir() and any(_pgsql.iterdir()):
+    datas.append((str(_pgsql), "pgsql"))
+
 # pg_dump.exe / pg_restore.exe, if the release process has staged them. The
 # build works without them; Backup and Restore then report that the tools
 # are missing instead of failing obscurely. See packaging/fetch_pgtools.py.
+# Redundant when pgsql/ above is present — it ships the same two programs in
+# its bin/, which is why paths.pg_bin_dir() looks there first.
 _pgtools = PROJECT_ROOT / "packaging" / "pgtools"
 if _pgtools.is_dir() and any(_pgtools.iterdir()):
     datas.append((str(_pgtools), "pgtools"))

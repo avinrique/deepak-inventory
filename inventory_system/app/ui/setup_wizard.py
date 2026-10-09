@@ -3,19 +3,26 @@
 A packaged .exe cannot ship with credentials in it, so a fresh installation
 has to ask. This dialog is where it asks, and it is the only route by which
 a non-technical user can get from "I just ran the installer" to a working
-login. It does three jobs in order:
+login. It does four jobs in order:
 
-1. Collect and *verify* connection details before saving them, so a typo
+1. Ask *where* the data should live. "On this computer" uses the PostgreSQL
+   server bundled with the installer (app.database.local_server) and needs
+   no input at all; "on a server or cloud database" goes to step 2.
+2. Collect and *verify* connection details before saving them, so a typo
    fails here with an explanation instead of at the next launch with a
    dialog nobody can act on.
-2. Offer to initialize a database that has no schema yet -- running the
+3. Offer to initialize a database that has no schema yet -- running the
    migrations and seeding the role catalog.
-3. Create the first Organization and OWNER account when the database has no
+4. Create the first Organization and OWNER account when the database has no
    users, which is otherwise impossible: every other path to creating a user
    requires an authenticated session, and there is nobody to authenticate as.
 
-Also reachable afterwards from Settings, for moving an installation to a
-different server.
+Steps 3 and 4 are shared: the local choice produces a verified URL and then
+rejoins the same code path the typed-in one uses, so there is exactly one
+implementation of "prepare an empty database".
+
+Also reachable afterwards from the startup error dialog, for moving an
+installation to a different server.
 """
 import logging
 
@@ -34,13 +41,14 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from sqlalchemy.engine import URL, make_url
+from sqlalchemy.engine import make_url
 
 from app.__version__ import APP_NAME
 from app.config import store
 from app.config.settings import reload_settings, settings
 from app.core.exceptions import AppError
-from app.database import bootstrap
+from app.database import bootstrap, local_server
+from app.database.dsn import build_url
 from app.database.session import reset_engine, test_connection
 from app.ui.theme import GREEN, MUTED, RED, STYLESHEET, TEXT, scale
 from app.ui.widgets.responsive import fit_to_screen, wrap_in_scroll
@@ -55,23 +63,26 @@ _SSL_MODES = [
     ("Verify full", "verify-full"),
 ]
 
-_DRIVER = "postgresql+psycopg"
+# The three pages, in the order they sit in the QStackedWidget. Named
+# because the flow branches: choosing "on this computer" skips the
+# connection form entirely and lands straight on the initialize page.
+_PAGE_CHOICE = 0
+_PAGE_CONNECTION = 1
+_PAGE_INITIALIZE = 2
 
-
-def build_url(*, host: str, port: int, database: str, username: str,
-              password: str, sslmode: str) -> str:
-    """Assembles a DSN from what the user typed.
-
-    URL.create() percent-encodes each component, which is the entire reason
-    this is not an f-string: a password containing '@', ':' or a space is
-    perfectly legal and produces a URL that silently parses into the wrong
-    username and host if it is pasted together by hand.
-    """
-    return URL.create(
-        drivername=_DRIVER, username=username or None, password=password or None,
-        host=host or None, port=port or None, database=database or None,
-        query={"sslmode": sslmode} if sslmode else {},
-    ).render_as_string(hide_password=False)
+_PAGE_HEADINGS = {
+    _PAGE_CHOICE: (
+        "Where should your data be stored?",
+        "This is where your products, bills and customers will be kept."),
+    _PAGE_CONNECTION: (
+        "Connect to your database",
+        "These details are stored on this computer only. Your administrator "
+        "can supply them if you do not have them."),
+    _PAGE_INITIALIZE: (
+        "Set up this database",
+        "This database is empty. It will be prepared for use, and the "
+        "account you enter below becomes its administrator."),
+}
 
 
 class SetupWizard(QDialog):
@@ -84,6 +95,12 @@ class SetupWizard(QDialog):
         self._allow_cancel = allow_cancel
         self._verified_url: str | None = None
         self._busy = False
+        # Which page "Back" returns to from the initialize page. The local
+        # choice never visits the connection form, so it cannot be assumed.
+        self._initialize_came_from = _PAGE_CONNECTION
+        # Which kind of database the user picked, recorded alongside the URL
+        # so the next launch knows whether to start a server first.
+        self._managed_locally = False
 
         self.setWindowTitle(f"{APP_NAME} — Database Setup")
         self.setStyleSheet(STYLESHEET)
@@ -94,17 +111,16 @@ class SetupWizard(QDialog):
         outer.setContentsMargins(scale(28), scale(24), scale(28), scale(20))
         outer.setSpacing(scale(12))
 
-        self._title = QLabel("Connect to your database")
+        self._title = QLabel()
         self._title.setObjectName("pageTitle")
-        self._subtitle = QLabel(
-            "These details are stored on this computer only. Your administrator "
-            "can supply them if you do not have them.")
+        self._subtitle = QLabel()
         self._subtitle.setObjectName("pageSubtitle")
         self._subtitle.setWordWrap(True)
         outer.addWidget(self._title)
         outer.addWidget(self._subtitle)
 
         self._pages = QStackedWidget()
+        self._pages.addWidget(wrap_in_scroll(self._build_choice_page()))
         self._pages.addWidget(wrap_in_scroll(self._build_connection_page()))
         self._pages.addWidget(wrap_in_scroll(self._build_initialize_page()))
         outer.addWidget(self._pages, stretch=1)
@@ -118,8 +134,62 @@ class SetupWizard(QDialog):
         # matter how short the screen is.
         outer.addLayout(self._build_footer())
         self._load_existing_values()
+        self._show_page(_PAGE_CHOICE)
 
     # -- pages ------------------------------------------------------------ #
+    def _build_choice_page(self) -> QWidget:
+        """Two buttons that navigate, rather than radios plus Continue.
+
+        A choice needs no verification, so there is nothing for Continue to
+        gate on here -- and keeping Continue off this page is what leaves the
+        "never save an untested connection" rule on the connection page
+        exactly as it was.
+        """
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, scale(8), 0, 0)
+        layout.setSpacing(scale(8))
+
+        self._local_button = QPushButton("On this computer")
+        self._local_button.setObjectName("primary")
+        self._local_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._local_button.clicked.connect(self._choose_local)
+        layout.addWidget(self._local_button)
+
+        self._local_note = QLabel(
+            "Recommended. Everything stays on this PC — nothing is sent over "
+            "the internet, and there is nothing to set up or sign up for.")
+        self._local_note.setWordWrap(True)
+        self._local_note.setStyleSheet(f"color: {MUTED}; font-size: 12px;")
+        layout.addWidget(self._local_note)
+
+        layout.addSpacing(scale(10))
+
+        remote_button = QPushButton("On a server or cloud database")
+        remote_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        remote_button.clicked.connect(self._choose_remote)
+        layout.addWidget(remote_button)
+
+        remote_note = QLabel(
+            "For a PostgreSQL database that already exists. You will need its "
+            "address, username and password.")
+        remote_note.setWordWrap(True)
+        remote_note.setStyleSheet(f"color: {MUTED}; font-size: 12px;")
+        layout.addWidget(remote_note)
+        layout.addStretch(1)
+
+        # Disabled rather than hidden, with the reason on show: a build
+        # assembled without the server binaries is a packaging oversight, and
+        # silently dropping the option would look like the feature never
+        # existed. Same treatment as Backup without pg_dump.
+        if not local_server.is_bundled():
+            self._local_button.setEnabled(False)
+            self._local_note.setText(
+                "Unavailable: this copy of the application was installed "
+                "without the built-in database. Reinstalling should restore "
+                "it, or use a server below.")
+        return page
+
     def _build_connection_page(self) -> QWidget:
         page = QWidget()
         form = QFormLayout(page)
@@ -222,6 +292,39 @@ class SetupWizard(QDialog):
         footer.addWidget(self._primary_button)
         return footer
 
+    # -- navigation ------------------------------------------------------- #
+    def _show_page(self, index: int) -> None:
+        """The single place that decides what the header and footer say.
+
+        Three pages with branching navigation had the heading and the button
+        states being reassigned from four different methods, which is how a
+        "Back" ends up on a page whose title belongs to another one.
+        """
+        self._pages.setCurrentIndex(index)
+        title, subtitle = _PAGE_HEADINGS[index]
+        self._title.setText(title)
+        self._subtitle.setText(subtitle)
+        self._status.hide()
+
+        self._back_button.setVisible(index != _PAGE_CHOICE)
+        self._test_button.setVisible(index == _PAGE_CONNECTION)
+        self._primary_button.setVisible(index != _PAGE_CHOICE)
+
+        if index == _PAGE_CONNECTION:
+            self._primary_button.setText("Continue")
+            # Still gated on a successful test -- navigating onto the page
+            # does not count as having tried the connection.
+            self._primary_button.setEnabled(self._verified_url is not None)
+        elif index == _PAGE_INITIALIZE:
+            self._primary_button.setText("Set Up Database")
+            self._primary_button.setEnabled(True)
+
+    def _go_back(self) -> None:
+        if self._pages.currentIndex() == _PAGE_INITIALIZE:
+            self._show_page(self._initialize_came_from)
+        else:
+            self._show_page(_PAGE_CHOICE)
+
     # -- state ------------------------------------------------------------ #
     def _load_existing_values(self) -> None:
         """Pre-fills from whatever is configured, so "change the server" is
@@ -319,29 +422,80 @@ class SetupWizard(QDialog):
                           else "Could not connect to that database.", "error")
 
     def _on_primary(self) -> None:
-        if self._pages.currentIndex() == 0:
+        if self._pages.currentIndex() == _PAGE_CONNECTION:
             self._advance_from_connection()
         else:
             self._finish_initialization()
+
+    def _choose_remote(self) -> None:
+        self._managed_locally = False
+        self._initialize_came_from = _PAGE_CONNECTION
+        self._show_page(_PAGE_CONNECTION)
+
+    # -- the "on this computer" path -------------------------------------- #
+    def _choose_local(self) -> None:
+        """Prepares and starts the bundled server, then rejoins the normal
+        flow.
+
+        There is nothing for the user to type and nothing for them to test,
+        because ensure_running() *is* the test: it only returns a DSN once it
+        has created the database over a real connection to the server it just
+        started. So it produces a verified URL the same way Test Connection
+        does, and everything after this point is the existing code path.
+        """
+        self._managed_locally = True
+        self._initialize_came_from = _PAGE_CHOICE
+        self._title.setText("Setting up your database")
+        self._subtitle.setText(
+            "Preparing the database on this computer. The first time, this "
+            "takes about a minute.")
+        self._set_busy(True, "Working…")
+        worker = Worker(local_server.ensure_running)
+        worker.signals.finished.connect(self._on_local_server_ready)
+        worker.signals.error.connect(self._on_local_server_failed)
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_local_server_ready(self, dsn: str) -> None:
+        self._set_busy(False)
+        self._verified_url = dsn
+        self._advance_from_connection()
+
+    def _on_local_server_failed(self, exc: Exception) -> None:
+        self._set_busy(False)
+        self._show_page(_PAGE_CHOICE)
+        _logger.exception("Could not start the local database", exc_info=exc)
+        self._show_status(
+            str(exc) if isinstance(exc, AppError)
+            else "The database on this computer could not be started. See the "
+                 "log file for details.", "error")
 
     def _advance_from_connection(self) -> None:
         """Applies the verified connection, then decides whether the database
         still needs schema, an owner, or nothing at all."""
         assert self._verified_url is not None
         self._set_busy(True, "Checking the database…")
-        worker = Worker(self._inspect_database, self._verified_url)
+        worker = Worker(self._inspect_database, self._verified_url,
+                        self._managed_locally)
         worker.signals.finished.connect(self._on_inspected)
         worker.signals.error.connect(self._on_test_failed)
         QThreadPool.globalInstance().start(worker)
 
     @staticmethod
-    def _inspect_database(url: str) -> dict:
+    def _inspect_database(url: str, managed_locally: bool) -> dict:
         """Runs on a worker thread. Applies the connection first so that
         has_any_users()/the schema check look at the *new* database rather
-        than whatever the process was pointed at before."""
+        than whatever the process was pointed at before.
+
+        Both routes through the wizard converge here, which is why the
+        managed-locally flag is written here too rather than on either branch:
+        choosing a remote server has to *clear* it, or an installation that
+        once used the built-in database would keep starting a server it no
+        longer connects to.
+        """
         from app.database.schema_check import database_is_empty
 
-        store.save({**store.load(), "database_url": url})
+        store.save({**store.load(), "database_url": url,
+                    "database_managed_locally": managed_locally})
         reload_settings()
         reset_engine()
         empty = database_is_empty()
@@ -355,19 +509,11 @@ class SetupWizard(QDialog):
             self._accept_saved()
             return
 
-        self._pages.setCurrentIndex(1)
-        self._title.setText("Set up this database")
-        self._subtitle.setText(
-            "This database is empty. It will be prepared for use, and the "
-            "account you enter below becomes its administrator.")
+        self._show_page(_PAGE_INITIALIZE)
         self._initialize_note.setText(
             "The database has no tables yet — they will be created now."
             if state["needs_schema"] else
             "The database has no user accounts yet.")
-        self._back_button.show()
-        self._test_button.hide()
-        self._primary_button.setText("Set Up Database")
-        self._primary_button.setEnabled(True)
         self._org_name.setFocus()
 
     def _finish_initialization(self) -> None:
@@ -400,14 +546,6 @@ class SetupWizard(QDialog):
         message = (str(exc) if isinstance(exc, (AppError, bootstrap.BootstrapError))
                    else "The database could not be set up. See the log file for details.")
         self._show_status(message, "error")
-
-    def _go_back(self) -> None:
-        self._pages.setCurrentIndex(0)
-        self._title.setText("Connect to your database")
-        self._back_button.hide()
-        self._test_button.show()
-        self._primary_button.setText("Continue")
-        self._status.hide()
 
     def _accept_saved(self) -> None:
         reload_settings()
