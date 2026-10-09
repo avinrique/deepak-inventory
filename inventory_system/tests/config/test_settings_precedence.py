@@ -74,6 +74,30 @@ def test_an_unconfigured_install_reports_itself_rather_than_guessing():
     assert result.is_configured() is False
 
 
+def test_a_fresh_install_does_not_claim_to_manage_a_local_server():
+    """Default False is what lets an existing installation — one already
+    pointed at a remote server — upgrade without app.main suddenly trying to
+    start a database server it never created."""
+    assert _settings().database_managed_locally is False
+
+
+def test_the_managed_locally_flag_round_trips_through_the_config_file():
+    result = _settings(database_url="postgresql+psycopg://inventory_app@127.0.0.1/x",
+                       database_managed_locally=True)
+
+    assert result.database_managed_locally is True
+
+
+def test_the_environment_can_force_the_managed_locally_flag(monkeypatch):
+    """The escape hatch for a scripted rollout that wants the built-in
+    database without anyone answering the wizard."""
+    monkeypatch.setenv("INVENTORY_DATABASE_MANAGED_LOCALLY", "1")
+
+    result = _settings(database_managed_locally=False)
+
+    assert result.database_managed_locally is True
+
+
 def test_a_relative_log_dir_is_anchored_to_user_data_not_the_cwd(monkeypatch, tmp_path):
     monkeypatch.setenv("INVENTORY_LOG_DIR", "logs")
     monkeypatch.chdir(tmp_path)

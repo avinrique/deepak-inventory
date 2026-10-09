@@ -40,6 +40,21 @@ defaults:
   run:
     working-directory: inventory_system
 
+env:
+  # The PostgreSQL major version shipped inside the installer.
+  #
+  # Changing this number is a data migration, not a version bump. PostgreSQL
+  # will not open a data directory created by a different major version, so
+  # every existing installation's database becomes unreadable the moment a
+  # release ships a different one — app.database.local_server detects that
+  # and refuses to start, with a message telling the user to back up under
+  # the old version first.
+  #
+  # So: if the runner image's PostgreSQL moves on, this build *should* fail.
+  # Pick the new version deliberately, together with an upgrade path for
+  # people who already have data, rather than following the image.
+  POSTGRES_MAJOR: "16"
+
 # Read-only by default. The release step needs to write, and asks for it
 # explicitly below rather than the whole workflow running with write access.
 permissions:
@@ -78,16 +93,27 @@ jobs:
         run: ruff check app scripts packaging
         continue-on-error: true
 
-      - name: Bundle the PostgreSQL backup tools
+      - name: Bundle the PostgreSQL server
+        # This is what lets a customer keep their data on their own PC
+        # without installing PostgreSQL: the server is staged here and
+        # shipped inside the installer. It also supersedes
+        # fetch_pgtools.py — pg_dump and pg_restore live in the same bin/,
+        # so staging them separately would ship them twice (see
+        # app.core.paths.pg_bin_dir).
+        #
         # Before the tests, not after: the tests that exercise pg_restore
         # skip themselves when it cannot be found, and the runner has
         # PostgreSQL installed but not on PATH. Staging first is what makes
         # them actually run here.
         #
-        # --optional keeps a runner-image change from breaking the build
-        # outright; the packaged app then reports that Backup is unavailable
-        # rather than crashing.
-        run: python packaging/fetch_pgtools.py --optional
+        # --require-major is deliberate and must not be dropped. PostgreSQL
+        # refuses to open a data directory written by a different major
+        # version, so if this copied whatever the runner image happened to
+        # ship, a GitHub image update would silently bump the bundled major
+        # and the next release would fail to start against every existing
+        # customer's database. Failing the build is the right outcome:
+        # raising this number is a migration, not a version bump.
+        run: python packaging/fetch_pgserver.py --require-major ${{ env.POSTGRES_MAJOR }}
 
       - name: Run tests
         env:
@@ -115,6 +141,23 @@ jobs:
               ForEach-Object { Write-Host "::error::$_" }
             throw "pytest failed"
           }
+        shell: pwsh
+
+      - name: Exercise the bundled database for real
+        env:
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: "utf-8"
+        # The step that actually proves the feature. Everything in
+        # tests/database/test_local_server.py runs with subprocess mocked,
+        # because development happens on macOS and the shipped binaries are
+        # Windows-only — so this is the only place initdb, pg_ctl and the
+        # Windows-specific behaviour around them are ever really executed.
+        #
+        # Runs the whole first-run sequence against a scratch directory:
+        # initdb, start, CREATE DATABASE, migrations, the first owner, stop,
+        # and a second ensure_running() in between to prove it adopts a
+        # server that is already up instead of starting a second one.
+        run: python scripts/check_local_server.py
         shell: pwsh
 
       - name: Stamp the build with the commit

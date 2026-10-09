@@ -78,15 +78,56 @@ Filename: "{app}\{#AppExeName}"; \
 ; Only things the *application* generated inside its own install directory.
 ; Deliberately absent: {userappdata}\InventoryManagementSystem and
 ; {localappdata}\InventoryManagementSystem. Those hold the database
-; connection settings and the logs, and an upgrade uninstalls before it
-; reinstalls — removing them would silently reset every machine to the
-; first-run setup wizard on every update.
+; connection settings, the logs, and — for an installation using the
+; built-in database — pgdata, which *is* the business's data: every product,
+; bill and customer. An upgrade uninstalls before it reinstalls, so removing
+; them would reset every machine to the first-run setup wizard on every
+; update, and destroy the database while doing it.
+;
+; That means a genuine uninstall leaves pgdata behind. That is the intended
+; trade: there is no way for the uninstaller to tell "upgrading" from
+; "removing for good", and erasing a shop's records on a wrong guess is not
+; a risk worth taking to reclaim disk space.
 Type: filesandordirs; Name: "{app}\__pycache__"
 
 [Code]
 function InitializeSetup(): Boolean;
 begin
   Result := True;
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  PgCtl, PgData: String;
+  ResultCode: Integer;
+begin
+  Result := '';
+  // Note: // comments, not { }. Inno's brace comments do not nest, so an
+  // {app} or {localappdata} inside one ends the comment at its closing
+  // brace and the rest becomes syntax errors -- which stops iscc compiling
+  // the script at all.
+  //
+  // An upgrade overwrites everything in the install directory, and a
+  // running postgres.exe holds a lock on its own image -- so without this,
+  // installing over a running copy fails to replace the server binaries.
+  // Inno's CloseApplications flag does not help: postgres is a background
+  // process with no window to close.
+  //
+  // The data directory lives under LOCALAPPDATA, not the install
+  // directory, so it is untouched here and survives the upgrade -- which
+  // is the whole point.
+  //
+  // Failures are deliberately ignored. Usually the server is not running,
+  // in which case pg_ctl exits non-zero and that is the expected outcome;
+  // blocking an install over it would be worse than the file lock it is
+  // meant to avoid.
+  PgCtl := ExpandConstant('{app}\pgsql\bin\pg_ctl.exe');
+  PgData := ExpandConstant('{localappdata}\{#AppDirName}\pgdata');
+  if FileExists(PgCtl) and DirExists(PgData) then
+  begin
+    Exec(PgCtl, '-D "' + PgData + '" -m fast -w -t 30 stop', '',
+         SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  end;
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);

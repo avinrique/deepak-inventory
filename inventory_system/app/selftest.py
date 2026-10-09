@@ -106,6 +106,42 @@ def _check_resources(check: _Check) -> None:
 
     check.run("resource: application icon", application_icon)
 
+    def bundled_postgres():
+        """The whole point of the packaged self-test: catching a .spec that
+        stopped shipping something.
+
+        A fail here means the installer no longer contains a database and
+        every fresh install would land on "connect to a server" with the
+        local option greyed out -- which is exactly the problem the bundled
+        server exists to remove, and it would ship silently otherwise.
+        """
+        from app.database import local_server
+
+        assert local_server.is_bundled(), (
+            "the PostgreSQL server is not in the bundle at "
+            f"{local_server.pg_server_dir()} — run packaging/fetch_pgserver.py "
+            "before building")
+        # Staged but unversioned means local_server has to skip its
+        # major-version guard, which is how a cluster gets opened by the
+        # wrong server after an upgrade.
+        major = local_server.bundled_major_version()
+        assert major, "the bundled PostgreSQL has no PGSQL_VERSION.txt"
+
+        # bin/ alone is not a usable server: initdb reads postgres.bki to
+        # bootstrap the catalogs, and snowball_create.sql reads the
+        # stop-word files while creating the default text-search
+        # dictionaries. Checked here because this runs against the *packaged*
+        # executable, so it is the only thing that can catch a .spec that
+        # shipped the programs without their data.
+        share = local_server.pg_server_dir() / "share"
+        bki = next(iter(share.rglob("postgres.bki")), None)
+        assert bki is not None, f"share/postgres.bki is not in the bundle under {share}"
+        assert (bki.parent / "tsearch_data" / "english.stop").is_file(), \
+            "share/tsearch_data is not in the bundle — initdb would fail"
+        return f"PostgreSQL {major}"
+
+    check.run("resource: bundled PostgreSQL server", bundled_postgres)
+
 
 def _check_pages(check: _Check, screenshot_dir: Path | None) -> None:
     from app.ui.main_window import MODULES, _build_page
