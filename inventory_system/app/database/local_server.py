@@ -178,23 +178,25 @@ def _is_elevated() -> bool:
         return False
 
 
-def _check_not_elevated() -> None:
-    """postgres refuses to run under an administrator token -- its own code,
-    not a policy of ours, and it is right to: a database server should not
-    hold privileges it cannot drop.
+def _elevation_hint() -> str:
+    """Extra advice appended to a failure, when running elevated.
 
-    The normal case never trips this. The installer asks for no elevation
-    (PrivilegesRequired=lowest) so even an administrator's account runs the
-    app with a filtered token. Someone who deliberately picks "Run as
-    administrator" would otherwise get postgres' raw refusal, which reads
-    like a bug in the application.
+    Deliberately a hint on failure rather than a refusal up front. postgres
+    will not run under an administrator token -- but pg_ctl and initdb know
+    that and re-launch it with a restricted one, so an elevated session
+    usually works, and refusing it outright would block cases that are fine
+    (a Windows CI runner, which is always elevated, among them).
+
+    What survives is the diagnosis: when something *does* fail and the
+    process happens to be elevated, that is far and away the likeliest
+    reason, and postgres' own wording for it does not say so.
     """
-    if _is_elevated():
-        raise LocalServerError(
-            "The built-in database cannot be used while this program is running "
-            "as an administrator.\n\nClose it and open it normally — from the "
-            "Start Menu or its desktop shortcut — rather than using "
-            "\"Run as administrator\".")
+    if not _is_elevated():
+        return ""
+    return ("\n\nThis program is running as an administrator, which is the "
+            "usual cause. Close it and open it normally — from the Start Menu "
+            "or its desktop shortcut — rather than with \"Run as "
+            "administrator\".")
 
 
 def _warn_about_unusual_pgdata(pgdata: Path) -> None:
@@ -390,7 +392,8 @@ def _initdb(password: str) -> None:
             shutil.rmtree(pgdata, ignore_errors=True)
         raise LocalServerError(
             "The database on this computer could not be prepared.\n\n"
-            + (_sanitize(result.stderr) or "initdb failed without explaining why."))
+            + (_sanitize(result.stderr) or "initdb failed without explaining why.")
+            + _elevation_hint())
 
     _write_managed_conf()
 
@@ -459,7 +462,8 @@ def _start(port: int) -> None:
         raise _PortUnavailable(port)
     raise LocalServerError(
         "The database on this computer could not be started.\n\n"
-        + (_sanitize(combined) or "pg_ctl gave no reason."))
+        + (_sanitize(combined) or "pg_ctl gave no reason.")
+        + _elevation_hint())
 
 
 def _start_on_a_free_port(port: int) -> int:
@@ -679,7 +683,12 @@ def ensure_running() -> str:
             "restore it, or you can connect to a database on another server "
             "instead.")
 
-    _check_not_elevated()
+    if _is_elevated():
+        # Not fatal -- see _elevation_hint. Logged because it changes which
+        # token the server ends up with, and that is worth knowing from a
+        # log file when something downstream misbehaves.
+        _logger.warning("Running with an administrator token; PostgreSQL will "
+                        "drop privileges for the server process itself")
     _warn_about_unusual_pgdata(pgdata_path())
 
     with _instance_lock():

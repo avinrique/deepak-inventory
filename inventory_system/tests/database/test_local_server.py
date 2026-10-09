@@ -307,16 +307,47 @@ def test_start_errors_never_leak_a_connection_string(staged, monkeypatch):
 
 # -- elevation ----------------------------------------------------------- #
 
-def test_running_as_administrator_is_refused_before_anything_is_spawned(
-        staged, calls, monkeypatch):
-    """postgres refuses an administrator token itself. Catching it here is
-    what turns its raw stderr into a sentence naming the actual fix."""
+def test_running_as_administrator_is_not_refused_outright(staged, calls, monkeypatch):
+    """An earlier version raised here, and it was wrong. pg_ctl and initdb
+    re-launch postgres with a restricted token precisely so an elevated
+    session works, so refusing blocked cases that are fine — including every
+    Windows CI runner, which is always elevated."""
     monkeypatch.setattr(local_server, "_is_elevated", lambda: True)
+    monkeypatch.setattr(local_server, "_create_database_if_missing",
+                        lambda port, password: None)
+    monkeypatch.setattr(local_server, "_persist", lambda dsn: None)
+
+    local_server.ensure_running()
+
+    assert calls, "nothing ran at all"
+
+
+def test_a_failure_while_elevated_names_administrator_as_the_likely_cause(
+        staged, monkeypatch):
+    """The diagnosis survives even though the refusal did not: postgres'
+    own wording for this never mentions elevation, so the user is left with
+    no idea what to change."""
+    monkeypatch.setattr(local_server, "_is_elevated", lambda: True)
+    monkeypatch.setattr(local_server, "_run", lambda argv, timeout:
+                        subprocess.CompletedProcess(argv, 1, stdout="",
+                                                    stderr="FATAL: permission denied"))
 
     with pytest.raises(local_server.LocalServerError, match="as an administrator"):
-        local_server.ensure_running()
+        local_server._start(5432)
 
-    assert calls == [], "a subprocess ran despite the refusal"
+
+def test_an_ordinary_failure_does_not_blame_administrator_rights(staged, monkeypatch):
+    """Pinning the wrong cause on an unrelated failure sends the user off
+    fixing something that was never the problem."""
+    monkeypatch.setattr(local_server, "_is_elevated", lambda: False)
+    monkeypatch.setattr(local_server, "_run", lambda argv, timeout:
+                        subprocess.CompletedProcess(argv, 1, stdout="",
+                                                    stderr="FATAL: disk is full"))
+
+    with pytest.raises(local_server.LocalServerError) as caught:
+        local_server._start(5432)
+
+    assert "administrator" not in str(caught.value)
 
 
 # -- version guard ------------------------------------------------------- #
