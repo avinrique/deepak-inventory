@@ -23,6 +23,7 @@ import argparse
 import shutil
 import sys
 import tempfile
+import traceback
 from pathlib import Path
 
 # Same as scripts/init_db.py: running "python scripts/check_local_server.py"
@@ -224,13 +225,21 @@ def main() -> int:
     try:
         try:
             _check(root)
-        except BaseException:
-            # The exception text carries initdb's stderr, but pg_ctl writes
-            # the server's own startup failures to its log file instead --
-            # and on CI nobody can go and read that file afterwards. Print
-            # it here or the reason is simply lost.
+        except BaseException as exc:
+            # Order here is chosen for what survives truncation. CI turns
+            # the *tail* of this output into annotations, and GitHub keeps
+            # only ten of them -- so the bulky diagnostics go first, the
+            # traceback next, and a one-line summary absolutely last, where
+            # nothing can push it out of view. Printing the exception first
+            # is what the earlier version did, and it was the line that got
+            # dropped.
             _dump_diagnostics(root)
-            raise
+            # Explicitly to stdout: the default is stderr, and the two are
+            # merged by the shell with no guarantee about interleaving, so
+            # the summary below could otherwise land anywhere but last.
+            traceback.print_exc(file=sys.stdout)
+            print(f"\nRESULT: FAILED — {type(exc).__name__}: {exc}", flush=True)
+            return 1
     finally:
         # Never leave a server running behind us, whatever went wrong.
         from app.database import local_server

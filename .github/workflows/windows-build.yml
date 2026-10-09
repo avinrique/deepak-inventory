@@ -185,9 +185,14 @@ jobs:
           $output = python scripts/check_local_server.py 2>&1 | Out-String
           Write-Host $output
           if ($LASTEXITCODE -ne 0) {
+            # Only the last 9 lines. GitHub keeps at most ten annotations
+            # per step and drops the rest, so emitting forty meant the ten
+            # that survived were the *start* of the diagnostics and the one
+            # line that said what actually went wrong was always discarded.
+            # The script prints its summary last for this reason.
             $output -split "`r?`n" |
               Where-Object { $_.Trim() } |
-              Select-Object -Last 40 |
+              Select-Object -Last 9 |
               ForEach-Object { Write-Host "::error::localdb: $_" }
             throw "the bundled database could not be exercised"
           }
