@@ -181,8 +181,22 @@ jobs:
         # which carries the traceback and the PostgreSQL log the script
         # dumps on failure, is re-emitted so it is readable on the checks
         # page without push access to download the job log.
+        #
+        # --dir, and not the default temporary directory, for a reason that
+        # is specific to this runner rather than to the application. The
+        # job runs elevated, so initdb re-executes itself with a restricted
+        # token, and that token cannot write inside
+        # C:\Users\runneradmin\AppData\Local\Temp — "could not create
+        # directory ... Permission denied". RUNNER_TEMP is outside the user
+        # profile and does not have that problem.
+        #
+        # An installed copy never hits this: it is launched unelevated (the
+        # installer asks for no privileges), so there is no restricted
+        # token, and its data directory is in the user's own profile where
+        # they hold rights directly rather than through a group.
         run: |
-          $output = python scripts/check_local_server.py 2>&1 | Out-String
+          $scratch = Join-Path $env:RUNNER_TEMP "localdb-check"
+          $output = python scripts/check_local_server.py --dir $scratch 2>&1 | Out-String
           Write-Host $output
           if ($LASTEXITCODE -ne 0) {
             # Only the last 9 lines. GitHub keeps at most ten annotations

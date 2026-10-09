@@ -115,9 +115,9 @@ class LocalServerError(AppError):
 def _sanitize(output: str) -> str:
     """Defence in depth before any postgres output reaches a dialog.
 
-    The generated superuser password only ever travels through a temporary
-    --pwfile, so it should not be in here -- but a libpq error can quote a
-    whole connection string, and that one does carry it.
+    The generated password is never on a command line and never on disk, so
+    it should not be in here -- but a libpq error can quote a whole
+    connection string, and that one does carry it.
     """
     redacted = re.sub(r"(?i)(postgres(?:ql)?(?:\+\w+)?://)\S*", r"\1[REDACTED]", output)
     redacted = re.sub(r"(?i)(password\s*=\s*)\S+", r"\1[REDACTED]", redacted)
