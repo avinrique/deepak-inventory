@@ -222,10 +222,39 @@ def _warn_about_unusual_pgdata(pgdata: Path) -> None:
 # -- subprocess ----------------------------------------------------------- #
 def _run(argv: list[str], timeout: int) -> subprocess.CompletedProcess:
     """Every call into the PostgreSQL binaries goes through here, so the
-    no-console flag cannot be forgotten at a new call site."""
+    no-console flag cannot be forgotten at a new call site.
+
+    Output goes to a temporary *file* rather than a pipe, which matters on
+    Windows and is the reason this is not simply capture_output=True.
+    `pg_ctl start` launches a postgres.exe that outlives it, and that
+    grandchild inherits the pipe handles -- so subprocess.run sits waiting
+    for an end-of-file that only arrives when the database server shuts
+    down, i.e. never. A file has no such handshake. (Unix never showed this:
+    pg_ctl there redirects the server to its logfile and detaches.)
+
+    A timeout is returned as an ordinary non-zero result rather than raised.
+    subprocess.TimeoutExpired escaping from here reached the user as a bare
+    traceback, when the callers already know how to turn a failed command
+    into a sentence worth reading.
+    """
     _logger.debug("Running %s", " ".join(argv))
-    return subprocess.run(argv, capture_output=True, text=True, check=False,
-                          timeout=timeout, creationflags=_NO_WINDOW)
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8",
+                                errors="replace") as sink:
+        try:
+            completed = subprocess.run(argv, stdout=sink, stderr=subprocess.STDOUT,
+                                       check=False, timeout=timeout,
+                                       creationflags=_NO_WINDOW)
+            returncode, note = completed.returncode, ""
+        except subprocess.TimeoutExpired:
+            # run() has already killed the child by this point.
+            returncode = 1
+            note = (f"\n{Path(argv[0]).name} did not finish within "
+                    f"{timeout} seconds and was stopped.")
+        sink.seek(0)
+        output = sink.read() + note
+    # Both streams are the same text: they were merged above so that the
+    # ordering between them survives, which matters when reading a failure.
+    return subprocess.CompletedProcess(argv, returncode, stdout=output, stderr=output)
 
 
 def _tail(path: Path, lines: int = 25) -> str:

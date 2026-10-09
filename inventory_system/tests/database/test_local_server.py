@@ -114,11 +114,11 @@ def test_every_subprocess_call_suppresses_the_console_window(staged, monkeypatch
     """The regression this guards: the shipped .exe is built --windowed, so
     Windows gives each child process its own console — a black box flashing
     on screen at every launch, because status() runs every time."""
-    seen: list[int] = []
+    seen: list[dict] = []
 
-    def fake_run(argv, capture_output, text, check, timeout, creationflags):
-        seen.append(creationflags)
-        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+    def fake_run(argv, **kwargs):
+        seen.append(kwargs)
+        return subprocess.CompletedProcess(argv, 0)
 
     monkeypatch.setattr(local_server.subprocess, "run", fake_run)
     (local_server.pgdata_path()).mkdir(parents=True)
@@ -126,7 +126,53 @@ def test_every_subprocess_call_suppresses_the_console_window(staged, monkeypatch
 
     local_server.status()
 
-    assert seen == [local_server._NO_WINDOW]
+    assert [k["creationflags"] for k in seen] == [local_server._NO_WINDOW]
+
+
+def test_output_is_captured_to_a_file_rather_than_a_pipe(staged, monkeypatch):
+    """Not a stylistic choice. pg_ctl start leaves a postgres.exe running
+    that inherits the pipe handles, so subprocess.run waits for an EOF that
+    only comes when the database shuts down — the call hangs until its
+    timeout, every launch, on Windows."""
+    seen: list[dict] = []
+
+    def fake_run(argv, **kwargs):
+        seen.append(kwargs)
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(local_server.subprocess, "run", fake_run)
+    (local_server.pgdata_path()).mkdir(parents=True)
+    (local_server.pgdata_path() / "PG_VERSION").write_text("16\n")
+
+    local_server.status()
+
+    assert "capture_output" not in seen[0], "back on pipes — this will hang"
+    assert seen[0]["stdout"] is not None and hasattr(seen[0]["stdout"], "write")
+    assert seen[0]["stderr"] is subprocess.STDOUT
+
+
+def test_a_command_that_hangs_is_reported_not_raised(staged, monkeypatch):
+    """A TimeoutExpired escaping _run reached the user as a bare traceback.
+    The callers already know how to turn a non-zero result into a readable
+    message, so it is returned as one."""
+    def fake_run(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+    monkeypatch.setattr(local_server.subprocess, "run", fake_run)
+
+    result = local_server._run([str(local_server._binary("pg_ctl")), "status"], timeout=5)
+
+    assert result.returncode != 0
+    assert "did not finish within 5 seconds" in result.stderr
+
+
+def test_a_hung_start_becomes_a_readable_error(staged, monkeypatch):
+    monkeypatch.setattr(local_server.subprocess, "run",
+                        lambda argv, **kw: (_ for _ in ()).throw(
+                            subprocess.TimeoutExpired(argv, kw["timeout"])))
+
+    with pytest.raises(local_server.LocalServerError, match="could not be started"):
+        local_server._start(5432)
 
 
 # -- initdb -------------------------------------------------------------- #
