@@ -178,10 +178,12 @@ def test_a_hung_start_becomes_a_readable_error(staged, monkeypatch):
 # -- initdb -------------------------------------------------------------- #
 
 def test_initdb_argv_pins_encoding_auth_and_locale(staged, calls):
-    local_server._initdb("hunter2")
+    local_server._initdb()
 
     argv = _argv_for(calls, "initdb")
-    assert "--auth=scram-sha-256" in argv
+    # trust, not scram: no password can be supplied at this point (see the
+    # next test). _assign_password closes the gap immediately afterwards.
+    assert "--auth=trust" in argv
     assert argv[argv.index("-E") + 1] == "UTF8"
     # Not the system locale: initdb refuses UTF8 against a non-UTF8 Windows
     # code page, which is most Windows machines.
@@ -190,31 +192,69 @@ def test_initdb_argv_pins_encoding_auth_and_locale(staged, calls):
     assert argv[argv.index("-D") + 1] == str(local_server.pgdata_path())
 
 
-def test_initdb_passes_the_password_by_file_and_deletes_it(staged, calls):
-    """The password must never be an argv element — every process on the
-    machine can read another's command line."""
-    captured = {}
-    real_run = local_server._run
+def test_initdb_never_writes_a_password_file(staged, calls):
+    """--pwfile looks like the obvious way to set the superuser password and
+    does not survive an elevated launch: initdb re-executes itself with a
+    restricted token and can no longer read the file the elevated parent
+    wrote, failing with "Permission denied". This is the regression — it
+    cost several CI rounds to find, and nothing but Windows shows it."""
+    local_server._initdb()
 
-    def spy(argv, timeout):
-        pwfile = argv[argv.index("--pwfile") + 1]
-        captured["path"] = pwfile
-        captured["contents"] = Path(pwfile).read_text(encoding="utf-8")
-        return real_run(argv, timeout)
+    argv = _argv_for(calls, "initdb")
+    assert "--pwfile" not in argv
+    assert not list(local_server.data_dir().glob(".pw-*")), \
+        "a password file was left on disk"
 
-    local_server._run = spy
-    try:
-        local_server._initdb("hunter2")
-    finally:
-        local_server._run = real_run
 
-    assert captured["contents"] == "hunter2"
-    assert "hunter2" not in " ".join(calls[0]["argv"])
-    assert not Path(captured["path"]).exists(), "the password file outlived initdb"
+def test_the_password_is_set_over_the_connection_then_scram_required(staged, monkeypatch):
+    """What replaces --pwfile: the cluster trusts loopback for a moment,
+    gets a real password, and is immediately put back on scram."""
+    reloaded: list[bool] = []
+    statements: list[str] = []
+
+    class _Connection:
+        connection = type("c", (), {"driver_connection": None})()
+
+        def exec_driver_sql(self, statement):
+            statements.append(statement)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+    monkeypatch.setattr(local_server, "create_engine",
+                        lambda *a, **k: type("E", (), {
+                            "connect": lambda self: _Connection(),
+                            "dispose": lambda self: None})())
+    monkeypatch.setattr(local_server, "_reload", lambda: reloaded.append(True))
+    local_server.pgdata_path().mkdir(parents=True)
+
+    password = local_server._assign_password(5432)
+
+    assert password, "no password was generated"
+    # A literal, not a placeholder: ALTER USER is DDL and PostgreSQL rejects
+    # a bind parameter there outright.
+    assert "ALTER USER" in statements[0] and "$1" not in statements[0]
+    hba = (local_server.pgdata_path() / "pg_hba.conf").read_text(encoding="utf-8")
+    assert "scram-sha-256" in hba and "trust" not in hba
+    assert reloaded, "the server was never told to re-read pg_hba.conf"
+
+
+def test_the_hba_file_only_admits_our_role_on_loopback(staged):
+    local_server.pgdata_path().mkdir(parents=True)
+
+    local_server._write_hba("scram-sha-256")
+
+    hba = (local_server.pgdata_path() / "pg_hba.conf").read_text(encoding="utf-8")
+    for line in (l for l in hba.splitlines() if l and not l.startswith("#")):
+        assert local_server.SUPERUSER in line, f"a rule admits more than us: {line}"
+        assert "0.0.0.0" not in line and "::/0" not in line
 
 
 def test_initdb_writes_the_managed_configuration_block(staged, calls):
-    local_server._initdb("hunter2")
+    local_server._initdb()
 
     conf = (local_server.pgdata_path() / "postgresql.conf").read_text(encoding="utf-8")
     # The single line that keeps the database off the network.
@@ -222,7 +262,7 @@ def test_initdb_writes_the_managed_configuration_block(staged, calls):
 
 
 def test_the_managed_block_is_not_appended_twice(staged, calls):
-    local_server._initdb("hunter2")
+    local_server._initdb()
     local_server._write_managed_conf()
 
     conf = (local_server.pgdata_path() / "postgresql.conf").read_text(encoding="utf-8")
@@ -240,7 +280,7 @@ def test_a_failed_initdb_removes_the_half_built_directory(staged, monkeypatch):
     monkeypatch.setattr(local_server, "_run", fake_run)
 
     with pytest.raises(local_server.LocalServerError, match="could not be prepared"):
-        local_server._initdb("hunter2")
+        local_server._initdb()
 
     assert not local_server.pgdata_path().exists()
 
@@ -256,7 +296,7 @@ def test_a_failed_initdb_never_deletes_a_real_cluster(staged, monkeypatch):
                         subprocess.CompletedProcess(argv, 1, stdout="", stderr="boom"))
 
     with pytest.raises(local_server.LocalServerError):
-        local_server._initdb("hunter2")
+        local_server._initdb()
 
     assert (pgdata / "PG_VERSION").is_file()
 
@@ -359,6 +399,7 @@ def test_running_as_administrator_is_not_refused_outright(staged, calls, monkeyp
     session works, so refusing blocked cases that are fine — including every
     Windows CI runner, which is always elevated."""
     monkeypatch.setattr(local_server, "_is_elevated", lambda: True)
+    monkeypatch.setattr(local_server, "_assign_password", lambda port: "generated")
     monkeypatch.setattr(local_server, "_create_database_if_missing",
                         lambda port, password: None)
     monkeypatch.setattr(local_server, "_persist", lambda dsn: None)
@@ -626,6 +667,7 @@ def test_ensure_running_adopts_a_server_that_is_already_up(staged, monkeypatch):
 
     started: list[int] = []
     monkeypatch.setattr(local_server, "status", lambda: "running")
+    monkeypatch.setattr(local_server, "_running_port", lambda: 5432)
     monkeypatch.setattr(local_server, "_start", lambda port: started.append(port))
     monkeypatch.setattr(local_server, "_stored_credentials", lambda: (5432, "hunter2"))
     monkeypatch.setattr(local_server, "_create_database_if_missing",
@@ -636,3 +678,23 @@ def test_ensure_running_adopts_a_server_that_is_already_up(staged, monkeypatch):
 
     assert started == [], "it started a second server over a running one"
     assert ":5432/" in dsn
+
+
+def test_a_running_server_on_another_port_beats_the_saved_one(staged, monkeypatch):
+    """postmaster.pid is written by the server itself, so it is right even
+    when config.json is stale — and connecting to the saved port would
+    reach either nothing or somebody else's database."""
+    pgdata = local_server.pgdata_path()
+    pgdata.mkdir(parents=True)
+    (pgdata / "PG_VERSION").write_text("16\n")
+
+    monkeypatch.setattr(local_server, "status", lambda: "running")
+    monkeypatch.setattr(local_server, "_running_port", lambda: 5439)
+    monkeypatch.setattr(local_server, "_stored_credentials", lambda: (5432, "hunter2"))
+    monkeypatch.setattr(local_server, "_create_database_if_missing",
+                        lambda port, password: None)
+    monkeypatch.setattr(local_server, "_persist", lambda dsn: None)
+
+    dsn = local_server.ensure_running()
+
+    assert ":5439/" in dsn, f"followed the stale saved port instead: {dsn}"

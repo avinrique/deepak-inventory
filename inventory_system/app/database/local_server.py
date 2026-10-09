@@ -31,7 +31,6 @@ Two invariants worth keeping in mind when editing:
 """
 import contextlib
 import logging
-import os
 import re
 import secrets
 import shutil
@@ -378,8 +377,17 @@ def _write_managed_conf() -> None:
     config.write_text(existing + _CONF_BLOCK, encoding="utf-8")
 
 
-def _initdb(password: str) -> None:
+def _initdb() -> None:
     """Creates the cluster. Only ever called when PG_VERSION is absent.
+
+    No password is set here, and no --pwfile. That was the obvious way to
+    do it and it does not survive an elevated launch: when the parent
+    process holds an administrator token, initdb re-executes itself with a
+    *restricted* one, and then cannot read the temporary file the elevated
+    parent just wrote -- "could not open file ... Permission denied".
+    "Run as administrator" is something people really do, so the cluster is
+    created trusting loopback instead and _assign_password() sets a real
+    one over that connection a moment later.
 
     A failure part-way leaves a directory that is neither empty nor a
     cluster, which initdb refuses to touch on the next attempt -- so the
@@ -389,32 +397,22 @@ def _initdb(password: str) -> None:
     pgdata = pgdata_path()
     pgdata.parent.mkdir(parents=True, exist_ok=True)
 
-    # --pwfile is the only non-interactive way to set the superuser
-    # password: initdb otherwise prompts on a terminal this process does not
-    # have, and it reads no environment variable for it.
-    handle, pwfile = tempfile.mkstemp(dir=str(data_dir()), prefix=".pw-")
-    try:
-        with os.fdopen(handle, "w", encoding="utf-8") as stream:
-            stream.write(password)
-        argv = [
-            str(_binary("initdb")),
-            "-D", str(pgdata),
-            "-U", SUPERUSER,
-            "--pwfile", pwfile,
-            "--auth=scram-sha-256",
-            "-E", "UTF8",
-            # Deliberate. With the system locale, initdb on a Windows PC
-            # whose code page is not UTF-8 fails outright ("encoding UTF8
-            # does not match locale"), which is most of them. C always
-            # matches. The cost is that text sorts by byte value, so
-            # ORDER BY puts uppercase before lowercase.
-            "--locale=C",
-            "--no-instructions",
-        ]
-        _logger.info("Initializing a local database cluster at %s", pgdata)
-        result = _run(argv, timeout=_INITDB_TIMEOUT_SECONDS)
-    finally:
-        Path(pwfile).unlink(missing_ok=True)
+    argv = [
+        str(_binary("initdb")),
+        "-D", str(pgdata),
+        "-U", SUPERUSER,
+        "--auth=trust",
+        "-E", "UTF8",
+        # Deliberate. With the system locale, initdb on a Windows PC
+        # whose code page is not UTF-8 fails outright ("encoding UTF8
+        # does not match locale"), which is most of them. C always
+        # matches. The cost is that text sorts by byte value, so
+        # ORDER BY puts uppercase before lowercase.
+        "--locale=C",
+        "--no-instructions",
+    ]
+    _logger.info("Initializing a local database cluster at %s", pgdata)
+    result = _run(argv, timeout=_INITDB_TIMEOUT_SECONDS)
 
     if result.returncode != 0:
         if pgdata.exists() and not (pgdata / "PG_VERSION").is_file():
@@ -425,6 +423,72 @@ def _initdb(password: str) -> None:
             + _elevation_hint())
 
     _write_managed_conf()
+
+
+# -- authentication ------------------------------------------------------ #
+def _write_hba(method: str) -> None:
+    """Replaces pg_hba.conf with the only three rules this cluster needs.
+
+    Rewritten wholesale rather than edited, so the file always says exactly
+    what is in force -- and narrowed to one role on loopback, which is
+    tighter than the "all users, all databases" initdb leaves behind.
+    """
+    (pgdata_path() / "pg_hba.conf").write_text(
+        "# Managed by InventoryManagementSystem. Rewritten on every change;\n"
+        "# edits here are lost. Loopback only -- see postgresql.conf.\n"
+        f"host    all   {SUPERUSER}   127.0.0.1/32   {method}\n"
+        f"host    all   {SUPERUSER}   ::1/128        {method}\n"
+        f"local   all   {SUPERUSER}                  {method}\n",
+        encoding="utf-8")
+
+
+def _reload() -> None:
+    """Makes the server re-read pg_hba.conf, without a restart.
+
+    A restart would drop the connection this is usually called alongside,
+    and reload is all pg_hba.conf needs.
+    """
+    result = _run([str(_binary("pg_ctl")), "reload", "-D", str(pgdata_path())],
+                  timeout=60)
+    if result.returncode != 0:
+        _logger.warning("pg_ctl reload exited %s: %s", result.returncode,
+                        _sanitize(result.stderr))
+
+
+def _assign_password(port: int) -> str:
+    """Gives the superuser a fresh password over a trusted loopback
+    connection, then requires a password from then on.
+
+    This is how the cluster gets its credentials, because --pwfile cannot
+    be relied on (see _initdb). The window in which the server trusts
+    loopback is from the start() that precedes this call to the reload at
+    the end of it -- a fraction of a second, on 127.0.0.1 only, for one
+    role. That is the cost of not having a password file on disk at all.
+    """
+    password = secrets.token_urlsafe(24)
+    engine = create_engine(local_url(port=port, password="", database="postgres"),
+                           future=True, isolation_level="AUTOCOMMIT")
+    try:
+        with engine.connect() as connection:
+            # A literal, not a bind parameter: ALTER USER is DDL and
+            # PostgreSQL rejects a placeholder there ("syntax error at or
+            # near $1"). psycopg's sql.Literal does the quoting.
+            from psycopg import sql
+
+            statement = sql.SQL("ALTER USER {name} WITH PASSWORD {password}").format(
+                name=sql.Identifier(SUPERUSER), password=sql.Literal(password))
+            connection.exec_driver_sql(
+                statement.as_string(connection.connection.driver_connection))
+    except Exception as exc:  # noqa: BLE001 - re-raised with a usable message
+        raise LocalServerError(
+            "The database on this computer started, but its password could "
+            "not be set.\n\n" + _sanitize(str(exc)) + _elevation_hint()) from exc
+    finally:
+        engine.dispose()
+
+    _write_hba("scram-sha-256")
+    _reload()
+    return password
 
 
 # -- ports --------------------------------------------------------------- #
@@ -493,6 +557,25 @@ def _start(port: int) -> None:
         "The database on this computer could not be started.\n\n"
         + (_sanitize(combined) or "pg_ctl gave no reason.")
         + _elevation_hint())
+
+
+def _running_port() -> int | None:
+    """The port a running server is actually listening on, or None.
+
+    Read from postmaster.pid, which the server writes itself, rather than
+    taken from config.json -- the file beside the data is right even when
+    the saved configuration is stale, which is exactly the case where
+    guessing would connect to the wrong place.
+    """
+    if status() != "running":
+        return None
+    try:
+        # Line 4 is the port; see PostgreSQL's miscinit.c.
+        lines = (pgdata_path() / "postmaster.pid").read_text(
+            encoding="utf-8").splitlines()
+        return int(lines[3].strip())
+    except (OSError, IndexError, ValueError):
+        return None
 
 
 def _start_on_a_free_port(port: int) -> int:
@@ -605,8 +688,7 @@ def _stored_credentials() -> tuple[int | None, str | None]:
     identically and the local data sits on disk permanently unreachable.
 
     Returning (None, None) instead routes that case into
-    _reset_superuser_password(), which is exactly the recovery it exists
-    for. A port with no password is no use either -- the port alone cannot
+    _recover_password(), which is exactly the recovery it exists for. A port with no password is no use either -- the port alone cannot
     authenticate -- so both are discarded together.
     """
     if not settings.database_url or not settings.database_managed_locally:
@@ -626,7 +708,7 @@ def _stored_credentials() -> tuple[int | None, str | None]:
     return url.port, url.password
 
 
-def _reset_superuser_password(port: int) -> tuple[int, str]:
+def _recover_password(port: int) -> tuple[int, str]:
     """Gives the cluster a new password when the stored one is gone.
 
     Returns the port it ended up running on, along with the new password.
@@ -637,44 +719,26 @@ def _reset_superuser_password(port: int) -> tuple[int, str]:
     perfectly good database whose generated password nobody knows. Without
     this, the shop's data would be sitting on disk and unreachable.
 
-    pg_hba.conf is switched to trust for the one loopback role, the password
-    is set, and the file is put straight back. The window is a fraction of a
-    second on a port bound to 127.0.0.1, and the alternative is losing the
-    data.
+    Trust is granted, the server reloaded so it takes effect, and
+    _assign_password puts scram back. No restart: reload is all pg_hba.conf
+    needs, and restarting would only widen the window.
     """
-    hba = pgdata_path() / "pg_hba.conf"
-    original = hba.read_text(encoding="utf-8")
-    password = secrets.token_urlsafe(24)
     _logger.warning("The stored password for the local database is missing; "
                     "resetting it so the existing data stays reachable")
-    try:
-        hba.write_text(f"host all {SUPERUSER} 127.0.0.1/32 trust\n"
-                       f"host all {SUPERUSER} ::1/128 trust\n", encoding="utf-8")
+    _write_hba("trust")
+    if status() == "running":
+        _reload()
+    else:
         port = _start_on_a_free_port(port)
-        engine = create_engine(local_url(port=port, password="", database="postgres"),
-                               future=True, isolation_level="AUTOCOMMIT")
-        try:
-            with engine.connect() as connection:
-                # The password has to be a literal, not a bind parameter:
-                # ALTER USER is DDL and PostgreSQL rejects a placeholder
-                # there outright ("syntax error at or near $1"). psycopg's
-                # sql.Literal does the quoting, rather than this trusting
-                # that a generated token happens to contain nothing that
-                # needs escaping.
-                from psycopg import sql
-
-                statement = sql.SQL("ALTER USER {name} WITH PASSWORD {password}").format(
-                    name=sql.Identifier(SUPERUSER), password=sql.Literal(password))
-                connection.exec_driver_sql(
-                    statement.as_string(connection.connection.driver_connection))
-        finally:
-            engine.dispose()
+    try:
+        return port, _assign_password(port)
     finally:
-        hba.write_text(original, encoding="utf-8")
-        # The server has the permissive rules loaded; it must not keep them.
-        stop()
-        reset_stop_guard()
-    return _start_on_a_free_port(port), password
+        # _assign_password restores scram on success. On failure it has not,
+        # and a cluster left trusting loopback is not something to walk away
+        # from, even briefly.
+        if "trust" in (pgdata_path() / "pg_hba.conf").read_text(encoding="utf-8"):
+            _write_hba("scram-sha-256")
+            _reload()
 
 
 # -- the entry point ----------------------------------------------------- #
@@ -722,25 +786,28 @@ def ensure_running() -> str:
 
     with _instance_lock():
         if not is_initialized():
-            password = secrets.token_urlsafe(24)
-            _initdb(password)
+            _initdb()
             port = _start_on_a_free_port(_choose_port())
+            # The cluster currently trusts loopback -- initdb was given no
+            # password to set. This closes that immediately.
+            password = _assign_password(port)
         else:
             _check_version_compatible()
             port, password = _stored_credentials()
-            running = status() == "running"
+            # A server already up decides its own port; the saved one is
+            # only a starting guess for a server that is down.
+            actual = _running_port()
+            if actual is not None:
+                port = actual
+            running = actual is not None
 
             if password is None:
                 # A cluster we have no usable credentials for: the stored
                 # password is gone, or belongs to a different database
                 # entirely. _stored_credentials() discards the port with it,
-                # so a fresh one is chosen here. It cannot be reset while it
-                # is up, and it is unusable until it is reset.
-                if running:
-                    stop()
-                    reset_stop_guard()
-                    running = False
-                port, password = _reset_superuser_password(_choose_port())
+                # so a fresh one is chosen here.
+                port, password = _recover_password(
+                    port if port is not None else _choose_port())
             elif not running:
                 # A port busy while our server is down belongs to something
                 # else, so do not try to take it.

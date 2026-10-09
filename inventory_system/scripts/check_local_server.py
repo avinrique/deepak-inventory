@@ -74,6 +74,29 @@ def _check(root: Path) -> None:
         "the managed configuration block was written more than once"
     print("   listen_addresses = '127.0.0.1'")
 
+    print("\n-- the cluster really does require a password --")
+    # The cluster is created trusting loopback, because initdb cannot be
+    # given a password under an elevated launch, and _assign_password closes
+    # that a moment later. If that ever silently stopped working, the
+    # database would sit open to every process on the machine and nothing
+    # else here would notice -- the app itself would keep working fine.
+    rules = _active_hba_rules(local_server.pgdata_path())
+    leaked = [rule for rule in rules if "trust" in rule.split()]
+    assert not leaked, f"pg_hba.conf still trusts loopback: {leaked}"
+    from sqlalchemy import create_engine as _create_engine
+    probe = _create_engine(
+        local_server.local_url(port=local_server._running_port(), password=""),
+        future=True)
+    try:
+        with probe.connect():
+            raise AssertionError("connected with no password at all")
+    except AssertionError:
+        raise
+    except Exception:
+        print("   a passwordless connection is refused")
+    finally:
+        probe.dispose()
+
     print("\n-- a second call adopts the running server --")
     again = local_server.ensure_running()
     assert again == dsn, f"the DSN changed on the second call: {again}"
