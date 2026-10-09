@@ -10,12 +10,18 @@ A single file, `InventoryManagementSystemSetup-<version>.exe`. It carries
 its own Python runtime, Qt, a complete PostgreSQL server and every library —
 the machine needs none of them installed, and no development environment.
 
-Requirements: 64-bit Windows 10 or 11. Roughly 450 MB of disk for the
-program, plus whatever the database grows to. **No database server and no
-internet connection are required**: the installer brings its own PostgreSQL,
-and the default choice on first run keeps everything on the machine.
-Connecting to an existing server, on the LAN or in the cloud, remains an
-option — it is just no longer a prerequisite.
+Requirements: 64-bit Windows 10 or 11. The installer is about 90 MB to
+download and needs roughly 450 MB of disk, plus whatever the database grows
+to. **No database server and no internet connection are required**: the
+installer brings its own PostgreSQL, and the default choice on first run
+keeps everything on the machine. Connecting to an existing server, on the
+LAN or in the cloud, remains an option — it is just no longer a
+prerequisite.
+
+Carrying the database server costs less than it sounds: about 5 MB on the
+download, because the build already shipped `pg_dump`/`pg_restore` for
+Backup and the server bundle supplies those too rather than duplicating
+them.
 
 ## Producing a build
 

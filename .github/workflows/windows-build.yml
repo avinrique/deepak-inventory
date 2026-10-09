@@ -245,8 +245,14 @@ jobs:
             -Wait -PassThru -NoNewWindow
           if (Test-Path selftest-report.txt) {
             Get-Content selftest-report.txt | ForEach-Object { Write-Host $_ }
+            # -cmatch, case-sensitively: the report's last line is
+            # "N passed, 0 failed", and PowerShell's -match ignores case,
+            # so every *successful* run was posting that summary as an
+            # error annotation. A green build that shows a red annotation
+            # trains people to ignore annotations. Real failures print
+            # "  FAIL  <name>".
             Get-Content selftest-report.txt |
-              Where-Object { $_ -match 'FAIL' } |
+              Where-Object { $_ -cmatch 'FAIL' } |
               ForEach-Object { Write-Host "::error::packaged self-test: $_" }
           } else {
             Write-Host "::error::The packaged executable produced no report at all."
